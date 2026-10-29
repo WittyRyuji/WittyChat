@@ -59,8 +59,13 @@ export function setToken(t: string) {
   else localStorage.removeItem(TOKEN_KEY);
 }
 
+// API base: "" in browser dev (vite proxy), :8080 inside the Wails shell.
+// API 基址：浏览器开发环境走 vite 代理（""），Wails 壳内直连服务端。
+export const API_BASE =
+  location.protocol === "http:" || location.protocol === "https:" ? "" : "http://localhost:8080";
+
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetch(API_BASE + path, {
     method,
     headers: {
       "Content-Type": "application/json",
@@ -105,11 +110,18 @@ export const api = {
       "GET",
       `/api/v1/conversations/${convId}/ops?before=${before}&limit=${limit}`
     ),
-  send: (convId: string, clientMsgId: string, markdown: string, quoteOpSeq?: number) =>
+  send: (
+    convId: string,
+    clientMsgId: string,
+    markdown: string,
+    quoteOpSeq?: number,
+    objectIds?: string[],
+  ) =>
     req<OpEvent>("POST", `/api/v1/conversations/${convId}/messages`, {
       client_msg_id: clientMsgId,
       markdown,
       ...(quoteOpSeq ? { quote_op_seq: quoteOpSeq } : {}),
+      ...(objectIds?.length ? { object_ids: objectIds } : {}),
     }),
   recall: (convId: string, seq: number) =>
     req<OpEvent>("POST", `/api/v1/conversations/${convId}/messages/${seq}/recall`),
@@ -117,11 +129,34 @@ export const api = {
     req("POST", `/api/v1/conversations/${convId}/read`, { op_seq: seq }),
 };
 
+export const api2 = {
+  upload: async (convId: string, file: File) => {
+    const fd = new FormData();
+    fd.append("file", file, file.name);
+    const res = await fetch(`${API_BASE}/api/v1/conversations/${convId}/attachments`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${getToken()}` },
+      body: fd,
+    });
+    if (!res.ok) throw new Error(`upload failed: ${res.status}`);
+    return res.json() as Promise<{ id: string; name: string; size: number; mime: string }>;
+  },
+  downloadURL: (objId: string) => `${API_BASE}/api/v1/objects/${objId}/download`,
+  fetchObject: async (objId: string) => {
+    const res = await fetch(api2.downloadURL(objId), {
+      headers: { Authorization: `Bearer ${getToken()}` },
+    });
+    if (!res.ok) throw new Error("download failed");
+    return res.blob();
+  },
+};
+
 // connectWS opens the notification socket; calls onFrame per frame.
 // Auto-reconnect handled by the caller via onClose.
 export function connectWS(onFrame: (f: WsFrame) => void, onClose: () => void): WebSocket {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${location.host}/ws?token=${getToken()}`);
+  const proto = location.protocol === "https:" || API_BASE.startsWith("https") ? "wss" : "ws";
+  const host = API_BASE ? new URL(API_BASE).host : location.host;
+  const ws = new WebSocket(`${proto}://${host}/ws?token=${getToken()}`);
   ws.onmessage = (ev) => {
     try {
       onFrame(JSON.parse(ev.data));

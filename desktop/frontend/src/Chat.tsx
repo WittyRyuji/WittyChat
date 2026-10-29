@@ -1,6 +1,7 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  api2,
   type ConversationInfo,
   connectWS,
   newClientMsgId,
@@ -11,6 +12,29 @@ import {
 } from "./api";
 
 const MSG_LIMIT = 2000;
+
+interface Attachment {
+  id: string;
+  name: string;
+  size: number;
+  mime: string;
+}
+
+function fmtSize(n: number): string {
+  if (n < 1024) return `${n}B`;
+  if (n < 1 << 20) return `${(n / 1024).toFixed(1)}KB`;
+  return `${(n / (1 << 20)).toFixed(1)}MB`;
+}
+
+async function saveBlob(objId: string, name: string) {
+  const blob = await api2.fetchObject(objId);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 interface ConvState {
   ops: OpEvent[];
@@ -34,6 +58,8 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
   const [pending, setPending] = useState<Pending[]>([]);
   const [text, setText] = useState("");
   const [quote, setQuote] = useState<OpEvent | null>(null);
+  const [files, setFiles] = useState<Attachment[]>([]);
+  const fileInput = useRef<HTMLInputElement>(null);
   const [typing, setTyping] = useState<Record<string, string>>({});
   const [online, setOnline] = useState<Record<string, boolean>>({});
   const [err, setErr] = useState("");
@@ -177,6 +203,7 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
     if (!activeId) return;
     setQuote(null);
     setText("");
+    setFiles([]);
     if (!states[activeId]?.loaded) fetchDelta(activeId);
     const c = convs.find((x) => x.id === activeId);
     if (c && c.last_op_seq > 0) api.markRead(activeId, c.last_op_seq).catch(() => {});
@@ -198,10 +225,24 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
 
   // ---------- send ----------
 
+  const pickFile = async (list: FileList | null) => {
+    if (!list || !activeId) return;
+    for (const f of Array.from(list)) {
+      try {
+        const obj = await api2.upload(activeId, f);
+        setFiles((x) => [...x, { id: obj.id, name: obj.name, size: obj.size, mime: obj.mime }]);
+      } catch {
+        setErr(`上传失败：${f.name}`);
+      }
+    }
+    if (fileInput.current) fileInput.current.value = "";
+  };
+
   const send = async (e?: FormEvent) => {
     e?.preventDefault();
     const md = text.trim();
-    if (!md || !activeId || md.length > MSG_LIMIT) return;
+    if ((!md && files.length === 0) || !activeId || md.length > MSG_LIMIT) return;
+    const objIds = files.map((f) => f.id);
     const p: Pending = {
       id: newClientMsgId(),
       convId: activeId,
@@ -211,8 +252,9 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
     setPending((x) => [...x, p]);
     setText("");
     setQuote(null);
+    setFiles([]);
     try {
-      const op = await api.send(activeId, p.id, md, p.quoteSeq);
+      const op = await api.send(activeId, p.id, md, p.quoteSeq, objIds);
       setPending((x) => x.filter((y) => y.id !== p.id));
       setStates((prev) => {
         const c = prev[activeId] ?? { ops: [], watermark: 0, hasOlder: true, loaded: true };
@@ -350,6 +392,22 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
                     <div className={`msg-body ${o.recalled ? "recalled" : ""}`}>
                       {o.recalled ? "消息已撤回" : o.body}
                     </div>
+                    {!o.recalled && Array.isArray(o.payload?.attachments) && (
+                      <div className="atts">
+                        {(o.payload?.attachments as Attachment[]).map((a) => (
+                          <button
+                            type="button"
+                            key={a.id}
+                            className="att"
+                            title="下载"
+                            onClick={() => saveBlob(a.id, a.name)}
+                          >
+                            📎 {a.name}
+                            <span className="att-size">{fmtSize(a.size)}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
                     {!o.recalled && (
                       <div className="msg-tools">
                         <button type="button" className="ghost" onClick={() => setQuote(o)}>
@@ -380,7 +438,30 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
                 </button>
               </div>
             )}
+            {files.length > 0 && (
+              <div className="file-chips">
+                {files.map((f) => (
+                  <span key={f.id} className="chip">
+                    📎 {f.name} <em>{fmtSize(f.size)}</em>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => setFiles((x) => x.filter((y) => y.id !== f.id))}
+                    >
+                      ✕
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             <form className="composer" onSubmit={send}>
+              <input
+                ref={fileInput}
+                type="file"
+                multiple
+                hidden
+                onChange={(e) => pickFile(e.target.files)}
+              />
               <textarea
                 value={text}
                 onChange={(e) => setText(e.target.value)}
@@ -394,10 +475,21 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
                 rows={Math.min(6, Math.max(1, text.split("\n").length))}
               />
               <div className="composer-foot">
+                <button
+                  type="button"
+                  className="ghost attach-btn"
+                  title="发送附件"
+                  onClick={() => fileInput.current?.click()}
+                >
+                  📎
+                </button>
                 <span className={`count ${text.length > MSG_LIMIT ? "over" : ""}`}>
                   {text.length}/{MSG_LIMIT}
                 </span>
-                <button type="submit" disabled={!text.trim() || text.length > MSG_LIMIT}>
+                <button
+                  type="submit"
+                  disabled={(!text.trim() && files.length === 0) || text.length > MSG_LIMIT}
+                >
                   发送
                 </button>
               </div>

@@ -82,9 +82,10 @@ type CreateGroupRequest struct {
 
 type SendMessageRequest struct {
 	ClientMsgID string   `json:"client_msg_id" required:"true" format:"uuid"`
-	Markdown    string   `json:"markdown" required:"true" minLength:"1" maxLength:"5000"`
+	Markdown    string   `json:"markdown" required:"true" minLength:"0" maxLength:"5000"` // may be "" when object_ids present
 	QuoteOpSeq  int64    `json:"quote_op_seq,omitempty"`
 	Mentions    []string `json:"mentions,omitempty" maxItems:"50"`
+	ObjectIDs   []string `json:"object_ids,omitempty" maxItems:"20"` // attachments / 附件
 }
 
 type EditMessageRequest struct {

@@ -13,6 +13,7 @@ import (
 	"wittychat/core/audit"
 	"wittychat/core/auth"
 	"wittychat/core/im"
+	"wittychat/core/objects"
 	"wittychat/server/realtime"
 	"wittychat/shared/apitypes"
 
@@ -33,6 +34,7 @@ type Deps struct {
 	PublicURL string // e.g. https://im.example.com — used to build activation URLs
 	IM        *im.Store
 	Hub       *realtime.Hub
+	Objects   *objects.Store
 }
 
 // New builds the root handler: API routes + HTML pages + healthz.
@@ -45,6 +47,7 @@ func New(d *Deps) http.Handler {
 	registerIM(api, d)
 	registerPages(mux, d)
 	registerWS(mux, d)
+	registerObjects(mux, d)
 
 	// Typing fan-out: hub asks im for the member list lazily.
 	// 输入中扇出：hub 按需向 im 要成员列表。

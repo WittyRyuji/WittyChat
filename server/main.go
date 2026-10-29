@@ -21,6 +21,7 @@ import (
 	"wittychat/core/db"
 	"wittychat/core/im"
 	"wittychat/core/migrations"
+	"wittychat/core/objects"
 	"wittychat/server/httpapi"
 	"wittychat/server/realtime"
 
@@ -88,6 +89,10 @@ func cmdServe() {
 	}
 
 	imStore := im.NewStore(pool)
+	objStore, err := objects.NewStore(pool, envOr("WITTYCHAT_DATA_DIR", "./data"))
+	if err != nil {
+		log.Fatalf("objects: %v", err)
+	}
 	d := &httpapi.Deps{
 		Pool:      pool,
 		Store:     auth.NewStore(pool),
@@ -98,6 +103,7 @@ func cmdServe() {
 		PublicURL: publicURL(),
 		IM:        imStore,
 		Hub:       realtime.NewHub(imStore.IsMember),
+		Objects:   objStore,
 	}
 
 	addr := envOr("WITTYCHAT_ADDR", ":8080")

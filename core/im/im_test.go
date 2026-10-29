@@ -72,11 +72,11 @@ func TestDMDedupAndMessaging(t *testing.T) {
 
 	// Send → op_seq 1; idempotent resend returns same op.
 	msgID := uuid.Must(uuid.NewV7())
-	op1, dup, err := s.SendMessage(ctx, a, c1.ID, msgID, "hello **world**", 0, nil)
+	op1, dup, err := s.SendMessage(ctx, a, c1.ID, msgID, "hello **world**", 0, nil, nil)
 	if err != nil || dup {
 		t.Fatalf("send: %v dup=%v", err, dup)
 	}
-	op2, dup2, err := s.SendMessage(ctx, a, c1.ID, msgID, "hello **world**", 0, nil)
+	op2, dup2, err := s.SendMessage(ctx, a, c1.ID, msgID, "hello **world**", 0, nil, nil)
 	if err != nil || !dup2 || op2.Seq != op1.Seq {
 		t.Fatalf("idempotent resend: dup=%v seq %d vs %d", dup2, op2.Seq, op1.Seq)
 	}
@@ -85,7 +85,7 @@ func TestDMDedupAndMessaging(t *testing.T) {
 	}
 
 	// op_seq continuity.
-	opB, _, _ := s.SendMessage(ctx, b, c1.ID, uuid.Must(uuid.NewV7()), "reply", 0, nil)
+	opB, _, _ := s.SendMessage(ctx, b, c1.ID, uuid.Must(uuid.NewV7()), "reply", 0, nil, nil)
 	if opB.Seq != 2 {
 		t.Fatalf("second op seq = %d, want 2", opB.Seq)
 	}
@@ -105,7 +105,7 @@ func TestDMDedupAndMessaging(t *testing.T) {
 	if _, _, _, err := s.FetchOpsAfter(ctx, stranger, c1.ID, 0, 10); !errors.Is(err, ErrNotMember) {
 		t.Fatalf("stranger read: want ErrNotMember, got %v", err)
 	}
-	if _, _, err := s.SendMessage(ctx, stranger, c1.ID, uuid.Must(uuid.NewV7()), "x", 0, nil); !errors.Is(err, ErrNotMember) {
+	if _, _, err := s.SendMessage(ctx, stranger, c1.ID, uuid.Must(uuid.NewV7()), "x", 0, nil, nil); !errors.Is(err, ErrNotMember) {
 		t.Fatalf("stranger send: want ErrNotMember, got %v", err)
 	}
 }
@@ -115,7 +115,7 @@ func TestEditRecallEffectiveView(t *testing.T) {
 	a, b := mk(uniqEmail()), mk(uniqEmail())
 	c, _ := s.CreateDM(ctx, a, b)
 
-	msg, _, _ := s.SendMessage(ctx, a, c.ID, uuid.Must(uuid.NewV7()), "original", 0, nil)
+	msg, _, _ := s.SendMessage(ctx, a, c.ID, uuid.Must(uuid.NewV7()), "original", 0, nil, nil)
 
 	// Edit by author works; other member cannot edit.
 	if _, err := s.EditMessage(ctx, a, c.ID, msg.Seq, "edited text"); err != nil {
@@ -177,7 +177,7 @@ func TestGroupMembersAndRead(t *testing.T) {
 	}
 
 	// Directory: m2 sees the group with unread.
-	if _, _, err := s.SendMessage(ctx, owner, g.ID, uuid.Must(uuid.NewV7()), "welcome", 0, nil); err != nil {
+	if _, _, err := s.SendMessage(ctx, owner, g.ID, uuid.Must(uuid.NewV7()), "welcome", 0, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	dir, err := s.Directory(ctx, m2)

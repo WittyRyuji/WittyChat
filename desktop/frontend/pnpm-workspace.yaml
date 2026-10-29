@@ -1,0 +1,6 @@
+packages:
+  - "."
+# pnpm 12: onlyBuiltDependencies was merged into allowBuilds.
+# pnpm 12 起 onlyBuiltDependencies 并入 allowBuilds。
+allowBuilds:
+  esbuild: true

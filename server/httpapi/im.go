@@ -133,6 +133,34 @@ func imErr(err error) error {
 	}
 }
 
+// enrichAttachments replaces bare object-id strings in payload.attachments
+// with {id,name,size,mime} maps resolved via attachment_refs.
+// 用 attachment_refs 把 payload.attachments 的裸 id 换成 {id,name,size,mime}。
+func (d *Deps) enrichAttachments(ctx context.Context, convID uuid.UUID, events []*apitypes.OpEvent) {
+	if d.Objects == nil {
+		return
+	}
+	for _, e := range events {
+		if e.Kind != apitypes.OpMessage {
+			continue
+		}
+		if _, has := e.Payload["attachments"]; !has {
+			continue
+		}
+		objs, err := d.Objects.AttachmentsOf(ctx, convID, e.OpSeq)
+		if err != nil || len(objs) == 0 {
+			continue
+		}
+		list := make([]map[string]any, 0, len(objs))
+		for _, o := range objs {
+			list = append(list, map[string]any{
+				"id": o.ID.String(), "name": o.Name, "size": o.Size, "mime": o.Mime,
+			})
+		}
+		e.Payload["attachments"] = list
+	}
+}
+
 // notifyMembers pushes a conv_update to all online members except the actor.
 func (d *Deps) notifyMembers(ctx context.Context, convID uuid.UUID, seq int64, actor uuid.UUID) {
 	if d.Hub == nil {
@@ -258,6 +286,7 @@ func (d *Deps) fetchOps(ctx context.Context, in *struct {
 			out.Body.Ops = append(out.Body.Ops, opEvent(o))
 		}
 		out.Body.HasMore = hasMore
+		d.enrichAttachments(ctx, convID, out.Body.Ops)
 		return out, nil
 	}
 	var after int64
@@ -273,6 +302,7 @@ func (d *Deps) fetchOps(ctx context.Context, in *struct {
 	}
 	out.Body.HasMore = hasMore
 	out.Body.LatestSeq = latest
+	d.enrichAttachments(ctx, convID, out.Body.Ops)
 	return out, nil
 }
 
@@ -299,6 +329,9 @@ func (d *Deps) sendMessage(ctx context.Context, in *struct {
 	if int64(len([]rune(in.Body.Markdown))) > msgLimit {
 		return nil, huma.Error400BadRequest("message exceeds limit / 消息超长")
 	}
+	if in.Body.Markdown == "" && len(in.Body.ObjectIDs) == 0 {
+		return nil, huma.Error400BadRequest("empty message / 空消息")
+	}
 	clientMsgID, err := uuid.Parse(in.Body.ClientMsgID)
 	if err != nil {
 		return nil, huma.Error400BadRequest("bad client_msg_id")
@@ -309,22 +342,33 @@ func (d *Deps) sendMessage(ctx context.Context, in *struct {
 			mentions = append(mentions, id)
 		}
 	}
+	var objIDs []uuid.UUID
+	for _, s := range in.Body.ObjectIDs {
+		if id, err := uuid.Parse(s); err == nil {
+			objIDs = append(objIDs, id)
+		}
+	}
 	op, existed, err := d.IM.SendMessage(ctx, u.ID, convID, clientMsgID,
-		in.Body.Markdown, in.Body.QuoteOpSeq, mentions)
+		in.Body.Markdown, in.Body.QuoteOpSeq, mentions, objIDs)
 	if err != nil {
 		return nil, imErr(err)
 	}
 	if !existed {
+		if len(objIDs) > 0 {
+			_ = d.Objects.LinkAttachments(ctx, convID, op.Seq, objIDs)
+		}
 		d.notifyMembers(ctx, convID, op.Seq, u.ID)
 	}
 	status := http.StatusOK
 	if !existed {
 		status = http.StatusCreated
 	}
+	event := opEvent(op)
+	d.enrichAttachments(ctx, convID, []*apitypes.OpEvent{event})
 	return &struct {
 		Body   apitypes.OpEvent
 		Status int
-	}{Body: *opEvent(op), Status: status}, nil
+	}{Body: *event, Status: status}, nil
 }
 
 func (d *Deps) editMessage(ctx context.Context, in *struct {

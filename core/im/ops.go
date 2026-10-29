@@ -67,7 +67,7 @@ func nilIfEmpty(s string) any {
 // SendMessage appends a message op; idempotent on client_msg_id.
 // Returns (op, alreadyExisted, error). Sets sender read watermark to the new seq.
 func (s *Store) SendMessage(ctx context.Context, sender, convID uuid.UUID,
-	clientMsgID uuid.UUID, markdown string, quoteOpSeq int64, mentions []uuid.UUID,
+	clientMsgID uuid.UUID, markdown string, quoteOpSeq int64, mentions, objectIDs []uuid.UUID,
 ) (*Op, bool, error) {
 	if len([]rune(markdown)) > MaxMessageLen {
 		return nil, false, ErrMessageTooLong
@@ -83,13 +83,27 @@ func (s *Store) SendMessage(ctx context.Context, sender, convID uuid.UUID,
 		}
 		payload["mentions"] = ids
 	}
+	if len(objectIDs) > 0 {
+		ids := make([]string, len(objectIDs))
+		for i, o := range objectIDs {
+			ids[i] = o.String()
+		}
+		payload["attachments"] = ids
+	}
+
+	// Attachment-only message gets a placeholder body for preview/search.
+	// 纯附件消息补一个占位正文用于预览与搜索。
+	body := markdown
+	if body == "" && len(objectIDs) > 0 {
+		body = "[附件]"
+	}
 
 	var op *Op
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, _, err := s.requireMember(ctx, tx, convID, sender); err != nil {
 			return err
 		}
-		seq, err := s.appendOpTx(ctx, tx, convID, sender, OpMessage, &clientMsgID, 0, markdown, payload)
+		seq, err := s.appendOpTx(ctx, tx, convID, sender, OpMessage, &clientMsgID, 0, body, payload)
 		if err != nil {
 			return err
 		}
@@ -101,7 +115,7 @@ func (s *Store) SendMessage(ctx context.Context, sender, convID uuid.UUID,
 		}
 		op = &Op{
 			Seq: seq, ConvID: convID, Kind: OpMessage, ActorID: &sender,
-			Body: markdown, Payload: payload, ClientMsg: &clientMsgID, CreatedAt: time.Now(),
+			Body: body, Payload: payload, ClientMsg: &clientMsgID, CreatedAt: time.Now(),
 		}
 		return nil
 	})
