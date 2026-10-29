@@ -108,6 +108,9 @@ func opEvent(o *im.Op) *apitypes.OpEvent {
 	if o.ActorID != nil {
 		e.ActorID = o.ActorID.String()
 	}
+	if o.ClientMsg != nil {
+		e.ClientMsg = o.ClientMsg.String()
+	}
 	return e
 }
 

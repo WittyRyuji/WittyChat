@@ -52,6 +52,7 @@ type OpEvent struct {
 	Kind      string         `json:"kind"`
 	ActorID   string         `json:"actor_id,omitempty"`
 	ActorName string         `json:"actor_name,omitempty"`
+	ClientMsg string         `json:"client_msg_id,omitempty"`
 	TargetSeq int64          `json:"target_seq,omitempty"`
 	Body      string         `json:"body,omitempty"`
 	Payload   map[string]any `json:"payload,omitempty"`
