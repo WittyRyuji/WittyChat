@@ -19,8 +19,10 @@ import (
 	"wittychat/core/audit"
 	"wittychat/core/auth"
 	"wittychat/core/db"
+	"wittychat/core/im"
 	"wittychat/core/migrations"
 	"wittychat/server/httpapi"
+	"wittychat/server/realtime"
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
@@ -85,6 +87,7 @@ func cmdServe() {
 		log.Println("WARN: WITTYCHAT_SECRET_KEY not set — ephemeral dev key in use; sealed secrets die on restart")
 	}
 
+	imStore := im.NewStore(pool)
 	d := &httpapi.Deps{
 		Pool:      pool,
 		Store:     auth.NewStore(pool),
@@ -93,6 +96,8 @@ func cmdServe() {
 		SecretKey: key,
 		Issuer:    envOr("WITTYCHAT_ISSUER", "WittyChat"),
 		PublicURL: publicURL(),
+		IM:        imStore,
+		Hub:       realtime.NewHub(imStore.IsMember),
 	}
 
 	addr := envOr("WITTYCHAT_ADDR", ":8080")

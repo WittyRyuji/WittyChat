@@ -12,10 +12,13 @@ import (
 	"strings"
 	"wittychat/core/audit"
 	"wittychat/core/auth"
+	"wittychat/core/im"
+	"wittychat/server/realtime"
 	"wittychat/shared/apitypes"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -28,6 +31,8 @@ type Deps struct {
 	SecretKey []byte
 	Issuer    string // TOTP issuer / 工作区名
 	PublicURL string // e.g. https://im.example.com — used to build activation URLs
+	IM        *im.Store
+	Hub       *realtime.Hub
 }
 
 // New builds the root handler: API routes + HTML pages + healthz.
@@ -37,7 +42,20 @@ func New(d *Deps) http.Handler {
 
 	registerAuth(api, d)
 	registerAdmin(api, d)
+	registerIM(api, d)
 	registerPages(mux, d)
+	registerWS(mux, d)
+
+	// Typing fan-out: hub asks im for the member list lazily.
+	// 输入中扇出：hub 按需向 im 要成员列表。
+	if d.Hub != nil && d.IM != nil {
+		d.Hub.SetTypingSink(func(convID, from uuid.UUID, name string) {
+			ids, err := d.IM.MemberIDs(context.Background(), convID)
+			if err == nil {
+				d.Hub.Typing(ids, convID, from, name)
+			}
+		})
+	}
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
