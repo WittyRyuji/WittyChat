@@ -1,0 +1,47 @@
+# WittyChat CI — lint / test / build.
+# NOTE: image tags get pinned to exact versions on first green run.
+# 首次跑绿后把镜像 tag 锁到具体版本。
+
+stages:
+  - lint
+  - test
+  - build
+
+lint-go:
+  stage: lint
+  image: golangci/golangci-lint:latest
+  script:
+    - golangci-lint run ./...
+
+lint-frontend:
+  stage: lint
+  image: node:24
+  rules:
+    - changes:
+        - desktop/frontend/**/*
+  script:
+    - corepack enable
+    - cd desktop/frontend && pnpm install --frozen-lockfile && pnpm exec biome ci .
+
+test-go:
+  stage: test
+  image: golang:1.27
+  services:
+    - postgres:17-alpine
+  variables:
+    POSTGRES_USER: wittychat
+    POSTGRES_PASSWORD: wittychat
+    POSTGRES_DB: wittychat
+    WITTYCHAT_DB_URL: postgres://wittychat:wittychat@postgres:5432/wittychat?sslmode=disable
+  script:
+    - go test ./...
+
+build-go:
+  stage: build
+  image: golang:1.27
+  script:
+    - go build -o bin/ ./server ./worker
+  artifacts:
+    paths:
+      - bin/
+    expire_in: 1 week

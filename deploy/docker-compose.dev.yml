@@ -1,0 +1,21 @@
+# Dev-only dependencies. Production compose lands with deployment work.
+# 开发环境依赖。生产 compose 随部署工作再出。
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: wittychat
+      POSTGRES_PASSWORD: wittychat
+      POSTGRES_DB: wittychat
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wittychat"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

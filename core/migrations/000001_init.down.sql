@@ -1,0 +1,16 @@
+DROP TABLE IF EXISTS global_events;
+DROP TABLE IF EXISTS workspace_settings;
+DROP TABLE IF EXISTS assistants;
+DROP TABLE IF EXISTS audit_events;
+DROP TABLE IF EXISTS bg_tasks;
+DROP TABLE IF EXISTS attachment_refs;
+DROP TABLE IF EXISTS object_segments;
+DROP TABLE IF EXISTS objects;
+DROP TABLE IF EXISTS conv_ops;
+DROP TABLE IF EXISTS conv_members;
+DROP TABLE IF EXISTS conversations;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS activation_links;
+DROP TABLE IF EXISTS credentials;
+DROP TABLE IF EXISTS users;
+DROP EXTENSION IF EXISTS citext;

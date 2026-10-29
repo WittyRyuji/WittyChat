@@ -1,11 +1,36 @@
-.venv/
-__pycache__/
-*.py[cod]
-*.egg-info/
-build/
-dist/
-.pytest_cache/
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Env / secrets
 .env
+*.local
+
+# Go
+*.exe
+*.test
+*.out
+/vendor/
+
+# Node / frontend
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# Local data
 data/
 *.db
 *.sqlite3
+*.sqlite3-*
+
+# Logs
+*.log
+
+# wails / task
+.task
+bin/
+desktop/frontend/bindings/

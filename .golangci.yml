@@ -1,0 +1,53 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - depguard
+    - gosec
+  settings:
+    depguard:
+      # 依赖边界：desktop→shared；server/worker→core+shared；shared 无项目内依赖。
+      # Dependency boundary: desktop→shared; server/worker→core+shared; shared→nothing.
+      rules:
+        desktop:
+          files:
+            - "**/desktop/**"
+          deny:
+            - pkg: "wittychat/server"
+              desc: "desktop may only depend on wittychat/shared / desktop 只许依赖 wittychat/shared"
+            - pkg: "wittychat/worker"
+              desc: "desktop may only depend on wittychat/shared / desktop 只许依赖 wittychat/shared"
+            - pkg: "wittychat/core"
+              desc: "desktop may only depend on wittychat/shared / desktop 只许依赖 wittychat/shared"
+        server:
+          files:
+            - "**/server/**"
+          deny:
+            - pkg: "wittychat/desktop"
+            - pkg: "wittychat/worker"
+        worker:
+          files:
+            - "**/worker/**"
+          deny:
+            - pkg: "wittychat/server"
+            - pkg: "wittychat/desktop"
+        core:
+          files:
+            - "**/core/**"
+          deny:
+            - pkg: "wittychat/server"
+            - pkg: "wittychat/worker"
+            - pkg: "wittychat/desktop"
+        shared:
+          files:
+            - "**/shared/**"
+          deny:
+            - pkg: "wittychat/server"
+            - pkg: "wittychat/worker"
+            - pkg: "wittychat/desktop"
+            - pkg: "wittychat/core"
+
+formatters:
+  enable:
+    - gofumpt
