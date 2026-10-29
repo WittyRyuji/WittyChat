@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>用户</h1>
+<p class="muted">用户来自企业身份中心（首次登录或通讯录同步时创建）。停用会立即注销该用户所有会话并断开连接。</p>
+<table>
+  <thead><tr><th>用户名</th><th>显示名</th><th>邮箱</th><th>来源</th><th>角色</th><th>状态</th><th>最近登录</th><th></th></tr></thead>
+  <tbody>
+  {% for u in users %}
+  <tr class="{{ 'inactive' if not u.is_active }}">
+    <td>{{ u.username }}</td>
+    <td>{{ u.display_name }}</td>
+    <td>{{ u.email or "" }}</td>
+    <td>{{ providers.get(u.id, [])|join(", ") }}</td>
+    <td>{% if u.is_admin %}<span class="tag">管理员</span>{% endif %}</td>
+    <td>{{ "正常" if u.is_active else "已停用" }}</td>
+    <td>{{ u.last_login_at.strftime("%Y-%m-%d %H:%M") if u.last_login_at else "从未" }}</td>
+    <td class="actions">
+      {% if u.id != admin.id %}
+      <form method="post" action="/admin/users/{{ u.id }}/active">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="link">{{ "停用" if u.is_active else "启用" }}</button>
+      </form>
+      <form method="post" action="/admin/users/{{ u.id }}/admin">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="link">{{ "取消管理员" if u.is_admin else "设为管理员" }}</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>频道</h1>
+<p class="muted">归档后频道只读，历史消息永久保留。私聊内容不在后台展示。</p>
+<table>
+  <thead><tr><th>名称</th><th>类型</th><th>成员</th><th>消息数</th><th>最近活动</th><th>状态</th><th></th></tr></thead>
+  <tbody>
+  {% for channel, members in rows %}
+  <tr class="{{ 'inactive' if channel.archived_at }}">
+    <td># {{ channel.name }}</td>
+    <td>{{ "公开" if channel.type == "public" else "私有" }}</td>
+    <td>{{ members }}</td>
+    <td>{{ channel.last_seq }}</td>
+    <td>{{ channel.last_message_at.strftime("%Y-%m-%d %H:%M") if channel.last_message_at else "-" }}</td>
+    <td>{{ "已归档" if channel.archived_at else "正常" }}</td>
+    <td class="actions">
+      <form method="post" action="/admin/channels/{{ channel.id }}/archive">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="link">{{ "取消归档" if channel.archived_at else "归档" }}</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="7" class="muted">还没有频道</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

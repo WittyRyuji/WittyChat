@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>系统设置</h1>
+<p class="muted">以下配置来自服务器环境变量（WITTYCHAT_*），修改后重启服务生效。</p>
+
+<section class="card">
+  <h2>实例</h2>
+  <dl>
+    <dt>访问地址</dt><dd>{{ settings.public_url }}</dd>
+    <dt>实例 ID</dt><dd><code>{{ instance_id }}</code></dd>
+    <dt>实时推送</dt><dd>{{ "PostgreSQL LISTEN/NOTIFY（多进程）" if settings.use_pg_broadcast else "进程内（单进程）" }}</dd>
+    <dt>本进程连接数</dt><dd>{{ connections }}</dd>
+    <dt>开发模式登录</dt><dd>{% if settings.dev_login %}<span class="error">已开启（生产环境必须关闭）</span>{% else %}关闭{% endif %}</dd>
+  </dl>
+</section>
+
+<section class="card">
+  <h2>身份认证（OIDC）</h2>
+  {% if settings.oidc_enabled %}
+  <dl>
+    <dt>Issuer</dt><dd>{{ settings.oidc_issuer }}</dd>
+    <dt>Client ID</dt><dd>{{ settings.oidc_client_id }}</dd>
+    <dt>客户端类型</dt><dd>{{ "Confidential（服务端持有密钥）" if settings.oidc_client_secret else "Public（PKCE）" }}</dd>
+    <dt>Scopes</dt><dd>{{ settings.oidc_scopes }}</dd>
+    <dt>管理员组</dt><dd>{{ settings.admin_groups|join(", ") or "未配置（首个登录用户自动成为管理员）" }}</dd>
+    <dt>允许登录的组</dt><dd>{{ settings.allowed_groups|join(", ") or "不限制" }}</dd>
+    <dt>通讯录同步</dt><dd>{{ "每 %d 秒" % settings.directory_sync_interval if settings.pocketid_api_key else "未开启（未配置 API Key）" }}</dd>
+    <dt>需要登记的回调地址</dt><dd><code>http://127.0.0.1/callback</code>（桌面端）<br><code>{{ settings.public_url.rstrip('/') }}/admin/auth/callback</code>（管理后台）</dd>
+  </dl>
+  {% else %}
+  <p class="error">未配置 OIDC。</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>文件存储</h2>
+  <dl>
+    {% for key, value in storage.items() %}<dt>{{ key }}</dt><dd>{{ value }}</dd>{% endfor %}
+    <dt>单文件上限</dt><dd>{{ settings.max_upload_mb }} MB</dd>
+  </dl>
+</section>
+{% endblock %}
