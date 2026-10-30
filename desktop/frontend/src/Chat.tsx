@@ -175,6 +175,17 @@ export function Chat({
   const [searchQ, setSearchQ] = useState("");
   const [searchHits, setSearchHits] = useState<MessageSearchHit[] | null>(null);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [emojiTab, setEmojiTab] = useState<"emoji" | "stk">("emoji");
+  const stickerInput = useRef<HTMLInputElement>(null);
+  // Custom sticker shelf — per-device (same precedent as mail trust prefs);
+  // each entry is an uploaded object, so any device can render it once synced.
+  const [stickers, setStickers] = useState<{ id: string; name: string; mime: string }[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("wittychat.stickers") ?? "[]");
+    } catch {
+      return [];
+    }
+  });
   const taRef = useRef<HTMLTextAreaElement>(null);
   const caretRef = useRef(0); // last textarea caret — emoji inserts land there
 
@@ -513,6 +524,49 @@ export function Chat({
     });
   };
 
+  // ---------- custom stickers (GIF/图片表情) ----------
+
+  const saveStickers = (nx: { id: string; name: string; mime: string }[]) => {
+    setStickers(nx);
+    localStorage.setItem("wittychat.stickers", JSON.stringify(nx));
+  };
+
+  const addSticker = async (f: File | undefined) => {
+    if (!f) return;
+    try {
+      const o = await api2.uploadObject(f, "sticker");
+      saveStickers([{ id: o.id, name: f.name, mime: o.mime || f.type }, ...stickers].slice(0, 60));
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : "sticker upload failed");
+    }
+  };
+
+  const delSticker = (id: string) => saveStickers(stickers.filter((x) => x.id !== id));
+
+  // Send a sticker as a single-image message — reuses the whole attachment
+  // pipeline (thumbnails, ACL, preview "[图片]").
+  const sendSticker = async (id: string) => {
+    setEmojiOpen(false);
+    try {
+      const op = await api.send(activeId, newClientMsgId(), "", 0, [id]);
+      setStates((prev) => {
+        const c = prev[activeId] ?? { ops: [], watermark: 0, hasOlder: true, loaded: true };
+        if (c.ops.some((o) => o.op_seq === op.op_seq)) return prev;
+        return {
+          ...prev,
+          [activeId]: {
+            ...c,
+            ops: [...c.ops, op].sort((a, b) => a.op_seq - b.op_seq),
+            watermark: Math.max(c.watermark, op.op_seq),
+          },
+        };
+      });
+      refreshDirectory();
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : "sticker send failed");
+    }
+  };
+
   const convTitle = (c: ConversationInfo) =>
     c.kind === "dm" ? c.peer_name || "私聊" : c.title || "群聊";
 
@@ -711,7 +765,11 @@ export function Chat({
                           </div>
                         )}
                         {!o.recalled && atts.length > 0 && (
-                          <div className="atts">
+                          <div
+                            className={`atts${
+                              atts.length === 1 && isPlaceholder ? " stk-msg" : ""
+                            }`}
+                          >
                             {atts.map((a) =>
                               a.mime?.startsWith("image/") ? (
                                 <button
@@ -724,7 +782,11 @@ export function Chat({
                                   }
                                 >
                                   <img
-                                    src={api2.thumbURL(a.id)}
+                                    src={
+                                      a.mime === "image/gif"
+                                        ? api2.downloadURL(a.id)
+                                        : api2.thumbURL(a.id)
+                                    }
                                     alt={a.name}
                                     loading="lazy"
                                     onError={(e) => {
@@ -761,23 +823,25 @@ export function Chat({
                           />
                         )}
                         {!o.recalled && (
-                          <div className="rx-zone">
-                            {rxGroupsOf(o).map((r) => (
-                              <button
-                                type="button"
-                                key={r.emoji}
-                                className={`rx-pill${
-                                  r.users.some((u) => u.id === me.id) ? " mine" : ""
-                                }`}
-                                title={r.users.map((u) => u.name).join("、")}
-                                onClick={() => reactEmoji(o, r.emoji)}
-                              >
-                                {r.emoji}
-                                {r.users.length > 1 && (
-                                  <span className="rx-n">{r.users.length}</span>
-                                )}
-                              </button>
-                            ))}
+                          <>
+                            <div className="rx-zone">
+                              {rxGroupsOf(o).map((r) => (
+                                <button
+                                  type="button"
+                                  key={r.emoji}
+                                  className={`rx-pill${
+                                    r.users.some((u) => u.id === me.id) ? " mine" : ""
+                                  }`}
+                                  title={r.users.map((u) => u.name).join("、")}
+                                  onClick={() => reactEmoji(o, r.emoji)}
+                                >
+                                  {r.emoji}
+                                  {r.users.length > 1 && (
+                                    <span className="rx-n">{r.users.length}</span>
+                                  )}
+                                </button>
+                              ))}
+                            </div>
                             <button
                               type="button"
                               className="rx-add"
@@ -786,7 +850,7 @@ export function Chat({
                             >
                               👍
                             </button>
-                          </div>
+                          </>
                         )}
                       </div>
                       {!o.recalled && (
@@ -847,6 +911,16 @@ export function Chat({
                   hidden
                   onChange={(e) => pickFile(e.target.files)}
                 />
+                <input
+                  ref={stickerInput}
+                  type="file"
+                  accept="image/gif,image/png,image/jpeg,image/webp"
+                  hidden
+                  onChange={(e) => {
+                    addSticker(e.target.files?.[0]);
+                    e.target.value = "";
+                  }}
+                />
                 <button
                   type="button"
                   className="attach-btn"
@@ -873,18 +947,77 @@ export function Chat({
                         onClick={() => setEmojiOpen(false)}
                       />
                       <div className="emoji-pop">
-                        {EMOJI_GROUPS.map((g) => (
-                          <div key={g.label}>
-                            <div className="emoji-grp">{g.label}</div>
-                            <div className="emoji-grid">
-                              {g.items.map((e) => (
-                                <button type="button" key={e} onClick={() => insertEmoji(e)}>
-                                  {e}
-                                </button>
-                              ))}
+                        <div className="emoji-tabs">
+                          <button
+                            type="button"
+                            className={emojiTab === "emoji" ? "on" : ""}
+                            onClick={() => setEmojiTab("emoji")}
+                          >
+                            表情
+                          </button>
+                          <button
+                            type="button"
+                            className={emojiTab === "stk" ? "on" : ""}
+                            onClick={() => setEmojiTab("stk")}
+                          >
+                            贴纸
+                          </button>
+                        </div>
+                        {emojiTab === "emoji" ? (
+                          EMOJI_GROUPS.map((g) => (
+                            <div key={g.label}>
+                              <div className="emoji-grp">{g.label}</div>
+                              <div className="emoji-grid">
+                                {g.items.map((e) => (
+                                  <button type="button" key={e} onClick={() => insertEmoji(e)}>
+                                    {e}
+                                  </button>
+                                ))}
+                              </div>
                             </div>
+                          ))
+                        ) : (
+                          <div className="stk-grid">
+                            <button
+                              type="button"
+                              className="stk-add"
+                              title="上传 GIF/图片为表情"
+                              onClick={() => stickerInput.current?.click()}
+                            >
+                              +
+                            </button>
+                            {stickers.map((s) => (
+                              <span key={s.id} className="stk-cell">
+                                <button
+                                  type="button"
+                                  className="stk-img"
+                                  title={`${s.name} · 点击发送`}
+                                  onClick={() => sendSticker(s.id)}
+                                >
+                                  <img
+                                    src={
+                                      s.mime === "image/gif"
+                                        ? api2.downloadURL(s.id)
+                                        : api2.thumbURL(s.id)
+                                    }
+                                    alt={s.name}
+                                  />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="stk-del"
+                                  title="移除"
+                                  onClick={() => delSticker(s.id)}
+                                >
+                                  ✕
+                                </button>
+                              </span>
+                            ))}
+                            {stickers.length === 0 && (
+                              <div className="stk-empty">还没有自定义表情 — 点 + 上传 GIF/图片</div>
+                            )}
                           </div>
-                        ))}
+                        )}
                       </div>
                     </>
                   )}
