@@ -61,6 +61,12 @@ func main() {
 			// 可视托管：WebView 内容合成进窗口视觉树而非子 HWND，
 			// 修复拖动窗口时内容拖尾的 lag。
 			UseVisualHosting: true,
+			// Native window occlusion tracking recalculates during window
+			// moves and stalls the compositor — the classic cause of the
+			// window lagging behind the cursor on drag. Disabled here.
+			// 原生窗口遮挡计算在拖动期间反复跑、阻塞合成器——
+			// 是窗口拖拽不跟手的经典元凶，禁用。
+			DisabledFeatures: []string{"CalculateNativeWinOcclusion"},
 			// Remote debugging only when explicitly requested — an open CDP
 			// port lets any local process drive the webview and read session
 			// tokens. Enable with WITTYCHAT_DEBUG_PORT=9333 for support.
