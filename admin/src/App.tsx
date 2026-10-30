@@ -1,7 +1,14 @@
 // Admin console: users lifecycle, security policy, audit viewer.
 // 管理后台：用户生命周期、安全策略、审计查看器。
 import { type FormEvent, useCallback, useEffect, useState } from "react";
-import { type AuditEvent, api, getToken, setToken, type User } from "./api";
+import {
+	type AdminObject,
+	type AuditEvent,
+	api,
+	getToken,
+	setToken,
+	type User,
+} from "./api";
 
 const STATUS_CN: Record<string, string> = {
 	pending: "待激活",
@@ -13,7 +20,9 @@ const STATUS_CN: Record<string, string> = {
 export function App() {
 	const [me, setMe] = useState<User | null>(null);
 	const [ready, setReady] = useState(false);
-	const [tab, setTab] = useState<"users" | "security" | "audit">("users");
+	const [tab, setTab] = useState<"users" | "storage" | "security" | "audit">(
+		"users",
+	);
 
 	useEffect(() => {
 		if (!getToken()) {
@@ -34,7 +43,7 @@ export function App() {
 			<header className="topbar">
 				<b>WittyChat 管理后台</b>
 				<nav>
-					{(["users", "security", "audit"] as const).map((t) => (
+					{(["users", "storage", "security", "audit"] as const).map((t) => (
 						<button
 							key={t}
 							type="button"
@@ -43,9 +52,11 @@ export function App() {
 						>
 							{t === "users"
 								? "用户"
-								: t === "security"
-									? "安全策略"
-									: "审计日志"}
+								: t === "storage"
+									? "存储"
+									: t === "security"
+										? "安全策略"
+										: "审计日志"}
 						</button>
 					))}
 				</nav>
@@ -63,6 +74,7 @@ export function App() {
 				</button>
 			</header>
 			{tab === "users" && <Users me={me} />}
+			{tab === "storage" && <Storage />}
 			{tab === "security" && <Security />}
 			{tab === "audit" && <Audit />}
 		</div>
@@ -282,6 +294,113 @@ function Users({ me }: { me: User }) {
 										恢复
 									</button>
 								)}
+							</td>
+						</tr>
+					))}
+				</tbody>
+			</table>
+		</section>
+	);
+}
+
+// ---------- storage / 存储治理 ----------
+
+function fmtSize(n: number): string {
+	if (n < 1024) return `${n}B`;
+	if (n < 1 << 20) return `${(n / 1024).toFixed(1)}KB`;
+	return `${(n / (1 << 20)).toFixed(1)}MB`;
+}
+
+function Storage() {
+	const today = new Date().toISOString().slice(0, 10);
+	const [owner, setOwner] = useState("");
+	const [day, setDay] = useState(today);
+	const [objs, setObjs] = useState<AdminObject[]>([]);
+	const [msg, setMsg] = useState("");
+	const [err, setErr] = useState("");
+
+	const load = useCallback(() => {
+		setErr("");
+		const next = new Date(day);
+		next.setDate(next.getDate() + 1); // backend 'to' is exclusive / 后端 to 排他
+		api
+			.objects(owner.trim(), day, next.toISOString().slice(0, 10))
+			.then((d) => setObjs(d.objects))
+			.catch((e) => setErr(String(e)));
+	}, [owner, day]);
+	useEffect(load, [load]);
+
+	const purge = async () => {
+		setMsg("");
+		setErr("");
+		const who = owner.trim() || "全部用户";
+		if (
+			!window.confirm(
+				`删除 ${who} 在 ${day} 上传的全部 ${objs.length} 个附件？文件不可恢复。`,
+			)
+		)
+			return;
+		try {
+			const d = await api.purgeObjects(owner.trim(), day);
+			setMsg(`已删除 ${d.deleted} 个对象`);
+			load();
+		} catch (e) {
+			setErr(e instanceof Error ? e.message : "删除失败");
+		}
+	};
+
+	return (
+		<section>
+			<div className="panel row">
+				<input
+					placeholder="属主邮箱（空 = 全部）"
+					value={owner}
+					onChange={(e) => setOwner(e.target.value)}
+				/>
+				<input
+					type="date"
+					value={day}
+					onChange={(e) => setDay(e.target.value)}
+				/>
+				<button type="button" className="ghost" onClick={load}>
+					刷新
+				</button>
+				<button
+					type="button"
+					className="ghost danger"
+					disabled={objs.length === 0}
+					onClick={purge}
+				>
+					删除当天全部附件（{objs.length}）
+				</button>
+				{msg && <span className="ok">{msg}</span>}
+				{err && <span className="err">{err}</span>}
+			</div>
+			<table className="tbl">
+				<thead>
+					<tr>
+						<th>时间</th>
+						<th>属主</th>
+						<th>名称</th>
+						<th>用途</th>
+						<th>类型</th>
+						<th>大小</th>
+						<th>会话</th>
+					</tr>
+				</thead>
+				<tbody>
+					{objs.map((o) => (
+						<tr key={o.id}>
+							<td className="dim">{new Date(o.created_at).toLocaleString()}</td>
+							<td>{o.owner_email}</td>
+							<td>{o.name}</td>
+							<td>
+								<code>{o.purpose}</code>
+							</td>
+							<td className="dim">{o.mime}</td>
+							<td>{fmtSize(o.size_bytes)}</td>
+							<td className="dim">
+								{o.conv_id ? `${o.conv_id.slice(0, 8)}…` : "—"}
 							</td>
 						</tr>
 					))}

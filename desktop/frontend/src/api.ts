@@ -219,6 +219,19 @@ export const api2 = {
   },
   downloadURL: (objId: string) =>
     `${API_BASE}/api/v1/objects/${objId}/download?token=${getToken()}`,
+  thumbURL: (objId: string) => `${API_BASE}/api/v1/objects/${objId}/thumb?token=${getToken()}`,
+  // uploadThumb pushes a client-generated thumbnail for an object.
+  // uploadThumb 上传客户端生成的缩略图（canvas 压缩，服务端不再解码）。
+  uploadThumb: async (objId: string, blob: Blob) => {
+    const fd = new FormData();
+    fd.append("file", blob, "thumb.jpg");
+    const res = await fetch(`${API_BASE}/api/v1/objects/${objId}/thumb`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${getToken()}` },
+      body: fd,
+    });
+    if (!res.ok) throw new Error(`thumb ${res.status}`);
+  },
   avatarURL: (userId: string) => `${API_BASE}/api/v1/users/${userId}/avatar`,
   uploadObject: async (file: File, purpose: string) => {
     const fd = new FormData();
@@ -300,6 +313,7 @@ export const mailApi = {
       ...(starred !== undefined ? { starred } : {}),
     }),
   move: (id: string, folder: string) => req("POST", `/api/v1/mail/messages/${id}/move`, { folder }),
+  del: (id: string) => req("DELETE", `/api/v1/mail/messages/${id}`),
   upload: async (file: File) => {
     const fd = new FormData();
     fd.append("file", file, file.name);

@@ -63,9 +63,36 @@ func NewStore(pool *pgxpool.Pool, dataDir string) (*Store, error) {
 	return s, nil
 }
 
-func (s *Store) path(sha [32]byte) string {
+// dateDir derives YYYY/MM/DD from a uuidv7's embedded ms timestamp — the
+// object's creation day, so files partition by date and stay admin-scannable.
+// dateDir 从 uuidv7 内嵌毫秒时间戳推出 YYYY/MM/DD —— 即对象创建日期，
+// 文件按日期分区，便于后台按天管理。
+func dateDir(id uuid.UUID) string {
+	sec, _ := id.Time().UnixTime()
+	return time.Unix(sec, 0).UTC().Format("2006/01/02")
+}
+
+func (s *Store) path(id uuid.UUID, sha [32]byte) string {
+	h := hex.EncodeToString(sha[:])
+	return filepath.Join(s.dataDir, "objects", dateDir(id), h)
+}
+
+// legacyPath is the pre-date-partitioned layout (<dataDir>/objects/ab/<sha>).
+// legacyPath 是日期分区前的旧布局，读旧对象时兜底。
+func (s *Store) legacyPath(sha [32]byte) string {
 	h := hex.EncodeToString(sha[:])
 	return filepath.Join(s.dataDir, "objects", h[:2], h)
+}
+
+// localFile resolves the on-disk path for an object — date-partitioned
+// layout first, legacy layout fallback for pre-partition uploads.
+// localFile 解析对象落盘路径——先日期分区布局，旧上传走旧布局兜底。
+func (s *Store) localFile(id uuid.UUID, sha [32]byte) string {
+	p := s.path(id, sha)
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	return s.legacyPath(sha)
 }
 
 // Querier abstracts pool/tx.
@@ -117,17 +144,16 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 		return nil, false, err
 	}
 
-	dst := s.path(sum)
+	obj := &Object{
+		ID: uuid.Must(uuid.NewV7()), Owner: owner, Purpose: purpose,
+		Name: name, Size: n, SHA256: sum, Mime: mime, Location: "local", Status: "ready",
+	}
+	dst := s.path(obj.ID, sum)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
 		return nil, false, err
 	}
 	if err := os.Rename(tmpPath, dst); err != nil {
 		return nil, false, err
-	}
-
-	obj := &Object{
-		ID: uuid.Must(uuid.NewV7()), Owner: owner, Purpose: purpose,
-		Name: name, Size: n, SHA256: sum, Mime: mime, Location: "local", Status: "ready",
 	}
 	var convArg any // uuid.Nil → NULL (non-conv objects: mail/avatar/…)
 	if convID != uuid.Nil {
@@ -197,7 +223,10 @@ func (s *Store) Open(ctx context.Context, o *Object) (io.ReadCloser, error) {
 		}
 		return s.openS3(ctx, o)
 	}
-	f, err := os.Open(s.path(o.SHA256))
+	f, err := os.Open(s.path(o.ID, o.SHA256))
+	if errors.Is(err, os.ErrNotExist) {
+		f, err = os.Open(s.legacyPath(o.SHA256)) // pre-partition layout / 旧布局兜底
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -270,9 +299,138 @@ func (s *Store) AttachmentsOf(ctx context.Context, convID uuid.UUID, opSeq int64
 	return out, rows.Err()
 }
 
-// ThumbPath is where the worker writes thumbnails.
+// ThumbPath is where thumbnails live — date-partitioned like objects.
 func (s *Store) ThumbPath(id uuid.UUID) string {
+	return filepath.Join(s.dataDir, "thumbs", dateDir(id), id.String()+".jpg")
+}
+
+// ThumbPathLegacy is the pre-partition thumbs/<id>.jpg — read fallback.
+func (s *Store) ThumbPathLegacy(id uuid.UUID) string {
 	return filepath.Join(s.dataDir, "thumbs", id.String()+".jpg")
+}
+
+// WriteThumb stores an externally-produced thumbnail (client-side resize).
+// WriteThumb 保存外部生成的缩略图（客户端压缩后上传）。
+func (s *Store) WriteThumb(id uuid.UUID, r io.Reader) error {
+	p := s.ThumbPath(id)
+	if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+		return err
+	}
+	//nolint:gosec // path derived from parsed uuid under fixed data dir
+	f, err := os.Create(p)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	_, err = io.Copy(f, r)
+	return err
+}
+
+// AdminObject is one row of the admin storage listing.
+type AdminObject struct {
+	ID        uuid.UUID  `json:"id"`
+	Owner     uuid.UUID  `json:"owner"`
+	OwnerMail string     `json:"owner_email"`
+	Name      string     `json:"name"`
+	Purpose   string     `json:"purpose"`
+	Mime      string     `json:"mime"`
+	Size      int64      `json:"size_bytes"`
+	ConvID    *uuid.UUID `json:"conv_id,omitempty"`
+	Status    string     `json:"status"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+// AdminList returns objects for storage management — filterable by owner
+// (uuid.Nil = all) and created_at range [from,to).
+// AdminList 返回存储管理用的对象清单——可按属主与创建日期过滤。
+func (s *Store) AdminList(ctx context.Context, owner uuid.UUID, from, to time.Time) ([]AdminObject, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT o.id, o.owner_user, u.email, o.name, o.purpose, o.mime, o.size_bytes,
+		        o.conv_id, o.status, o.created_at
+		 FROM objects o JOIN users u ON u.id = o.owner_user
+		 WHERE ($1::uuid IS NULL OR o.owner_user=$1)
+		   AND o.created_at >= $2 AND o.created_at < $3
+		   AND o.status <> 'deleted'
+		 ORDER BY o.created_at DESC LIMIT 1000`,
+		nilUUID(owner), from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AdminObject{}
+	for rows.Next() {
+		var o AdminObject
+		if err := rows.Scan(&o.ID, &o.Owner, &o.OwnerMail, &o.Name, &o.Purpose,
+			&o.Mime, &o.Size, &o.ConvID, &o.Status, &o.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+// AdminPurge soft-deletes objects of an owner created in [from,to), returns
+// the affected objects so the caller can remove files/thumbs.
+// AdminPurge 软删某属主在指定日期区间内的对象，返回受影响对象供调用方清理文件。
+func (s *Store) AdminPurge(ctx context.Context, owner uuid.UUID, from, to time.Time) ([]Object, error) {
+	var deleted []Object
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`UPDATE objects SET status='deleted'
+			 WHERE ($1::uuid IS NULL OR owner_user=$1)
+			   AND created_at >= $2 AND created_at < $3 AND status<>'deleted'
+			 RETURNING id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, location, status, created_at`,
+			nilUUID(owner), from, to)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		ids := []uuid.UUID{}
+		for rows.Next() {
+			var o Object
+			var sha []byte
+			if err := rows.Scan(&o.ID, &o.Owner, &o.ConvID, &o.Purpose, &o.Name,
+				&o.Size, &sha, &o.Mime, &o.Location, &o.Status, &o.CreatedAt); err != nil {
+				return err
+			}
+			copy(o.SHA256[:], sha)
+			deleted = append(deleted, o)
+			ids = append(ids, o.ID)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		// Detach references so dead objects don't dangle.
+		// 解除引用，避免悬挂指针（头像/邮件附件/会话附件）。
+		if _, err := tx.Exec(ctx, `UPDATE users SET avatar_object_id=NULL WHERE avatar_object_id=ANY($1)`, ids); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM mail_attachments WHERE object_id=ANY($1)`, ids); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `DELETE FROM attachment_refs WHERE object_id=ANY($1)`, ids)
+		return err
+	})
+	return deleted, err
+}
+
+// RemoveFiles deletes an object's payload + thumbnail best-effort.
+func (s *Store) RemoveFiles(o *Object) {
+	_ = os.Remove(s.path(o.ID, o.SHA256))
+	_ = os.Remove(s.legacyPath(o.SHA256))
+	_ = os.Remove(s.ThumbPath(o.ID))
+	_ = os.Remove(s.ThumbPathLegacy(o.ID))
+}
+
+// nilUUID maps uuid.Nil → nil for optional :uuid params.
+func nilUUID(id uuid.UUID) any {
+	if id == uuid.Nil {
+		return nil
+	}
+	return id
 }
 
 // ---------- task queue / 任务队列 ----------

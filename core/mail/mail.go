@@ -313,6 +313,24 @@ func (s *Store) Move(ctx context.Context, user, id, folder uuid.UUID) error {
 	return err
 }
 
+// Delete removes the user's own mailbox copy and its attachment links
+// (object files are shared and stay). 删除本人邮箱副本及其附件关联（对象文件不动）。
+func (s *Store) Delete(ctx context.Context, user, id uuid.UUID) error {
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM mail_attachments WHERE message_id IN
+			 (SELECT id FROM mail_messages WHERE id=$1 AND owner_user_id=$2)`, id, user); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx,
+			`DELETE FROM mail_messages WHERE id=$1 AND owner_user_id=$2`, id, user)
+		if err == nil && tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return err
+	})
+}
+
 func preview(body string) string {
 	body = strings.Join(strings.Fields(body), " ")
 	if len(body) > 140 {

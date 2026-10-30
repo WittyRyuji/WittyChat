@@ -87,4 +87,28 @@ export const api = {
 		req<{ settings: Record<string, unknown> }>("GET", "/api/v1/admin/settings"),
 	settingsSet: (settings: Record<string, unknown>) =>
 		req("PUT", "/api/v1/admin/settings", { settings }),
+
+	objects: (owner: string, from: string, to: string) =>
+		req<{ objects: AdminObject[] }>(
+			"GET",
+			`/api/v1/admin/objects?owner=${encodeURIComponent(owner)}&from=${from}&to=${to}`,
+		),
+	purgeObjects: (ownerEmail: string, day: string) =>
+		req<{ deleted: number }>("POST", "/api/v1/admin/objects/purge", {
+			owner_email: ownerEmail,
+			day,
+		}),
 };
+
+export interface AdminObject {
+	id: string;
+	owner: string;
+	owner_email: string;
+	name: string;
+	purpose: string;
+	mime: string;
+	size_bytes: number;
+	conv_id?: string;
+	status: string;
+	created_at: string;
+}

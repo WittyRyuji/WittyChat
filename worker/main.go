@@ -15,6 +15,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 	"wittychat/core/db"
@@ -187,6 +188,9 @@ func (w *worker) thumb(ctx context.Context, t *objects.Task) error {
 	dst := image.NewRGBA(image.Rect(0, 0, nw, nh))
 	draw.CatmullRom.Scale(dst, dst.Bounds(), src, b, draw.Over, nil)
 
+	if err := os.MkdirAll(filepath.Dir(w.store.ThumbPath(objID)), 0o750); err != nil {
+		return err
+	}
 	out, err := os.Create(w.store.ThumbPath(objID))
 	if err != nil {
 		return err

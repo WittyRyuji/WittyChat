@@ -852,6 +852,155 @@ button {
   color: var(--dim);
   font-size: 12px;
 }
+
+/* right-pane compose / 右栏写信 */
+.mail-compose {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 20px;
+}
+.mail-compose-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+}
+.mail-compose-head h3 {
+  margin: 0;
+  font-size: 15px;
+}
+.mc-input {
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg2);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+}
+.mc-body {
+  flex: 1;
+  min-height: 0;
+  resize: none;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg2);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.mc-spacer {
+  flex: 1;
+}
+.compose-attach {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* context menu / 右键菜单 */
+.ctxmask {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+}
+.ctxmenu {
+  position: fixed;
+  z-index: 91;
+  min-width: 140px;
+  padding: 4px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px #0008;
+  display: flex;
+  flex-direction: column;
+}
+.ctxmenu button {
+  text-align: left;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.ctxmenu button:hover {
+  background: var(--bg3);
+}
+.ctxmenu button.danger {
+  color: #e4685f;
+}
+.ctxmenu hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 4px 6px;
+}
+
+/* image attachments + lightbox / 图片附件与灯箱 */
+.att-img {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dim);
+  font: inherit;
+  cursor: zoom-in;
+  text-align: left;
+}
+.att-img img {
+  max-width: 260px;
+  max-height: 180px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  object-fit: cover;
+  display: block;
+}
+.att-name {
+  font-size: 11px;
+}
+.att-name em {
+  font-style: normal;
+  color: var(--dim);
+}
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: #000c;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  cursor: zoom-out;
+}
+.lightbox img {
+  max-width: 92vw;
+  max-height: 86vh;
+  border-radius: 8px;
+  box-shadow: 0 12px 48px #000a;
+}
+.lightbox-name {
+  color: #ccc;
+  font-size: 13px;
+}
+.lightbox-dl {
+  color: var(--accent);
+  font-size: 13px;
+}
 .modal.compose {
   width: min(560px, 94vw);
 }

@@ -23,6 +23,7 @@ func registerMail(mux *http.ServeMux, d *Deps) {
 	mux.HandleFunc("POST /api/v1/mail/send", d.mailSend)
 	mux.HandleFunc("POST /api/v1/mail/messages/{id}/flags", d.mailFlags)
 	mux.HandleFunc("POST /api/v1/mail/messages/{id}/move", d.mailMove)
+	mux.HandleFunc("DELETE /api/v1/mail/messages/{id}", d.mailDelete)
 	mux.HandleFunc("GET /api/v1/mail/addresses", d.mailAddresses)
 	mux.HandleFunc("POST /api/v1/mail/addresses", d.mailAddAddress)
 	mux.HandleFunc("DELETE /api/v1/mail/addresses/{id}", d.mailDelAddress)
@@ -188,6 +189,21 @@ func (d *Deps) mailMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := d.Mail.Move(r.Context(), uid, id, req.Folder); err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// mailDelete hard-deletes the caller's own mailbox copy (attachments
+// reference shared objects — only the join rows go). 彻底删除本人邮件副本。
+func (d *Deps) mailDelete(w http.ResponseWriter, r *http.Request) {
+	uid, ok := d.mailUser(w, r)
+	if !ok {
+		return
+	}
+	id, _ := uuid.Parse(r.PathValue("id"))
+	if err := d.Mail.Delete(r.Context(), uid, id); err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}

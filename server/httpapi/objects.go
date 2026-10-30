@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
+	"wittychat/core/audit"
 	"wittychat/core/objects"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -27,6 +29,9 @@ func registerObjects(mux *http.ServeMux, d *Deps) {
 	mux.HandleFunc("POST /api/v1/objects/upload", d.uploadObject) // purpose=mail etc, no conv
 	mux.HandleFunc("GET /api/v1/objects/{id}/download", d.downloadObject)
 	mux.HandleFunc("GET /api/v1/objects/{id}/thumb", d.thumbObject)
+	mux.HandleFunc("POST /api/v1/objects/{id}/thumb", d.uploadThumb) // client-side thumbs / 客户端缩略图
+	mux.HandleFunc("GET /api/v1/admin/objects", d.adminObjects)
+	mux.HandleFunc("POST /api/v1/admin/objects/purge", d.adminObjectsPurge)
 	mux.HandleFunc("GET /api/v1/objects/{id}/url", d.signedObjectURL)
 	mux.HandleFunc("POST /api/v1/objects/multipart/init", d.multipartInit)
 	mux.HandleFunc("POST /api/v1/objects/multipart/complete", d.multipartComplete)
@@ -200,7 +205,136 @@ func (d *Deps) thumbObject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, max-age=300")
 	// Path derived from a parsed uuid under a fixed data dir — safe.
 	//nolint:gosec // no user-controlled path component
-	http.ServeFile(w, r, d.Objects.ThumbPath(objID))
+	p := d.Objects.ThumbPath(objID)
+	//nolint:gosec // path derived from parsed uuid under fixed data dir
+	if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
+		p = d.Objects.ThumbPathLegacy(objID) // pre-partition thumbs / 旧布局兜底
+	}
+	//nolint:gosec // same constraint as above — no user-controlled component
+	http.ServeFile(w, r, p)
+}
+
+// POST /objects/{id}/thumb — client-generated thumbnail upload. Owner only:
+// the uploader produces it at send time, cheaper than the worker path.
+// 客户端生成的缩略图上传：仅对象属主（发送时顺带压缩，比 worker 解码轻）。
+func (d *Deps) uploadThumb(w http.ResponseWriter, r *http.Request) {
+	uid, err := d.bearerUser(r)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	objID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	obj, err := d.Objects.Peek(r.Context(), objID)
+	if err != nil || obj.Owner != uid {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20) // thumbs must stay tiny / 缩略图限 2MB
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "missing file", http.StatusBadRequest)
+		return
+	}
+	defer func() { _ = file.Close() }()
+	if mime := header.Header.Get("Content-Type"); !strings.HasPrefix(mime, "image/") {
+		http.Error(w, "thumb must be an image", http.StatusBadRequest)
+		return
+	}
+	if err := d.Objects.WriteThumb(objID, file); err != nil {
+		http.Error(w, "write failed", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+}
+
+// GET /admin/objects?owner=<email>&from=<YYYY-MM-DD>&to=<YYYY-MM-DD>
+// Storage governance listing — every attachment has an owner; admins can
+// scan and purge by owner+day. 附件归属管理：按属主/日期列出与清理。
+func (d *Deps) adminObjects(w http.ResponseWriter, r *http.Request) {
+	if _, _, err := d.requireAdmin(r.Context(), r.Header.Get("Authorization")); err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	owner, from, to, err := d.objectFilter(w, r)
+	if err != nil {
+		return
+	}
+	list, err := d.Objects.AdminList(r.Context(), owner, from, to)
+	if err != nil {
+		http.Error(w, "query failed", http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"objects": list})
+}
+
+// POST /admin/objects/purge {owner_email, day} — soft-delete that owner's
+// objects created on the day, remove files/thumbs, detach references.
+// 按 属主+日期 清理附件：软删对象、删文件与缩略图、解除引用，留审计。
+func (d *Deps) adminObjectsPurge(w http.ResponseWriter, r *http.Request) {
+	_, admin, err := d.requireAdmin(r.Context(), r.Header.Get("Authorization"))
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		Owner string `json:"owner_email"` // empty = all owners / 空 = 全部属主
+		Day   string `json:"day"`         // YYYY-MM-DD
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	day, err := time.Parse("2006-01-02", req.Day)
+	if err != nil {
+		http.Error(w, "bad day (YYYY-MM-DD)", http.StatusBadRequest)
+		return
+	}
+	owner := uuid.Nil
+	if req.Owner != "" {
+		u, err := d.Store.UserByEmail(r.Context(), req.Owner)
+		if err != nil {
+			http.Error(w, "owner not found", http.StatusNotFound)
+			return
+		}
+		owner = u.ID
+	}
+	deleted, err := d.Objects.AdminPurge(r.Context(), owner, day, day.AddDate(0, 0, 1))
+	if err != nil {
+		http.Error(w, "purge failed", http.StatusInternalServerError)
+		return
+	}
+	for i := range deleted {
+		d.Objects.RemoveFiles(&deleted[i])
+	}
+	d.Audit.Log(r.Context(), &admin.ID, audit.ActorAdmin, "admin.objects.purge", req.Owner,
+		map[string]string{"day": req.Day, "count": fmt.Sprint(len(deleted))}, clientIP(r.Header.Get("X-Forwarded-For")))
+	_ = json.NewEncoder(w).Encode(map[string]any{"deleted": len(deleted)})
+}
+
+func (d *Deps) objectFilter(w http.ResponseWriter, r *http.Request) (uuid.UUID, time.Time, time.Time, error) {
+	q := r.URL.Query()
+	owner := uuid.Nil
+	if em := q.Get("owner"); em != "" {
+		u, err := d.Store.UserByEmail(r.Context(), em)
+		if err != nil {
+			http.Error(w, "owner not found", http.StatusNotFound)
+			return owner, time.Time{}, time.Time{}, err
+		}
+		owner = u.ID
+	}
+	from, err := time.Parse("2006-01-02", q.Get("from"))
+	if err != nil {
+		from = time.Now().UTC().AddDate(0, 0, -30)
+	}
+	to, err := time.Parse("2006-01-02", q.Get("to"))
+	if err != nil {
+		to = from.AddDate(0, 0, 1)
+	}
+	return owner, from.UTC(), to.UTC(), nil
 }
 
 // POST /objects/upload — direct upload not tied to a conversation

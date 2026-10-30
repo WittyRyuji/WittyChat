@@ -27,6 +27,26 @@ interface Attachment {
   mime: string;
 }
 
+// makeThumb: client-side thumbnail (canvas, <=320px jpeg) — cheap, avoids the
+// server re-decode. Uploaded right after the object itself.
+// makeThumb：客户端生成缩略图（canvas ≤320px jpeg）——便宜，省服务端解码。
+const THUMB_MAX = 320;
+async function makeThumb(file: File): Promise<Blob | null> {
+  if (!file.type.startsWith("image/") || file.type === "image/svg+xml") return null;
+  try {
+    const bmp = await createImageBitmap(file);
+    const s = Math.min(1, THUMB_MAX / Math.max(bmp.width, bmp.height));
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(bmp.width * s));
+    c.height = Math.max(1, Math.round(bmp.height * s));
+    c.getContext("2d")?.drawImage(bmp, 0, 0, c.width, c.height);
+    bmp.close();
+    return await new Promise<Blob | null>((r) => c.toBlob((b) => r(b), "image/jpeg", 0.82));
+  } catch {
+    return null;
+  }
+}
+
 function fmtSize(n: number): string {
   if (n < 1024) return `${n}B`;
   if (n < 1 << 20) return `${(n / 1024).toFixed(1)}KB`;
@@ -121,6 +141,7 @@ export function Chat({
   const [members, setMembers] = useState<Record<string, MemberInfo[]>>({});
   const [contacts, setContacts] = useState<UserPublic[]>([]);
   const [modal, setModal] = useState<"" | "newGroup" | "join" | "members">("");
+  const [viewer, setViewer] = useState<{ url: string; name: string } | null>(null);
   const [msgLimit, setMsgLimit] = useState(MSG_LIMIT);
   const [wsName, setWsName] = useState("W");
   const [searchQ, setSearchQ] = useState("");
@@ -368,6 +389,8 @@ export function Chat({
       try {
         const obj = await api2.upload(activeId, f);
         setFiles((x) => [...x, { id: obj.id, name: obj.name, size: obj.size, mime: obj.mime }]);
+        const tb = await makeThumb(f);
+        if (tb) api2.uploadThumb(obj.id, tb).catch(() => {});
       } catch {
         setErr(`上传失败：${f.name}`);
       }
@@ -622,18 +645,47 @@ export function Chat({
                       </div>
                       {!o.recalled && atts.length > 0 && (
                         <div className="atts">
-                          {atts.map((a) => (
-                            <button
-                              type="button"
-                              key={a.id}
-                              className="att"
-                              title="下载"
-                              onClick={() => saveBlob(a.id, a.name)}
-                            >
-                              📎 {a.name}
-                              <span className="att-size">{fmtSize(a.size)}</span>
-                            </button>
-                          ))}
+                          {atts.map((a) =>
+                            a.mime?.startsWith("image/") ? (
+                              <button
+                                type="button"
+                                key={a.id}
+                                className="att-img"
+                                title={`${a.name} · 点击查看大图`}
+                                onClick={() =>
+                                  setViewer({ url: api2.downloadURL(a.id), name: a.name })
+                                }
+                              >
+                                <img
+                                  src={api2.thumbURL(a.id)}
+                                  alt={a.name}
+                                  loading="lazy"
+                                  onError={(e) => {
+                                    // thumb task may not have run yet — fall back to full image
+                                    const img = e.currentTarget;
+                                    if (!img.dataset.fbk) {
+                                      img.dataset.fbk = "1";
+                                      img.src = api2.downloadURL(a.id);
+                                    }
+                                  }}
+                                />
+                                <span className="att-name">
+                                  {a.name} <em>{fmtSize(a.size)}</em>
+                                </span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                key={a.id}
+                                className="att"
+                                title="下载"
+                                onClick={() => saveBlob(a.id, a.name)}
+                              >
+                                📎 {a.name}
+                                <span className="att-size">{fmtSize(a.size)}</span>
+                              </button>
+                            )
+                          )}
                         </div>
                       )}
                       {!o.recalled && (
@@ -753,6 +805,26 @@ export function Chat({
               refreshDirectory();
             }}
           />
+        )}
+        {viewer && (
+          <div
+            className="lightbox"
+            role="dialog"
+            aria-modal="true"
+            onClick={() => setViewer(null)}
+            onKeyDown={(e) => e.key === "Escape" && setViewer(null)}
+          >
+            <img src={viewer.url} alt={viewer.name} />
+            <span className="lightbox-name">{viewer.name}</span>
+            <a
+              className="lightbox-dl"
+              href={viewer.url}
+              download={viewer.name}
+              onClick={(e) => e.stopPropagation()}
+            >
+              下载原图
+            </a>
+          </div>
         )}
       </div>
     </div>

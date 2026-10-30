@@ -76,7 +76,12 @@ export function Mail() {
   const [activeFolder, setActiveFolder] = useState<string>("");
   const [msgs, setMsgs] = useState<MailMessage[]>([]);
   const [open, setOpen] = useState<MailMessage | null>(null);
-  const [composing, setComposing] = useState<MailMessage | null | "new">(null);
+  // composing in the right pane: new / reply / forward
+  // 右栏写信：新邮件 / 回复 / 转发
+  const [composing, setComposing] = useState<
+    { mode: "new" } | { mode: "reply" | "fwd"; msg: MailMessage } | null
+  >(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; m: MailMessage } | null>(null);
   const [err, setErr] = useState("");
   const [contacts, setContacts] = useState<Set<string>>(new Set());
   const [trusted, setTrusted] = useState<string[]>(readTrusted());
@@ -120,10 +125,30 @@ export function Mail() {
   const openMsg = (m: MailMessage) => {
     mailApi.get(m.id).then((full) => {
       setOpen(full);
+      setComposing(null);
       loadMsgs();
       refreshFolders();
     });
   };
+
+  const folderId = (kind: string) => folders.find((f) => f.kind === kind)?.id;
+  const activeKind = folders.find((f) => f.id === activeFolder)?.kind ?? "inbox";
+
+  const moveTo = (m: MailMessage, kind: string) => {
+    const fid = folderId(kind);
+    if (!fid) return;
+    mailApi.move(m.id, fid).then(() => {
+      if (open?.id === m.id) setOpen(null);
+      loadMsgs();
+      refreshFolders();
+    });
+  };
+
+  const forward = (m: MailMessage) =>
+    mailApi.get(m.id).then((full) => {
+      setComposing({ mode: "fwd", msg: full });
+      setOpen(null);
+    });
 
   const fromTrusted = (m: MailMessage) =>
     m.direction === "out" ||
@@ -139,7 +164,14 @@ export function Mail() {
       <aside className="sidebar">
         <div className="side-head">
           <span className="me">邮件</span>
-          <button type="button" className="ghost" onClick={() => setComposing("new")}>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => {
+              setComposing({ mode: "new" });
+              setOpen(null);
+            }}
+          >
             写信
           </button>
         </div>
@@ -169,6 +201,10 @@ export function Mail() {
               key={m.id}
               className={`mail-item ${m.is_read ? "" : "unread"} ${open?.id === m.id ? "active" : ""}`}
               onClick={() => openMsg(m)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setMenu({ x: e.clientX, y: e.clientY, m });
+              }}
             >
               <span className="mail-line1">
                 <span className="mail-from">
@@ -189,8 +225,18 @@ export function Mail() {
 
       <section className="main mailmain">
         {err && <div className="errbar">{err}</div>}
-        {!open && <p className="empty">选择左侧邮件查看</p>}
-        {open && (
+        {composing ? (
+          <Compose
+            mode={composing.mode}
+            msg={"msg" in composing ? composing.msg : null}
+            onClose={() => {
+              setComposing(null);
+              loadMsgs();
+            }}
+          />
+        ) : !open ? (
+          <p className="empty">选择左侧邮件查看</p>
+        ) : (
           <div className="mail-read">
             <div className="mail-read-head">
               <b>{open.subject || "(无主题)"}</b>
@@ -199,7 +245,11 @@ export function Mail() {
                 {open.cc_addrs.length > 0 && ` (抄送 ${open.cc_addrs.join(", ")})`}
               </span>
               <div className="mail-actions">
-                <button type="button" className="ghost" onClick={() => setComposing(open)}>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => setComposing({ mode: "reply", msg: open })}
+                >
                   回复
                 </button>
                 <button
@@ -277,24 +327,126 @@ export function Mail() {
         )}
       </section>
 
-      {composing && (
-        <Compose
-          replyTo={composing === "new" ? null : composing}
-          onClose={() => {
-            setComposing(null);
-            loadMsgs();
+      {menu && (
+        <div
+          className="ctxmask"
+          role="presentation"
+          onClick={() => setMenu(null)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setMenu(null);
           }}
-        />
+        >
+          <div className="ctxmenu" style={{ left: menu.x, top: menu.y }}>
+            <button
+              type="button"
+              onClick={() => {
+                setMenu(null);
+                setComposing({ mode: "reply", msg: menu.m });
+                setOpen(null);
+              }}
+            >
+              回复
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMenu(null);
+                forward(menu.m);
+              }}
+            >
+              转发
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMenu(null);
+                mailApi.flags(menu.m.id, undefined, !menu.m.is_starred).then(loadMsgs);
+              }}
+            >
+              {menu.m.is_starred ? "取消星标" : "星标"}
+            </button>
+            <hr />
+            {activeKind === "spam" ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setMenu(null);
+                  moveTo(menu.m, "inbox");
+                }}
+              >
+                这不是垃圾邮件
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  setMenu(null);
+                  moveTo(menu.m, "spam");
+                }}
+              >
+                这是垃圾邮件
+              </button>
+            )}
+            {activeKind === "trash" ? (
+              <button
+                type="button"
+                className="danger"
+                onClick={() => {
+                  setMenu(null);
+                  if (window.confirm("彻底删除这封邮件？不可恢复。")) {
+                    mailApi.del(menu.m.id).then(() => {
+                      if (open?.id === menu.m.id) setOpen(null);
+                      loadMsgs();
+                    });
+                  }
+                }}
+              >
+                彻底删除
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="danger"
+                onClick={() => {
+                  setMenu(null);
+                  moveTo(menu.m, "trash");
+                }}
+              >
+                删除
+              </button>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
 }
 
-function Compose({ replyTo, onClose }: { replyTo: MailMessage | null; onClose: () => void }) {
-  const [to, setTo] = useState(replyTo ? replyTo.from_addr : "");
-  const [subject, setSubject] = useState(replyTo ? `Re: ${replyTo.subject}` : "");
-  const [body, setBody] = useState("");
-  const [files, setFiles] = useState<{ id: string; name: string }[]>([]);
+// Compose lives in the right pane — new / reply / forward.
+// Compose 占右侧主区：新邮件 / 回复 / 转发（转发预填附件与引用正文）。
+function Compose({
+  mode,
+  msg,
+  onClose,
+}: {
+  mode: "new" | "reply" | "fwd";
+  msg: MailMessage | null;
+  onClose: () => void;
+}) {
+  const quoted = msg
+    ? `\n\n---------- ${mode === "fwd" ? "转发" : "原始"}邮件 ----------\n发件人: ${msg.from_addr}\n日期: ${new Date(msg.received_at).toLocaleString()}\n主题: ${msg.subject}\n\n${msg.text_body}`
+    : "";
+  const [to, setTo] = useState(mode === "reply" && msg ? msg.from_addr : "");
+  const [subject, setSubject] = useState(
+    msg ? `${mode === "fwd" ? "Fwd: " : "Re: "}${msg.subject}` : ""
+  );
+  const [body, setBody] = useState(quoted);
+  const [files, setFiles] = useState<{ id: string; name: string }[]>(
+    mode === "fwd" && msg?.attachments
+      ? msg.attachments.map((a) => ({ id: a.object_id, name: a.name }))
+      : []
+  );
   const [sending, setSending] = useState(false);
   const [err, setErr] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
@@ -311,7 +463,7 @@ function Compose({ replyTo, onClose }: { replyTo: MailMessage | null; onClose: (
         [],
         subject,
         body,
-        replyTo?.rfc_msgid,
+        mode === "reply" ? msg?.rfc_msgid : undefined,
         files.map((f) => f.id)
       );
       onClose();
@@ -321,57 +473,70 @@ function Compose({ replyTo, onClose }: { replyTo: MailMessage | null; onClose: (
     }
   };
 
+  const title = mode === "reply" ? "回复" : mode === "fwd" ? "转发" : "写信";
   return (
-    <div className="modal-mask" role="dialog" aria-modal="true">
-      <div className="modal compose">
-        <h3>{replyTo ? "回复" : "写信"}</h3>
-        {err && <div className="errbar">{err}</div>}
+    <div className="mail-compose">
+      <div className="mail-compose-head">
+        <h3>{title}</h3>
+        <button type="button" className="ghost" onClick={onClose}>
+          ✕ 关闭
+        </button>
+      </div>
+      {err && <div className="errbar">{err}</div>}
+      <input
+        className="mc-input"
+        placeholder="收件人（逗号分隔）"
+        value={to}
+        onChange={(e) => setTo(e.target.value)}
+      />
+      <input
+        className="mc-input"
+        placeholder="主题"
+        value={subject}
+        onChange={(e) => setSubject(e.target.value)}
+      />
+      <textarea
+        className="mc-body"
+        placeholder="正文（支持 Markdown）"
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+      />
+      <div className="compose-attach">
+        <button type="button" className="ghost" onClick={() => fileRef.current?.click()}>
+          + 附件
+        </button>
+        {files.map((f) => (
+          <span key={f.id} className="chip">
+            {f.name}
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setFiles(files.filter((x) => x.id !== f.id))}
+            >
+              ✕
+            </button>
+          </span>
+        ))}
         <input
-          placeholder="收件人（逗号分隔）"
-          value={to}
-          onChange={(e) => setTo(e.target.value)}
+          ref={fileRef}
+          type="file"
+          hidden
+          onChange={async (e) => {
+            const f = e.target.files?.[0];
+            if (!f) return;
+            try {
+              files.push(await mailApi.upload(f));
+              setFiles([...files]);
+            } catch (err) {
+              setErr(String(err));
+            }
+            e.target.value = "";
+          }}
         />
-        <input placeholder="主题" value={subject} onChange={(e) => setSubject(e.target.value)} />
-        <textarea
-          placeholder="正文（支持 Markdown）"
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          rows={10}
-        />
-        <div className="compose-attach">
-          <button type="button" className="ghost" onClick={() => fileRef.current?.click()}>
-            + 附件
-          </button>
-          {files.map((f) => (
-            <span key={f.id} className="chip">
-              {f.name}
-            </span>
-          ))}
-          <input
-            ref={fileRef}
-            type="file"
-            hidden
-            onChange={async (e) => {
-              const f = e.target.files?.[0];
-              if (!f) return;
-              try {
-                files.push(await mailApi.upload(f));
-                setFiles([...files]);
-              } catch (err) {
-                setErr(String(err));
-              }
-              e.target.value = "";
-            }}
-          />
-        </div>
-        <div className="modal-actions">
-          <button type="button" className="ghost" onClick={onClose}>
-            取消
-          </button>
-          <button type="button" className="primary" onClick={send} disabled={sending || !to.trim()}>
-            {sending ? "发送中…" : "发送"}
-          </button>
-        </div>
+        <span className="mc-spacer" />
+        <button type="button" className="primary" onClick={send} disabled={sending || !to.trim()}>
+          {sending ? "发送中…" : "发送"}
+        </button>
       </div>
     </div>
   );

@@ -45,7 +45,7 @@ func (s *Store) ScanObject(ctx context.Context, id uuid.UUID, sc Scanner) (strin
 	}
 	var path string
 	if o.Location == "local" {
-		path = s.path(o.SHA256)
+		path = s.localFile(o.ID, o.SHA256)
 	} else {
 		rc, err := s.openS3(ctx, o)
 		if err != nil {
@@ -69,7 +69,8 @@ func (s *Store) ScanObject(ctx context.Context, id uuid.UUID, sc Scanner) (strin
 	if det != "" {
 		_, _ = s.pool.Exec(ctx, `UPDATE objects SET status='deleted' WHERE id=$1`, id)
 		if o.Location == "local" {
-			_ = os.Remove(s.path(o.SHA256))
+			_ = os.Remove(s.path(o.ID, o.SHA256))
+			_ = os.Remove(s.legacyPath(o.SHA256))
 		}
 		log.Printf("objects: QUARANTINE %s (%s) — %s", id, o.Name, det)
 	}
@@ -148,7 +149,8 @@ func (s *Store) OrphanGC(ctx context.Context) (int, error) {
 			if loc == "local" && len(sha) == 32 {
 				var fixed [32]byte
 				copy(fixed[:], sha)
-				_ = os.Remove(s.path(fixed))
+				_ = os.Remove(s.path(id, fixed))
+				_ = os.Remove(s.legacyPath(fixed))
 			}
 			n++
 		}
@@ -189,7 +191,7 @@ func (s *Store) MigrateCold(ctx context.Context, older time.Duration, limit int)
 	rows.Close()
 	n := 0
 	for _, c := range list {
-		f, err := os.Open(s.path(c.sha))
+		f, err := os.Open(s.localFile(c.id, c.sha))
 		if err != nil {
 			continue
 		}
@@ -221,7 +223,8 @@ func (s *Store) MigrateCold(ctx context.Context, older time.Duration, limit int)
 		if err != nil {
 			return n, err
 		}
-		_ = os.Remove(s.path(c.sha))
+		_ = os.Remove(s.path(c.id, c.sha))
+		_ = os.Remove(s.legacyPath(c.sha))
 		n++
 	}
 	return n, nil
