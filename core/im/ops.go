@@ -95,11 +95,18 @@ func (s *Store) SendMessage(ctx context.Context, sender, convID uuid.UUID,
 		payload["attachments"] = ids
 	}
 
-	// Attachment-only message gets a placeholder body for preview/search.
-	// 纯附件消息补一个占位正文用于预览与搜索。
+	// Attachment-only message gets a placeholder body for preview/search —
+	// [图片] when everything attached is an image, [附件] otherwise.
+	// 纯附件消息补占位正文用于预览与搜索：全是图片用 [图片]，否则 [附件]。
 	body := markdown
 	if body == "" && len(objectIDs) > 0 {
 		body = "[附件]"
+		var allImg bool
+		if err := s.pool.QueryRow(ctx,
+			`SELECT bool_and(mime LIKE 'image/%') FROM objects WHERE id=ANY($1)`,
+			objectIDs).Scan(&allImg); err == nil && allImg {
+			body = "[图片]"
+		}
 	}
 
 	var op *Op

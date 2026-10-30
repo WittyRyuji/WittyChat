@@ -615,6 +615,10 @@ export function Chat({
                   const atts = Array.isArray(o.payload?.attachments)
                     ? (o.payload?.attachments as Attachment[])
                     : [];
+                  // Attachment-placeholder body ("[附件]"/"[图片]") is for the
+                  // sidebar preview — don't render it as a text bubble.
+                  const isPlaceholder =
+                    atts.length > 0 && (o.body === "[附件]" || o.body === "[图片]");
                   return (
                     <div key={o.op_seq} className={`msg ${mine ? "mine" : ""}`}>
                       <div className="msg-meta">
@@ -631,9 +635,11 @@ export function Chat({
                         </div>
                       )}
                       <div className="msg-body-wrap">
-                        <div className={`msg-body ${o.recalled ? "recalled" : ""}`}>
-                          {o.recalled ? "消息已撤回" : <Md text={o.body ?? ""} />}
-                        </div>
+                        {(o.recalled || !isPlaceholder) && (
+                          <div className={`msg-body ${o.recalled ? "recalled" : ""}`}>
+                            {o.recalled ? "消息已撤回" : <Md text={o.body ?? ""} />}
+                          </div>
+                        )}
                         {mine && !o.recalled && (
                           <ReadBadge
                             seq={o.op_seq}
@@ -669,9 +675,6 @@ export function Chat({
                                     }
                                   }}
                                 />
-                                <span className="att-name">
-                                  {a.name} <em>{fmtSize(a.size)}</em>
-                                </span>
                               </button>
                             ) : (
                               <button

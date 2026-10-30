@@ -520,15 +520,16 @@ function Compose({
         <input
           ref={fileRef}
           type="file"
+          multiple
           hidden
           onChange={async (e) => {
-            const f = e.target.files?.[0];
-            if (!f) return;
-            try {
-              files.push(await mailApi.upload(f));
-              setFiles([...files]);
-            } catch (err) {
-              setErr(String(err));
+            for (const f of Array.from(e.target.files ?? [])) {
+              try {
+                files.push(await mailApi.upload(f));
+                setFiles([...files]);
+              } catch (err) {
+                setErr(String(err));
+              }
             }
             e.target.value = "";
           }}
