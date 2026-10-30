@@ -477,11 +477,7 @@ export function Chat({
         )}
         {view === "settings" && <Settings me={me} onLogout={onLogout} onMeUpdated={onMeUpdated} />}
         {modal === "newGroup" && (
-          <NewGroupDialog
-            contacts={contacts}
-            onClose={() => setModal("")}
-            onCreated={refreshDirectory}
-          />
+          <NewGroupDialog me={me} onClose={() => setModal("")} onCreated={refreshDirectory} />
         )}
         {modal === "join" && (
           <JoinGroupDialog onClose={() => setModal("")} onJoined={refreshDirectory} />

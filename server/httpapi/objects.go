@@ -163,6 +163,7 @@ func (d *Deps) downloadObject(w http.ResponseWriter, r *http.Request) {
 	if obj.Mime != "" {
 		w.Header().Set("Content-Type", obj.Mime)
 	}
+	w.Header().Set("Cache-Control", "private, max-age=300")
 	w.Header().Set("Content-Disposition", `attachment; filename*=UTF-8''`+escapeName(obj.Name))
 	_, _ = io.Copy(w, rc) // stream / 流式
 }
@@ -196,6 +197,7 @@ func (d *Deps) thumbObject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	w.Header().Set("Cache-Control", "private, max-age=300")
 	// Path derived from a parsed uuid under a fixed data dir — safe.
 	//nolint:gosec // no user-controlled path component
 	http.ServeFile(w, r, d.Objects.ThumbPath(objID))

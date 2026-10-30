@@ -7,6 +7,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, api2, setToken, type UserPublic } from "./api";
 import { Avatar } from "./avatar";
+import { trustedSenders, untrustSender } from "./Mail";
 
 interface WsSettings {
   workspace: { name: string };
@@ -89,6 +90,8 @@ export function Settings({
   const avatarFile = useRef<HTMLInputElement>(null);
   const [sendRead, setSendRead] = useLocalToggle("send_read", true);
   const [friendVerify, setFriendVerify] = useLocalToggle("friend_verify", true);
+  const [mailAutoImg, setMailAutoImg] = useLocalToggle("mail.autoimg", true);
+  const [trusted, setTrusted] = useState<string[]>(trustedSenders());
 
   useEffect(() => {
     api
@@ -274,6 +277,40 @@ export function Settings({
                 <span className="lbl">谁能搜到我</span>
                 <b className="dim">工作区成员（P1 细化）</b>
               </div>
+            </section>
+            <section className="set-card">
+              <h4>邮件安全</h4>
+              <Toggle
+                on={mailAutoImg}
+                onChange={setMailAutoImg}
+                label="显示可信发件人的图片"
+                hint="默认不加载不信任发件人的图片附件（防追踪/投毒）"
+              />
+              <div className="set-row">
+                <span className="lbl">通讯录成员来信</span>
+                <b className="dim">默认信任</b>
+              </div>
+              <div className="set-row">
+                <span className="lbl">信任的发件人</span>
+                <span className="dim">
+                  {trusted.length === 0 ? "（空 — 在邮件中点「信任该发件人」添加）" : ""}
+                </span>
+              </div>
+              {trusted.map((a) => (
+                <div className="set-row" key={a}>
+                  <span className="lbl dim">{a}</span>
+                  <button
+                    type="button"
+                    className="ghost sm"
+                    onClick={() => {
+                      untrustSender(a);
+                      setTrusted(trustedSenders());
+                    }}
+                  >
+                    移除
+                  </button>
+                </div>
+              ))}
             </section>
             <section className="set-card">
               <h4>外观</h4>

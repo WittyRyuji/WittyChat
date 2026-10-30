@@ -3,8 +3,46 @@
 //
 // 邮件视图：文件夹 | 列表 | 阅读 + 写信弹窗。
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api2, type MailFolder, type MailMessage, mailApi } from "./api";
+import { api, api2, type MailFolder, type MailMessage, mailApi } from "./api";
+import {
+  IconArchive,
+  IconDraft,
+  IconInbox,
+  IconSent,
+  IconShield,
+  IconSpam,
+  IconTrash,
+} from "./icons";
 import { Md } from "./md";
+
+const TRUST_KEY = "pref.mail.trusted";
+const AUTOIMG_KEY = "pref.mail.autoimg";
+
+function readTrusted(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(TRUST_KEY) ?? "[]");
+  } catch {
+    return [];
+  }
+}
+
+export function trustSender(addr: string) {
+  const a = addr.toLowerCase();
+  const list = readTrusted();
+  if (!list.includes(a)) {
+    localStorage.setItem(TRUST_KEY, JSON.stringify([...list, a]));
+  }
+}
+export function untrustSender(addr: string) {
+  const a = addr.toLowerCase();
+  localStorage.setItem(TRUST_KEY, JSON.stringify(readTrusted().filter((x) => x !== a)));
+}
+export function trustedSenders(): string[] {
+  return readTrusted();
+}
+export function autoLoadImages(): boolean {
+  return localStorage.getItem(AUTOIMG_KEY) !== "0";
+}
 
 function fmtDate(s: string): string {
   const d = new Date(s);
@@ -14,6 +52,25 @@ function fmtDate(s: string): string {
     : d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
+function folderIcon(kind: string) {
+  switch (kind) {
+    case "inbox":
+      return <IconInbox size={18} />;
+    case "sent":
+      return <IconSent size={18} />;
+    case "drafts":
+      return <IconDraft size={18} />;
+    case "spam":
+      return <IconSpam size={18} />;
+    case "archive":
+      return <IconArchive size={18} />;
+    case "trash":
+      return <IconTrash size={18} />;
+    default:
+      return <IconInbox size={18} />;
+  }
+}
+
 export function Mail() {
   const [folders, setFolders] = useState<MailFolder[]>([]);
   const [activeFolder, setActiveFolder] = useState<string>("");
@@ -21,6 +78,9 @@ export function Mail() {
   const [open, setOpen] = useState<MailMessage | null>(null);
   const [composing, setComposing] = useState<MailMessage | null | "new">(null);
   const [err, setErr] = useState("");
+  const [contacts, setContacts] = useState<Set<string>>(new Set());
+  const [trusted, setTrusted] = useState<string[]>(readTrusted());
+  const [revealed, setRevealed] = useState<Set<string>>(new Set());
 
   const refreshFolders = useCallback(() => {
     mailApi
@@ -48,6 +108,10 @@ export function Mail() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only
   useEffect(() => {
     refreshFolders();
+    api
+      .users()
+      .then((r) => setContacts(new Set(r.users.map((u) => u.email.toLowerCase()))))
+      .catch(() => {});
   }, []);
   useEffect(() => {
     loadMsgs();
@@ -61,9 +125,18 @@ export function Mail() {
     });
   };
 
+  const fromTrusted = (m: MailMessage) =>
+    m.direction === "out" ||
+    contacts.has(m.from_addr.toLowerCase()) ||
+    trusted.includes(m.from_addr.toLowerCase());
+
+  const imgCount = open?.attachments?.filter((a) => a.mime.startsWith("image/")).length ?? 0;
+  const showImages =
+    !!open && imgCount > 0 && (revealed.has(open.id) || (autoLoadImages() && fromTrusted(open)));
+
   return (
     <div className="chat mailview">
-      <aside className="sidebar mailfolders">
+      <aside className="sidebar">
         <div className="side-head">
           <span className="me">邮件</span>
           <button type="button" className="ghost" onClick={() => setComposing("new")}>
@@ -71,47 +144,52 @@ export function Mail() {
           </button>
         </div>
 
-        <div className="conv-list">
+        <div className="mail-foldbar">
           {folders.map((f) => (
             <button
               type="button"
               key={f.id}
-              className={`conv ${f.id === activeFolder ? "active" : ""}`}
+              className={`fold ${f.id === activeFolder ? "active" : ""}`}
+              title={f.name}
               onClick={() => {
                 setActiveFolder(f.id);
                 setOpen(null);
               }}
             >
-              <span className="conv-title">{f.name}</span>
-              {f.unread > 0 && <span className="badge">{f.unread}</span>}
+              {folderIcon(f.kind)}
+              {f.unread > 0 && <span className="dot">{f.unread}</span>}
             </button>
           ))}
         </div>
-      </aside>
 
-      <section className="main mailmain">
-        {err && <div className="errbar">{err}</div>}
-        <div className="mail-list">
+        <div className="conv-list mail-list">
           {msgs.map((m) => (
             <button
               type="button"
               key={m.id}
-              className={`mail-item ${m.is_read ? "" : "unread"}`}
+              className={`mail-item ${m.is_read ? "" : "unread"} ${open?.id === m.id ? "active" : ""}`}
               onClick={() => openMsg(m)}
             >
-              <span className="mail-from">
-                {m.direction === "out" ? `→ ${m.to_addrs.join(",")}` : m.from_addr}
+              <span className="mail-line1">
+                <span className="mail-from">
+                  {m.direction === "out" ? `→ ${m.to_addrs.join(",")}` : m.from_addr}
+                </span>
+                <span className="mail-date">{fmtDate(m.received_at)}</span>
               </span>
               <span className="mail-subj">
                 {m.subject || "(无主题)"}
                 {m.is_starred && " ★"}
               </span>
               <span className="mail-prev">{m.preview}</span>
-              <span className="mail-date">{fmtDate(m.received_at)}</span>
             </button>
           ))}
           {msgs.length === 0 && <p className="empty">此文件夹为空</p>}
         </div>
+      </aside>
+
+      <section className="main mailmain">
+        {err && <div className="errbar">{err}</div>}
+        {!open && <p className="empty">选择左侧邮件查看</p>}
         {open && (
           <div className="mail-read">
             <div className="mail-read-head">
@@ -140,14 +218,43 @@ export function Mail() {
                 </button>
               </div>
             </div>
+            {!fromTrusted(open) && (
+              <div className="mail-trustbar">
+                <IconShield size={15} />
+                <span>该发件人不在你的通讯录/信任列表中，请留意钓鱼风险。</span>
+                <button
+                  type="button"
+                  className="ghost sm"
+                  onClick={() => {
+                    trustSender(open.from_addr);
+                    setTrusted(readTrusted());
+                  }}
+                >
+                  信任该发件人
+                </button>
+              </div>
+            )}
             <div className="mail-body">
               <Md text={open.text_body} />
             </div>
             {open.attachments && open.attachments.length > 0 && (
               <div className="mail-attach">
+                {imgCount > 0 && !showImages && (
+                  <div className="mail-imgblock">
+                    已隐藏 {imgCount} 张图片
+                    {fromTrusted(open) ? "（设定中关闭了图片自动显示）" : "（发件人不受信任）"}
+                    <button
+                      type="button"
+                      className="ghost sm"
+                      onClick={() => setRevealed(new Set(revealed).add(open.id))}
+                    >
+                      显示图片
+                    </button>
+                  </div>
+                )}
                 {open.attachments.map((a) => (
                   <span key={a.object_id} className="mail-attach-item">
-                    {a.mime.startsWith("image/") && (
+                    {a.mime.startsWith("image/") && showImages && (
                       <img
                         className="mail-attach-img"
                         src={api2.downloadURL(a.object_id)}
