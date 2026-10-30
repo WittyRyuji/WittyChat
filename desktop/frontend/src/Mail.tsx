@@ -3,7 +3,7 @@
 //
 // 邮件视图：文件夹 | 列表 | 阅读 + 写信弹窗。
 import { useCallback, useEffect, useRef, useState } from "react";
-import { type MailFolder, type MailMessage, mailApi } from "./api";
+import { api2, type MailFolder, type MailMessage, mailApi } from "./api";
 import { Md } from "./md";
 
 function fmtDate(s: string): string {
@@ -146,14 +146,23 @@ export function Mail() {
             {open.attachments && open.attachments.length > 0 && (
               <div className="mail-attach">
                 {open.attachments.map((a) => (
-                  <a
-                    key={a.object_id}
-                    href={`/api/v1/objects/${a.object_id}/download`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    📎 {a.name}
-                  </a>
+                  <span key={a.object_id} className="mail-attach-item">
+                    {a.mime.startsWith("image/") && (
+                      <img
+                        className="mail-attach-img"
+                        src={api2.downloadURL(a.object_id)}
+                        alt={a.name}
+                      />
+                    )}
+                    <a
+                      href={api2.downloadURL(a.object_id)}
+                      target="_blank"
+                      rel="noreferrer"
+                      download={a.name}
+                    >
+                      📎 {a.name}
+                    </a>
+                  </span>
                 ))}
               </div>
             )}

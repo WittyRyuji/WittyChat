@@ -766,8 +766,19 @@ button {
 .mail-attach {
   margin-top: 14px;
   display: flex;
-  gap: 10px;
+  gap: 12px;
   flex-wrap: wrap;
+}
+.mail-attach-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mail-attach-img {
+  max-width: 320px;
+  max-height: 240px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
 }
 .mail-attach a {
   color: var(--accent);

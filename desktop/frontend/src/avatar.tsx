@@ -4,7 +4,7 @@
 // 头像组件：有上传头像显示图片，否则显示昵称首字。
 // 按 avatar_object_id 缓存 objectURL。
 import { useEffect, useState } from "react";
-import { api, getToken, type UserPublic } from "./api";
+import { api2, getToken, type UserPublic } from "./api";
 
 const cache = new Map<string, string>();
 
@@ -33,7 +33,7 @@ export function Avatar({
       return;
     }
     let dead = false;
-    fetch(api.avatarURL(user.id), { headers: { Authorization: `Bearer ${getToken()}` } })
+    fetch(api2.avatarURL(user.id), { headers: { Authorization: `Bearer ${getToken()}` } })
       .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
       .then((b) => {
         const u = URL.createObjectURL(b);

@@ -365,8 +365,8 @@ func (s *Store) Deliver(ctx context.Context, toUser uuid.UUID, folder string,
 		}
 		for _, oid := range attachIDs {
 			if _, err := tx.Exec(ctx,
-				`INSERT INTO mail_attachments (message_id,object_id,name,size_bytes)
-				 SELECT $1,id,name,size_bytes FROM objects WHERE id=$2`, id, oid); err != nil {
+				`INSERT INTO mail_attachments (message_id,object_id,name,size_bytes,mime)
+				 SELECT $1,id,name,size_bytes,mime FROM objects WHERE id=$2`, id, oid); err != nil {
 				return err
 			}
 		}

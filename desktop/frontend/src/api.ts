@@ -217,7 +217,8 @@ export const api2 = {
     if (!res.ok) throw new Error(`upload failed: ${res.status}`);
     return res.json() as Promise<{ id: string; name: string; size: number; mime: string }>;
   },
-  downloadURL: (objId: string) => `${API_BASE}/api/v1/objects/${objId}/download`,
+  downloadURL: (objId: string) =>
+    `${API_BASE}/api/v1/objects/${objId}/download?token=${getToken()}`,
   avatarURL: (userId: string) => `${API_BASE}/api/v1/users/${userId}/avatar`,
   uploadObject: async (file: File, purpose: string) => {
     const fd = new FormData();

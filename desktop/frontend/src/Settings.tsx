@@ -5,7 +5,7 @@
 // 设定页：左列子导航 + 右侧全宽内容。个人偏好存 localStorage；
 // 工作区策略只读（管理员经 /admin/ 改）。
 import { useEffect, useRef, useState } from "react";
-import { api, setToken, type UserPublic } from "./api";
+import { api, api2, setToken, type UserPublic } from "./api";
 import { Avatar } from "./avatar";
 
 interface WsSettings {
@@ -150,7 +150,7 @@ export function Settings({
                     e.target.value = "";
                     if (!f) return;
                     try {
-                      const obj = await api.uploadObject(f, "avatar");
+                      const obj = await api2.uploadObject(f, "avatar");
                       await api.updateMe({ avatar_object_id: obj.id });
                       onMeUpdated();
                     } catch (err) {

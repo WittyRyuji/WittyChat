@@ -7,6 +7,7 @@ package httpapi
 // 图片上传后入队缩略图任务。
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,7 +50,13 @@ func (d *Deps) objectUser(r *http.Request, objID uuid.UUID) (uuid.UUID, error) {
 }
 
 func (d *Deps) bearerUser(r *http.Request) (uuid.UUID, error) {
-	_, u, err := d.requireUser(r.Context(), r.Header.Get("Authorization"))
+	header := r.Header.Get("Authorization")
+	if header == "" {
+		if tok := r.URL.Query().Get("token"); tok != "" {
+			header = "Bearer " + tok // <img>/<a> 不能带 header 的场景
+		}
+	}
+	_, u, err := d.requireUser(r.Context(), header)
 	if err != nil {
 		return uuid.Nil, err
 	}
@@ -134,12 +141,18 @@ func (d *Deps) downloadObject(w http.ResponseWriter, r *http.Request) {
 	}
 	obj, err := d.Objects.Get(r.Context(), objID, uid)
 	if err != nil {
-		if errors.Is(err, objects.ErrForbidden) {
-			http.Error(w, "forbidden", http.StatusForbidden)
-		} else {
-			http.Error(w, "not found", http.StatusNotFound)
+		if errors.Is(err, objects.ErrForbidden) && d.objectViaMail(r.Context(), objID, uid) {
+			// 持有引用该附件的邮件即可下载（收件人/发件人）
+			obj, err = d.Objects.Peek(r.Context(), objID)
 		}
-		return
+		if err != nil {
+			if errors.Is(err, objects.ErrForbidden) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+			} else {
+				http.Error(w, "not found", http.StatusNotFound)
+			}
+			return
+		}
 	}
 	rc, err := d.Objects.Open(r.Context(), obj)
 	if err != nil {
@@ -154,6 +167,18 @@ func (d *Deps) downloadObject(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, rc) // stream / 流式
 }
 
+// objectViaMail: requester owns a mail message that references this object
+// (mail attachments are readable by the mailbox holder, not just the uploader).
+// objectViaMail：请求者持有引用此对象的邮件（邮件附件对收发件人可读）。
+func (d *Deps) objectViaMail(ctx context.Context, objID, uid uuid.UUID) bool {
+	var ok bool
+	err := d.Pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM mail_attachments a
+		 JOIN mail_messages m ON m.id = a.message_id
+		 WHERE a.object_id=$1 AND m.owner_user_id=$2)`, objID, uid).Scan(&ok)
+	return err == nil && ok
+}
+
 func (d *Deps) thumbObject(w http.ResponseWriter, r *http.Request) {
 	objID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
@@ -166,8 +191,10 @@ func (d *Deps) thumbObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := d.Objects.Get(r.Context(), objID, uid); err != nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
+		if !errors.Is(err, objects.ErrForbidden) || !d.objectViaMail(r.Context(), objID, uid) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 	}
 	// Path derived from a parsed uuid under a fixed data dir — safe.
 	//nolint:gosec // no user-controlled path component

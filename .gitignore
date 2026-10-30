@@ -37,3 +37,4 @@ desktop/frontend/bindings/
 admin/dist
 server/adminui/dist
 server*.exe
+server*.exe*
