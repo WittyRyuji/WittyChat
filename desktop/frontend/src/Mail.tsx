@@ -14,7 +14,7 @@ function fmtDate(s: string): string {
     : d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
-export function Mail({ onNav }: { onNav: (v: "chat" | "mail" | "zen") => void }) {
+export function Mail() {
   const [folders, setFolders] = useState<MailFolder[]>([]);
   const [activeFolder, setActiveFolder] = useState<string>("");
   const [msgs, setMsgs] = useState<MailMessage[]>([]);
@@ -43,9 +43,15 @@ export function Mail({ onNav }: { onNav: (v: "chat" | "mail" | "zen") => void })
       .catch(() => setMsgs([]));
   }, [activeFolder]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: activeFolder is the trigger
-  useEffect(refreshFolders, []);
-  useEffect(loadMsgs, [activeFolder]);
+  // Mount-only: seed folders + pick inbox. activeFolder lives in the callback
+  // for the "folders empty → default inbox" path, refire would loop.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only
+  useEffect(() => {
+    refreshFolders();
+  }, []);
+  useEffect(() => {
+    loadMsgs();
+  }, [loadMsgs]);
 
   const openMsg = (m: MailMessage) => {
     mailApi.get(m.id).then((full) => {
@@ -64,12 +70,7 @@ export function Mail({ onNav }: { onNav: (v: "chat" | "mail" | "zen") => void })
             写信
           </button>
         </div>
-        <nav className="nav">
-          <button type="button" className="nav-item dim btn" onClick={() => onNav("chat")}>
-            消息
-          </button>
-          <span className="nav-item active">邮件</span>
-        </nav>
+
         <div className="conv-list">
           {folders.map((f) => (
             <button

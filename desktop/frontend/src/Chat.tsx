@@ -7,13 +7,15 @@ import {
   type MemberInfo,
   newClientMsgId,
   type OpEvent,
-  setToken,
   type UserPublic,
   type WsFrame,
 } from "./api";
-import { JoinGroupDialog, MembersPanel, Modal, NewGroupDialog, SearchDialog } from "./dialogs";
+import { Contacts } from "./Contacts";
+import { JoinGroupDialog, MembersPanel, NewGroupDialog, SearchDialog } from "./dialogs";
+import { IconChat, IconContacts, IconGear, IconMail, IconZen } from "./icons";
 import { Mail } from "./Mail";
 import { Md } from "./md";
+import { Settings } from "./Settings";
 
 const MSG_LIMIT = 2000;
 
@@ -109,11 +111,9 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
   const [online, setOnline] = useState<Record<string, boolean>>({});
   const [members, setMembers] = useState<Record<string, MemberInfo[]>>({});
   const [contacts, setContacts] = useState<UserPublic[]>([]);
-  const [modal, setModal] = useState<"" | "newGroup" | "join" | "search" | "members" | "notify">(
-    ""
-  );
+  const [modal, setModal] = useState<"" | "newGroup" | "join" | "search" | "members">("");
   const [msgLimit, setMsgLimit] = useState(MSG_LIMIT);
-  const [view, setView] = useState<"chat" | "mail" | "zen">("chat");
+  const [view, setView] = useState<"chat" | "contacts" | "mail" | "zen" | "settings">("chat");
   const [err, setErr] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const typingTimers = useRef<Record<string, number>>({});
@@ -414,287 +414,337 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
 
   // Feishu-style read receipt: 见顶部 ReadBadge 组件。
 
-  if (view === "mail") return <Mail onNav={setView} />;
+  // Directory → DM shortcut for the contacts pane.
+  const openDM = (u: UserPublic) => {
+    api
+      .createDM(u.id)
+      .then((c) => {
+        setActiveId(c.id);
+        refreshDirectory();
+        setView("chat");
+      })
+      .catch(() => {});
+  };
+
+  if (view !== "chat") {
+    return (
+      <div className="app">
+        <Rail view={view} setView={setView} />
+        {view === "mail" && <Mail />}
+        {view === "contacts" && <Contacts me={me} onOpenDM={openDM} />}
+        {view === "zen" && (
+          <div className="pane">
+            <h3>Zen</h3>
+            <p className="empty">Zen 会话（P1）</p>
+          </div>
+        )}
+        {view === "settings" && <Settings me={me} onLogout={onLogout} />}
+      </div>
+    );
+  }
 
   return (
-    <div className="chat">
-      <aside className="sidebar">
-        <div className="side-head">
-          <span className="me">{me.display_name}</span>
-          <button
-            type="button"
-            className="ghost"
-            onClick={() => {
-              api.logout().catch(() => {});
-              setToken("");
-              onLogout();
-            }}
-          >
-            登出
-          </button>
-        </div>
-        <nav className="nav">
-          <span className="nav-item active">消息</span>
-          <button type="button" className="nav-item dim btn" onClick={() => setView("mail")}>
-            邮件
-          </button>
-          <span className="nav-item dim">Zen</span>
-          <button type="button" className="nav-item dim btn" onClick={() => setModal("notify")}>
-            通知
-          </button>
-        </nav>
-        <div className="conv-tools">
-          <button
-            type="button"
-            className="ghost"
-            title="新建群聊"
-            onClick={() => setModal("newGroup")}
-          >
-            +群
-          </button>
-          <button
-            type="button"
-            className="ghost"
-            title="加入公开群"
-            onClick={() => setModal("join")}
-          >
-            公开群
-          </button>
-          <button
-            type="button"
-            className="ghost"
-            title="搜索消息"
-            onClick={() => setModal("search")}
-          >
-            🔍
-          </button>
-        </div>
-        <div className="conv-list">
-          {convs.map((c) => (
+    <div className="app">
+      <Rail view={view} setView={setView} />
+      <div className="chat">
+        <aside className="sidebar">
+          <div className="side-head">
+            <span className="me">{me.display_name}</span>
+          </div>
+          <div className="conv-tools">
             <button
               type="button"
-              key={c.id}
-              className={`conv ${c.id === activeId ? "active" : ""}`}
-              onClick={() => setActiveId(c.id)}
+              className="ghost"
+              title="新建群聊"
+              onClick={() => setModal("newGroup")}
             >
-              <span className="conv-title">
-                {c.kind === "dm" && online[c.peer_user_id ?? ""] && <i className="dot" />}
-                {convTitle(c)}
-              </span>
-              {c.unread > 0 && <span className="badge">{c.unread}</span>}
-              <span className="conv-preview">{c.preview}</span>
+              +群
             </button>
-          ))}
-          {convs.length === 0 && <p className="empty">还没有会话</p>}
-        </div>
-      </aside>
-
-      <section className="main">
-        {!active ? (
-          <div className="placeholder">选择一个会话开始</div>
-        ) : (
-          <>
-            <header className="conv-head">
-              <b>{convTitle(active)}</b>
-              {typingHere.length > 0 && (
-                <span className="typing">{typingHere.join("、")} 正在输入…</span>
-              )}
-              {active.kind === "group" && (
-                <button type="button" className="ghost right" onClick={() => setModal("members")}>
-                  成员
-                </button>
-              )}
-            </header>
-            {err && (
-              <button type="button" className="errbar" onClick={() => setErr("")}>
-                {err} ✕
-              </button>
-            )}
-            <div className="ops" ref={scrollRef} onScroll={onScroll}>
-              {st?.hasOlder && <div className="hint">上滑加载更早的消息</div>}
-              {st?.ops.map((o) => {
-                if (o.kind !== "message") {
-                  return (
-                    <div key={o.op_seq} className="sys">
-                      {o.kind === "member_add" && "加入了会话"}
-                      {o.kind === "member_remove" && "离开了会话"}
-                      {o.kind === "edit" && "编辑了消息"}
-                      {o.kind === "recall" && "撤回了一条消息"}
-                      {o.kind === "rename" && `群名改为「${o.payload?.title ?? ""}」`}
-                      {o.kind === "transfer" && "转让了群主"}
-                      {o.kind === "role_change" && `成员角色调整为 ${o.payload?.role ?? ""}`}
-                    </div>
-                  );
-                }
-                const mine = o.actor_id === me.id;
-                const q = quoteOf(o);
-                const atts = Array.isArray(o.payload?.attachments)
-                  ? (o.payload?.attachments as Attachment[])
-                  : [];
-                return (
-                  <div key={o.op_seq} className={`msg ${mine ? "mine" : ""}`}>
-                    <div className="msg-meta">
-                      {o.actor_name || me.display_name} ·{" "}
-                      {new Date(o.created_at).toLocaleTimeString()}
-                      {o.edited && " · 已编辑"}
-                      {o.payload?.mentions_all === true && <span className="at-all"> @所有人</span>}
-                    </div>
-                    {q && (
-                      <div className="quote">
-                        {q.actor_name}: {q.recalled ? "已撤回" : q.body?.slice(0, 80)}
-                      </div>
-                    )}
-                    <div className="msg-body-wrap">
-                      <div className={`msg-body ${o.recalled ? "recalled" : ""}`}>
-                        {o.recalled ? "消息已撤回" : <Md text={o.body ?? ""} />}
-                      </div>
-                      {mine && !o.recalled && (
-                        <ReadBadge
-                          seq={o.op_seq}
-                          members={members[activeId] ?? []}
-                          meId={me.id}
-                          isDm={active.kind === "dm"}
-                        />
-                      )}
-                    </div>
-                    {!o.recalled && atts.length > 0 && (
-                      <div className="atts">
-                        {atts.map((a) => (
-                          <button
-                            type="button"
-                            key={a.id}
-                            className="att"
-                            title="下载"
-                            onClick={() => saveBlob(a.id, a.name)}
-                          >
-                            📎 {a.name}
-                            <span className="att-size">{fmtSize(a.size)}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    {!o.recalled && (
-                      <div className="msg-tools">
-                        <button type="button" className="ghost" onClick={() => setQuote(o)}>
-                          引用
-                        </button>
-                        {mine && (
-                          <button type="button" className="ghost" onClick={() => recall(o.op_seq)}>
-                            撤回
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-              {pendingHere.map((p) => (
-                <div key={p.id} className="msg mine pending">
-                  <div className="msg-body">{p.markdown}</div>
-                  <div className="msg-meta">{p.failed ? "发送失败" : "发送中…"}</div>
-                </div>
-              ))}
-            </div>
-            {quote && (
-              <div className="quote-bar">
-                引用 {quote.actor_name}: {quote.body?.slice(0, 60)}
-                <button type="button" className="ghost" onClick={() => setQuote(null)}>
-                  ✕
-                </button>
-              </div>
-            )}
-            {files.length > 0 && (
-              <div className="file-chips">
-                {files.map((f) => (
-                  <span key={f.id} className="chip">
-                    📎 {f.name} <em>{fmtSize(f.size)}</em>
-                    <button
-                      type="button"
-                      className="ghost"
-                      onClick={() => setFiles((x) => x.filter((y) => y.id !== f.id))}
-                    >
-                      ✕
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
-            <form className="composer" onSubmit={send}>
-              <input
-                ref={fileInput}
-                type="file"
-                multiple
-                hidden
-                onChange={(e) => pickFile(e.target.files)}
-              />
+            <button
+              type="button"
+              className="ghost"
+              title="加入公开群"
+              onClick={() => setModal("join")}
+            >
+              公开群
+            </button>
+            <button
+              type="button"
+              className="ghost"
+              title="搜索消息"
+              onClick={() => setModal("search")}
+            >
+              🔍
+            </button>
+          </div>
+          <div className="conv-list">
+            {convs.map((c) => (
               <button
                 type="button"
-                className="attach-btn"
-                title="发送附件"
-                onClick={() => fileInput.current?.click()}
+                key={c.id}
+                className={`conv ${c.id === activeId ? "active" : ""}`}
+                onClick={() => setActiveId(c.id)}
               >
-                +
+                <span className="conv-title">
+                  {c.kind === "dm" && online[c.peer_user_id ?? ""] && <i className="dot" />}
+                  {convTitle(c)}
+                </span>
+                {c.unread > 0 && <span className="badge">{c.unread}</span>}
+                <span className="conv-preview">{c.preview}</span>
               </button>
-              <textarea
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    send();
-                  }
-                }}
-                placeholder="输入消息…"
-                rows={Math.min(6, Math.max(1, text.split("\n").length))}
-              />
-              <span className={`count ${text.length > msgLimit ? "over" : ""}`}>
-                {text.length}/{msgLimit}
-              </span>
-              <button
-                type="submit"
-                disabled={(!text.trim() && files.length === 0) || text.length > msgLimit}
-              >
-                发送
-              </button>
-            </form>
-          </>
-        )}
-      </section>
+            ))}
+            {convs.length === 0 && <p className="empty">还没有会话</p>}
+          </div>
+        </aside>
 
-      {modal === "newGroup" && (
-        <NewGroupDialog
-          me={me}
-          onClose={() => setModal("")}
-          onCreated={(c) => {
-            refreshDirectory();
-            setActiveId(c.id);
-          }}
-        />
-      )}
-      {modal === "join" && (
-        <JoinGroupDialog onClose={() => setModal("")} onJoined={refreshDirectory} />
-      )}
-      {modal === "search" && (
-        <SearchDialog onClose={() => setModal("")} onPick={(id) => setActiveId(id)} />
-      )}
-      {modal === "members" && active && (
-        <MembersPanel
-          conv={active}
-          members={members[activeId] ?? []}
-          me={me}
-          contacts={contacts}
-          onClose={() => setModal("")}
-          onChanged={() => {
-            loadMembers(activeId);
-            refreshDirectory();
-          }}
-        />
-      )}
-      {modal === "notify" && (
-        <Modal title="通知中心" onClose={() => setModal("")}>
-          <p className="dim">还没有通知。@提及与审批提醒将出现在这里。</p>
-        </Modal>
-      )}
+        <section className="main">
+          {!active ? (
+            <div className="placeholder">选择一个会话开始</div>
+          ) : (
+            <>
+              <header className="conv-head">
+                <b>{convTitle(active)}</b>
+                {typingHere.length > 0 && (
+                  <span className="typing">{typingHere.join("、")} 正在输入…</span>
+                )}
+                {active.kind === "group" && (
+                  <button type="button" className="ghost right" onClick={() => setModal("members")}>
+                    成员
+                  </button>
+                )}
+              </header>
+              {err && (
+                <button type="button" className="errbar" onClick={() => setErr("")}>
+                  {err} ✕
+                </button>
+              )}
+              <div className="ops" ref={scrollRef} onScroll={onScroll}>
+                {st?.hasOlder && <div className="hint">上滑加载更早的消息</div>}
+                {st?.ops.map((o) => {
+                  if (o.kind !== "message") {
+                    return (
+                      <div key={o.op_seq} className="sys">
+                        {o.kind === "member_add" && "加入了会话"}
+                        {o.kind === "member_remove" && "离开了会话"}
+                        {o.kind === "edit" && "编辑了消息"}
+                        {o.kind === "recall" && "撤回了一条消息"}
+                        {o.kind === "rename" && `群名改为「${o.payload?.title ?? ""}」`}
+                        {o.kind === "transfer" && "转让了群主"}
+                        {o.kind === "role_change" && `成员角色调整为 ${o.payload?.role ?? ""}`}
+                      </div>
+                    );
+                  }
+                  const mine = o.actor_id === me.id;
+                  const q = quoteOf(o);
+                  const atts = Array.isArray(o.payload?.attachments)
+                    ? (o.payload?.attachments as Attachment[])
+                    : [];
+                  return (
+                    <div key={o.op_seq} className={`msg ${mine ? "mine" : ""}`}>
+                      <div className="msg-meta">
+                        {o.actor_name || me.display_name} ·{" "}
+                        {new Date(o.created_at).toLocaleTimeString()}
+                        {o.edited && " · 已编辑"}
+                        {o.payload?.mentions_all === true && (
+                          <span className="at-all"> @所有人</span>
+                        )}
+                      </div>
+                      {q && (
+                        <div className="quote">
+                          {q.actor_name}: {q.recalled ? "已撤回" : q.body?.slice(0, 80)}
+                        </div>
+                      )}
+                      <div className="msg-body-wrap">
+                        <div className={`msg-body ${o.recalled ? "recalled" : ""}`}>
+                          {o.recalled ? "消息已撤回" : <Md text={o.body ?? ""} />}
+                        </div>
+                        {mine && !o.recalled && (
+                          <ReadBadge
+                            seq={o.op_seq}
+                            members={members[activeId] ?? []}
+                            meId={me.id}
+                            isDm={active.kind === "dm"}
+                          />
+                        )}
+                      </div>
+                      {!o.recalled && atts.length > 0 && (
+                        <div className="atts">
+                          {atts.map((a) => (
+                            <button
+                              type="button"
+                              key={a.id}
+                              className="att"
+                              title="下载"
+                              onClick={() => saveBlob(a.id, a.name)}
+                            >
+                              📎 {a.name}
+                              <span className="att-size">{fmtSize(a.size)}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {!o.recalled && (
+                        <div className="msg-tools">
+                          <button type="button" className="ghost" onClick={() => setQuote(o)}>
+                            引用
+                          </button>
+                          {mine && (
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => recall(o.op_seq)}
+                            >
+                              撤回
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                {pendingHere.map((p) => (
+                  <div key={p.id} className="msg mine pending">
+                    <div className="msg-body">{p.markdown}</div>
+                    <div className="msg-meta">{p.failed ? "发送失败" : "发送中…"}</div>
+                  </div>
+                ))}
+              </div>
+              {quote && (
+                <div className="quote-bar">
+                  引用 {quote.actor_name}: {quote.body?.slice(0, 60)}
+                  <button type="button" className="ghost" onClick={() => setQuote(null)}>
+                    ✕
+                  </button>
+                </div>
+              )}
+              {files.length > 0 && (
+                <div className="file-chips">
+                  {files.map((f) => (
+                    <span key={f.id} className="chip">
+                      📎 {f.name} <em>{fmtSize(f.size)}</em>
+                      <button
+                        type="button"
+                        className="ghost"
+                        onClick={() => setFiles((x) => x.filter((y) => y.id !== f.id))}
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <form className="composer" onSubmit={send}>
+                <input
+                  ref={fileInput}
+                  type="file"
+                  multiple
+                  hidden
+                  onChange={(e) => pickFile(e.target.files)}
+                />
+                <button
+                  type="button"
+                  className="attach-btn"
+                  title="发送附件"
+                  onClick={() => fileInput.current?.click()}
+                >
+                  +
+                </button>
+                <textarea
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      send();
+                    }
+                  }}
+                  placeholder="输入消息…"
+                  rows={Math.min(6, Math.max(1, text.split("\n").length))}
+                />
+                <span className={`count ${text.length > msgLimit ? "over" : ""}`}>
+                  {text.length}/{msgLimit}
+                </span>
+                <button
+                  type="submit"
+                  disabled={(!text.trim() && files.length === 0) || text.length > msgLimit}
+                >
+                  发送
+                </button>
+              </form>
+            </>
+          )}
+        </section>
+
+        {modal === "newGroup" && (
+          <NewGroupDialog
+            me={me}
+            onClose={() => setModal("")}
+            onCreated={(c) => {
+              refreshDirectory();
+              setActiveId(c.id);
+            }}
+          />
+        )}
+        {modal === "join" && (
+          <JoinGroupDialog onClose={() => setModal("")} onJoined={refreshDirectory} />
+        )}
+        {modal === "search" && (
+          <SearchDialog onClose={() => setModal("")} onPick={(id) => setActiveId(id)} />
+        )}
+        {modal === "members" && active && (
+          <MembersPanel
+            conv={active}
+            members={members[activeId] ?? []}
+            me={me}
+            contacts={contacts}
+            onClose={() => setModal("")}
+            onChanged={() => {
+              loadMembers(activeId);
+              refreshDirectory();
+            }}
+          />
+        )}
+      </div>
     </div>
+  );
+}
+
+// Rail — Feishu-style icon column / 飞书式左侧图标列。
+function Rail({
+  view,
+  setView,
+}: {
+  view: string;
+  setView: (v: "chat" | "contacts" | "mail" | "zen" | "settings") => void;
+}) {
+  const items = [
+    { key: "chat", title: "消息", icon: <IconChat /> },
+    { key: "contacts", title: "通讯录", icon: <IconContacts /> },
+    { key: "mail", title: "邮件", icon: <IconMail /> },
+    { key: "zen", title: "Zen", icon: <IconZen /> },
+  ] as const;
+  return (
+    <nav className="rail">
+      {items.map((i) => (
+        <button
+          type="button"
+          key={i.key}
+          title={i.title}
+          className={`rail-item ${view === i.key ? "active" : ""}`}
+          onClick={() => setView(i.key)}
+        >
+          {i.icon}
+        </button>
+      ))}
+      <div className="rail-spacer" />
+      <button
+        type="button"
+        title="设定"
+        className={`rail-item ${view === "settings" ? "active" : ""}`}
+        onClick={() => setView("settings")}
+      >
+        <IconGear />
+      </button>
+    </nav>
   );
 }
