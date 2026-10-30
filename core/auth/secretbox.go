@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 var errKeyLen = errors.New("secret key must decode to 32 bytes")
@@ -38,6 +40,46 @@ func LoadSecretKey() (key []byte, ok bool, err error) {
 		return nil, false, errKeyLen
 	}
 	return k, true, nil
+}
+
+// LoadOrCreateSecretKey resolves the workspace secret key, in order:
+//  1. WITTYCHAT_SECRET_KEY env (unchanged behaviour / 保持环境变量优先)
+//  2. dataDir/secret.key (base64, 0600) — created on first boot and reused
+//     across restarts so sealed secrets (TOTP seeds…) survive.
+//
+// Returns (key, source, err); source ∈ {"env","file","created"}.
+// 密钥落盘持久化：env > data/secret.key（0600，首次启动生成），重启不丢加密数据。
+func LoadOrCreateSecretKey(dataDir string) (key []byte, source string, err error) {
+	if raw := os.Getenv("WITTYCHAT_SECRET_KEY"); raw != "" {
+		k, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil {
+			return nil, "", fmt.Errorf("decode WITTYCHAT_SECRET_KEY: %w", err)
+		}
+		if len(k) != 32 {
+			return nil, "", errKeyLen
+		}
+		return k, "env", nil
+	}
+
+	p := filepath.Join(dataDir, "secret.key")
+	if raw, err := os.ReadFile(p); err == nil { //nolint:gosec // fixed path under data dir
+		k, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
+		if err != nil || len(k) != 32 {
+			return nil, "", fmt.Errorf("corrupt %s — restore from backup or delete to regenerate", p)
+		}
+		return k, "file", nil
+	}
+	k := make([]byte, 32)
+	if _, err := rand.Read(k); err != nil {
+		return nil, "", err
+	}
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+		return nil, "", err
+	}
+	if err := os.WriteFile(p, []byte(base64.StdEncoding.EncodeToString(k)+"\n"), 0o600); err != nil {
+		return nil, "", fmt.Errorf("write %s: %w", p, err)
+	}
+	return k, "created", nil
 }
 
 // SealSecret encrypts small secrets. Output = nonce || ciphertext.

@@ -7,13 +7,23 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 	"wittychat/core/agents"
@@ -46,6 +56,8 @@ func main() {
 		cmdBootstrap()
 	case "migrate":
 		cmdMigrate()
+	case "gencert":
+		cmdGenCert()
 	case "serve":
 		cmdServe()
 	default:
@@ -83,12 +95,16 @@ func cmdServe() {
 	pool := openDB()
 	defer pool.Close()
 
-	key, ok, err := auth.LoadSecretKey()
+	dataDir := envOr("WITTYCHAT_DATA_DIR", "./data")
+	key, keySrc, err := auth.LoadOrCreateSecretKey(dataDir)
 	if err != nil {
 		log.Fatalf("secret key: %v", err)
 	}
-	if !ok {
-		log.Println("WARN: WITTYCHAT_SECRET_KEY not set — ephemeral dev key in use; sealed secrets die on restart")
+	switch keySrc {
+	case "created":
+		log.Printf("generated %s/secret.key (0600) — back it up; it seals TOTP seeds etc.", dataDir)
+	case "file":
+		log.Printf("secret key loaded from %s/secret.key", dataDir)
 	}
 
 	imStore := im.NewStore(pool)
@@ -126,6 +142,14 @@ func cmdServe() {
 	}
 
 	go func() {
+		cert, kfile := os.Getenv("WITTYCHAT_TLS_CERT"), os.Getenv("WITTYCHAT_TLS_KEY")
+		if cert != "" && kfile != "" {
+			log.Printf("server listening on %s (TLS)", addr)
+			if err := srv.ListenAndServeTLS(cert, kfile); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Fatalf("listen tls: %v", err)
+			}
+			return
+		}
 		log.Printf("server listening on %s", addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)
@@ -222,4 +246,65 @@ func cmdMigrate() {
 	if err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		log.Fatalf("migrate %s: %v", *dir, err)
 	}
+}
+
+// ---------- gencert ----------
+
+// cmdGenCert writes a self-signed ECDSA cert for dev/LAN TLS into
+// WITTYCHAT_DATA_DIR/tls/{cert,key}.pem (localhost + hostname SANs).
+// Production TLS terminates at nginx (see deploy/nginx.conf).
+// 生成开发/内网自签证书；生产由 nginx 终结 TLS。
+func cmdGenCert() {
+	fs := flag.NewFlagSet("gencert", flag.ExitOnError)
+	out := fs.String("out", "", "tls dir (default DATA_DIR/tls)")
+	host := fs.String("host", "", "extra SAN hostnames, comma-separated")
+	days := fs.Int("days", 825, "validity days")
+	_ = fs.Parse(os.Args[1:])
+
+	dir := *out
+	if dir == "" {
+		dir = filepath.Join(envOr("WITTYCHAT_DATA_DIR", "./data"), "tls")
+	}
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		log.Fatalf("key: %v", err)
+	}
+	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	hosts := []string{"localhost"}
+	if h, err := os.Hostname(); err == nil {
+		hosts = append(hosts, h)
+	}
+	if *host != "" {
+		hosts = append(hosts, strings.Split(*host, ",")...)
+	}
+	tpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "WittyChat Dev", Organization: []string{"WittyChat"}},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().AddDate(0, 0, *days),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              hosts,
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &priv.PublicKey, priv)
+	if err != nil {
+		log.Fatalf("cert: %v", err)
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		log.Fatalf("mkdir: %v", err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyDER, _ := x509.MarshalECPrivateKey(priv)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	cp, kp := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(cp, certPEM, 0o600); err != nil {
+		log.Fatalf("cert write: %v", err)
+	}
+	if err := os.WriteFile(kp, keyPEM, 0o600); err != nil {
+		log.Fatalf("key write: %v", err)
+	}
+	fmt.Printf("self-signed cert written:\n  %s\n  %s\n\nserve with:\n  WITTYCHAT_TLS_CERT=%s WITTYCHAT_TLS_KEY=%s server.exe serve\n",
+		cp, kp, cp, kp)
 }

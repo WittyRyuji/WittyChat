@@ -85,9 +85,13 @@ export function setToken(t: string) {
 }
 
 // API base: "" in browser dev (vite proxy), :8080 inside the Wails shell.
-// API 基址：浏览器开发环境走 vite 代理（""），Wails 壳内直连服务端。
+// localStorage "wittychat.server" overrides (e.g. https://im.corp.example for
+// a remote TLS endpoint — set once from devtools or a future server-picker UI).
+// API 基址：浏览器开发环境走 vite 代理（""），Wails 壳内直连服务端；
+// localStorage "wittychat.server" 可覆盖指向远程/HTTPS 实例。
 export const API_BASE =
-  location.protocol === "http:" || location.protocol === "https:" ? "" : "http://localhost:8080";
+  localStorage.getItem("wittychat.server") ??
+  (location.protocol === "http:" || location.protocol === "https:" ? "" : "http://localhost:8080");
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(API_BASE + path, {
