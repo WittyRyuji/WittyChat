@@ -14,6 +14,7 @@ import (
 	"wittychat/core/auth"
 	"wittychat/core/im"
 	"wittychat/core/objects"
+	"wittychat/core/settings"
 	"wittychat/server/realtime"
 	"wittychat/shared/apitypes"
 
@@ -35,6 +36,7 @@ type Deps struct {
 	IM        *im.Store
 	Hub       *realtime.Hub
 	Objects   *objects.Store
+	Settings  *settings.Store
 }
 
 // New builds the root handler: API routes + HTML pages + healthz.
@@ -45,6 +47,7 @@ func New(d *Deps) http.Handler {
 	registerAuth(api, d)
 	registerAdmin(api, d)
 	registerIM(api, d)
+	registerIM2(api, d)
 	registerPages(mux, d)
 	registerWS(mux, d)
 	registerObjects(mux, d)

@@ -5,11 +5,14 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
+	"time"
 	"wittychat/core/audit"
 	"wittychat/core/auth"
+	"wittychat/core/settings"
 	"wittychat/shared/apitypes"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -52,6 +55,24 @@ func registerAdmin(api huma.API, d *Deps) {
 		Path: "/api/v1/admin/users/{id}/offboard", Summary: "Offboard → data to Team Owner / 离职交接给 Admin",
 		Tags: []string{"admin"}, Security: []map[string][]string{{"bearer": {}}},
 	}, d.adminOffboard)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "admin-audit-list", Method: http.MethodGet,
+		Path: "/api/v1/admin/audit", Summary: "Audit log viewer (viewing is audited) / 审计查看（查看本身被审计）",
+		Tags: []string{"admin"}, Security: []map[string][]string{{"bearer": {}}},
+	}, d.adminAuditList)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "admin-settings-get", Method: http.MethodGet,
+		Path: "/api/v1/admin/settings", Summary: "All workspace settings / 全部工作区设置",
+		Tags: []string{"admin"}, Security: []map[string][]string{{"bearer": {}}},
+	}, d.adminSettingsGet)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "admin-settings-set", Method: http.MethodPut,
+		Path: "/api/v1/admin/settings", Summary: "Update workspace settings / 更新工作区设置",
+		Tags: []string{"admin"}, Security: []map[string][]string{{"bearer": {}}},
+	}, d.adminSettingsSet)
 }
 
 func (d *Deps) linkURL(token string) string {
@@ -210,5 +231,102 @@ func (d *Deps) adminOffboard(ctx context.Context, in *struct {
 	}
 	d.Audit.Log(ctx, &admin.ID, audit.ActorAdmin, "admin.user.offboard", target.Email,
 		map[string]string{"transfer_to": toUser.Email}, clientIP(in.XForwardedFor))
+	return &struct{}{}, nil
+}
+
+// ---------- audit viewer + workspace settings ----------
+
+func (d *Deps) adminAuditList(ctx context.Context, in *struct {
+	Headers
+	Action string `query:"action"`
+	Actor  string `query:"actor"`
+	Limit  int    `query:"limit"`
+},
+) (*struct{ Body any }, error) {
+	_, admin, err := d.requireAdmin(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	// Viewing retained audit data is itself audited. 查看审计数据本身留痕。
+	d.Audit.Log(ctx, &admin.ID, audit.ActorAdmin, "admin.audit.view", "",
+		map[string]string{"action": in.Action, "actor": in.Actor}, clientIP(in.XForwardedFor))
+	limit := in.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := d.Pool.Query(ctx,
+		`SELECT id, actor_id, actor_kind, action, target, detail, created_at
+		 FROM audit_events
+		 WHERE ($1='' OR action ILIKE '%'||$1||'%')
+		   AND ($2='' OR COALESCE(actor_id::text,'')=$2 OR actor_kind=$2)
+		 ORDER BY id DESC LIMIT $3`, in.Action, in.Actor, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type evt struct {
+		ID        int64  `json:"id"`
+		ActorID   string `json:"actor_id,omitempty"`
+		ActorKind string `json:"actor_kind"`
+		Action    string `json:"action"`
+		Target    string `json:"target"`
+		Detail    any    `json:"detail"`
+		CreatedAt any    `json:"created_at"`
+	}
+	out := []evt{}
+	for rows.Next() {
+		var e evt
+		var actorID *uuid.UUID
+		var detail []byte
+		var created any
+		if err := rows.Scan(&e.ID, &actorID, &e.ActorKind, &e.Action, &e.Target, &detail, &created); err != nil {
+			return nil, err
+		}
+		if actorID != nil {
+			e.ActorID = actorID.String()
+		}
+		_ = json.Unmarshal(detail, &e.Detail)
+		e.CreatedAt = created
+		out = append(out, e)
+	}
+	return &struct{ Body any }{Body: map[string]any{"events": out}}, nil
+}
+
+func (d *Deps) adminSettingsGet(ctx context.Context, in *struct{ Headers }) (*struct {
+	Body any
+}, error,
+) {
+	if _, _, err := d.requireAdmin(ctx, in.Authorization); err != nil {
+		return nil, err
+	}
+	all, err := d.Settings.All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &struct{ Body any }{Body: map[string]any{"settings": all}}, nil
+}
+
+func (d *Deps) adminSettingsSet(ctx context.Context, in *struct {
+	Headers
+	Body struct {
+		Settings map[string]any `json:"settings" required:"true"`
+	}
+},
+) (*struct{}, error) {
+	_, admin, err := d.requireAdmin(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range in.Body.Settings {
+		if err := d.Settings.Set(ctx, k, v, admin.ID); err != nil {
+			return nil, err
+		}
+	}
+	// Refresh hot settings the server caches at boot.
+	// 刷新启动时缓存的热设置（撤回时限）。
+	d.IM.RecallWindow = time.Duration(
+		d.Settings.Int(ctx, settings.KeyIMRecallTimeout, settings.DefRecallTimeout)) * time.Second
+	d.Audit.Log(ctx, &admin.ID, audit.ActorAdmin, "admin.settings.set", "",
+		in.Body.Settings, clientIP(in.XForwardedFor))
 	return &struct{}{}, nil
 }

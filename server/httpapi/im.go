@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"wittychat/core/audit"
 	"wittychat/core/im"
+	"wittychat/core/settings"
 	"wittychat/shared/apitypes"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -199,7 +200,9 @@ func (d *Deps) directory(ctx context.Context, in *struct{ Headers }) (*struct {
 		if e.PeerUserID != nil {
 			ci.PeerUserID = e.PeerUserID.String()
 			ci.PeerName = e.PeerName
-			ci.PeerReadSeq = e.PeerReadSeq
+			if d.Settings.Bool(ctx, settings.KeyIMReadReceipts, true) {
+				ci.PeerReadSeq = e.PeerReadSeq
+			}
 		}
 		out.Body.Conversations = append(out.Body.Conversations, ci)
 	}
@@ -324,9 +327,12 @@ func (d *Deps) sendMessage(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, huma.Error400BadRequest("bad conversation id")
 	}
-	// Workspace default 2000, admin may raise to 5000 (hard ceiling).
-	// 工作区默认 2000，管理员可调至 5000（硬顶）。
-	msgLimit := int64(2000) // read workspace_settings later / 后续从设置读
+	// Workspace limit from settings (default 2000, hard cap 5000).
+	// 工作区上限从设置读（默认 2000，硬顶 5000）。
+	msgLimit := d.Settings.Int(ctx, settings.KeyIMMessageMaxChars, settings.DefMessageMaxChars)
+	if msgLimit > settings.MaxMessageCharsCap {
+		msgLimit = settings.MaxMessageCharsCap
+	}
 	if int64(len([]rune(in.Body.Markdown))) > msgLimit {
 		return nil, huma.Error400BadRequest("message exceeds limit / 消息超长")
 	}
@@ -349,8 +355,19 @@ func (d *Deps) sendMessage(ctx context.Context, in *struct {
 			objIDs = append(objIDs, id)
 		}
 	}
+	// @all permission: workspace may restrict it to owner/admin.
+	// @所有人权限：工作区可限制为仅群主/管理员。
+	if in.Body.MentionAll && d.Settings.Str(ctx, settings.KeyIMAtAll, "all") == "admin" {
+		role, err := d.IM.MemberRole(ctx, convID, u.ID)
+		if err != nil {
+			return nil, imErr(err)
+		}
+		if role != im.RoleOwner && role != im.RoleAdmin {
+			return nil, huma.Error403Forbidden("@all restricted to owner/admin / @所有人仅群主或管理员可用")
+		}
+	}
 	op, existed, err := d.IM.SendMessage(ctx, u.ID, convID, clientMsgID,
-		in.Body.Markdown, in.Body.QuoteOpSeq, mentions, objIDs)
+		in.Body.Markdown, in.Body.QuoteOpSeq, mentions, in.Body.MentionAll, objIDs)
 	if err != nil {
 		return nil, imErr(err)
 	}
@@ -430,7 +447,9 @@ func (d *Deps) markRead(ctx context.Context, in *struct {
 	if err := d.IM.MarkRead(ctx, convID, u.ID, in.Body.OpSeq); err != nil {
 		return nil, imErr(err)
 	}
-	if d.Hub != nil {
+	// Receipt broadcast only when the workspace keeps read receipts on.
+	// 工作区开了已读回执才广播 read 帧。
+	if d.Hub != nil && d.Settings.Bool(ctx, settings.KeyIMReadReceipts, true) {
 		if ids, err := d.IM.MemberIDs(ctx, convID); err == nil {
 			d.Hub.Read(ids, convID, u.ID, in.Body.OpSeq, true)
 		}
@@ -452,6 +471,9 @@ func (d *Deps) listMembers(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, imErr(err)
 	}
+	// Read receipts off → redact watermarks (own unread tracking unaffected).
+	// 关掉已读回执就不下发他人水印（自己的未读不受影响）。
+	receipts := d.Settings.Bool(ctx, settings.KeyIMReadReceipts, true)
 	type m struct {
 		UserID      string `json:"user_id"`
 		Name        string `json:"name"`
@@ -461,7 +483,11 @@ func (d *Deps) listMembers(ctx context.Context, in *struct {
 	}
 	out := []m{}
 	for _, mm := range members {
-		out = append(out, m{mm.UserID.String(), mm.Name, mm.Role, mm.JoinedAt, mm.LastReadSeq})
+		rs := mm.LastReadSeq
+		if !receipts && mm.UserID != u.ID {
+			rs = 0
+		}
+		out = append(out, m{mm.UserID.String(), mm.Name, mm.Role, mm.JoinedAt, rs})
 	}
 	return &struct{ Body any }{Body: map[string]any{"members": out}}, nil
 }

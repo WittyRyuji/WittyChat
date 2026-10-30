@@ -48,6 +48,22 @@ export interface MemberInfo {
   last_read_seq: number;
 }
 
+export interface PublicGroupInfo {
+  id: string;
+  title: string;
+  member_count: number;
+  joined: boolean;
+}
+
+export interface MessageSearchHit {
+  conv_id: string;
+  op_seq: number;
+  body: string;
+  actor_name: string;
+  conv_title: string;
+  created_at: string;
+}
+
 export interface WsFrame {
   type: string;
   conv_id?: string;
@@ -129,6 +145,7 @@ export const api = {
       client_msg_id: clientMsgId,
       markdown,
       ...(quoteOpSeq ? { quote_op_seq: quoteOpSeq } : {}),
+      ...(/@所有人|@all\b/i.test(markdown) ? { mention_all: true } : {}),
       ...(objectIds?.length ? { object_ids: objectIds } : {}),
     }),
   recall: (convId: string, seq: number) =>
@@ -137,6 +154,39 @@ export const api = {
     req("POST", `/api/v1/conversations/${convId}/read`, { op_seq: seq }),
   members: (convId: string) =>
     req<{ members: MemberInfo[] }>("GET", `/api/v1/conversations/${convId}/members`),
+
+  // phase-2: group manage / discovery / search / contacts / settings
+  users: () => req<{ users: UserPublic[] }>("GET", "/api/v1/users"),
+  createGroup: (title: string, isPublic: boolean, memberIds: string[]) =>
+    req<ConversationInfo>("POST", "/api/v1/conversations/group", {
+      title,
+      is_public: isPublic,
+      member_ids: memberIds,
+    }),
+  renameConv: (convId: string, title: string) =>
+    req("POST", `/api/v1/conversations/${convId}/rename`, { title }),
+  transferConv: (convId: string, userId: string) =>
+    req("POST", `/api/v1/conversations/${convId}/transfer`, { user_id: userId }),
+  setRole: (convId: string, userId: string, role: "admin" | "member") =>
+    req("POST", `/api/v1/conversations/${convId}/members/${userId}/role`, { role }),
+  addMembers: (convId: string, userIds: string[]) =>
+    req("POST", `/api/v1/conversations/${convId}/members`, { user_ids: userIds }),
+  removeMember: (convId: string, userId: string) =>
+    req("DELETE", `/api/v1/conversations/${convId}/members/${userId}`),
+  searchGroups: (q: string) =>
+    req<{ groups: PublicGroupInfo[] }>("GET", `/api/v1/groups/public?q=${encodeURIComponent(q)}`),
+  joinGroup: (id: string) => req("POST", `/api/v1/groups/${id}/join`),
+  searchMessages: (q: string) =>
+    req<{ hits: MessageSearchHit[] }>("GET", `/api/v1/search/messages?q=${encodeURIComponent(q)}`),
+  settings: () =>
+    req<{
+      im: {
+        message_max_chars: number;
+        recall_timeout_sec: number;
+        read_receipts: boolean;
+        at_all: string;
+      };
+    }>("GET", "/api/v1/settings"),
 };
 
 export const api2 = {

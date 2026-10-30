@@ -26,6 +26,8 @@ const (
 	OpMemberAdd    = "member_add"
 	OpMemberRemove = "member_remove"
 	OpRoleChange   = "role_change"
+	OpRename       = "rename"
+	OpTransfer     = "transfer"
 
 	RoleOwner  = "owner"
 	RoleAdmin  = "admin"
@@ -42,10 +44,9 @@ var (
 	ErrSelfDM        = errors.New("cannot dm yourself")
 )
 
-// RecallWindow — how long after sending a message can be recalled.
-// Workspace-configurable later; 10min default per decisions.
-// 撤回时限：默认 10 分钟，之后从工作区设置读取。
-const RecallWindow = 10 * time.Minute
+// DefaultRecallWindow — used unless overridden via Store.RecallWindow
+// (workspace setting im.recall_timeout_sec). 撤回时限默认 10 分钟。
+const DefaultRecallWindow = 10 * time.Minute
 
 // Querier abstracts *pgxpool.Pool and pgx.Tx.
 type Querier interface {
@@ -54,10 +55,13 @@ type Querier interface {
 }
 
 type Store struct {
-	pool *pgxpool.Pool
+	pool         *pgxpool.Pool
+	RecallWindow time.Duration // recall timeout; set at boot, refreshable
 }
 
-func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
+func NewStore(pool *pgxpool.Pool) *Store {
+	return &Store{pool: pool, RecallWindow: DefaultRecallWindow}
+}
 
 // Conversation row + my membership view.
 type Conversation struct {
@@ -319,6 +323,11 @@ func (s *Store) MemberIDs(ctx context.Context, convID uuid.UUID) ([]uuid.UUID, e
 func (s *Store) IsMember(ctx context.Context, convID, userID uuid.UUID) bool {
 	_, err := s.memberRole(ctx, s.pool, convID, userID)
 	return err == nil
+}
+
+// MemberRole returns the caller's role in the conversation.
+func (s *Store) MemberRole(ctx context.Context, convID, userID uuid.UUID) (string, error) {
+	return s.memberRole(ctx, s.pool, convID, userID)
 }
 
 // convTitle helper for errors.

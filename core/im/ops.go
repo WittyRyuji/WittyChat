@@ -67,7 +67,8 @@ func nilIfEmpty(s string) any {
 // SendMessage appends a message op; idempotent on client_msg_id.
 // Returns (op, alreadyExisted, error). Sets sender read watermark to the new seq.
 func (s *Store) SendMessage(ctx context.Context, sender, convID uuid.UUID,
-	clientMsgID uuid.UUID, markdown string, quoteOpSeq int64, mentions, objectIDs []uuid.UUID,
+	clientMsgID uuid.UUID, markdown string, quoteOpSeq int64, mentions []uuid.UUID,
+	mentionAll bool, objectIDs []uuid.UUID,
 ) (*Op, bool, error) {
 	if len([]rune(markdown)) > MaxMessageLen {
 		return nil, false, ErrMessageTooLong
@@ -82,6 +83,9 @@ func (s *Store) SendMessage(ctx context.Context, sender, convID uuid.UUID,
 			ids[i] = m.String()
 		}
 		payload["mentions"] = ids
+	}
+	if mentionAll {
+		payload["mentions_all"] = true
 	}
 	if len(objectIDs) > 0 {
 		ids := make([]string, len(objectIDs))
@@ -174,7 +178,7 @@ func (s *Store) RecallMessage(ctx context.Context, actor, convID uuid.UUID, targ
 		if kind != OpMessage || owner == nil || *owner != actor {
 			return ErrNoPermission
 		}
-		if time.Since(created) > RecallWindow {
+		if time.Since(created) > s.RecallWindow {
 			return ErrRecallExpired
 		}
 		seq, err = s.appendOpTx(ctx, tx, convID, actor, OpRecall, nil, targetSeq, "", nil)

@@ -72,11 +72,11 @@ func TestDMDedupAndMessaging(t *testing.T) {
 
 	// Send → op_seq 1; idempotent resend returns same op.
 	msgID := uuid.Must(uuid.NewV7())
-	op1, dup, err := s.SendMessage(ctx, a, c1.ID, msgID, "hello **world**", 0, nil, nil)
+	op1, dup, err := s.SendMessage(ctx, a, c1.ID, msgID, "hello **world**", 0, nil, false, nil)
 	if err != nil || dup {
 		t.Fatalf("send: %v dup=%v", err, dup)
 	}
-	op2, dup2, err := s.SendMessage(ctx, a, c1.ID, msgID, "hello **world**", 0, nil, nil)
+	op2, dup2, err := s.SendMessage(ctx, a, c1.ID, msgID, "hello **world**", 0, nil, false, nil)
 	if err != nil || !dup2 || op2.Seq != op1.Seq {
 		t.Fatalf("idempotent resend: dup=%v seq %d vs %d", dup2, op2.Seq, op1.Seq)
 	}
@@ -85,7 +85,7 @@ func TestDMDedupAndMessaging(t *testing.T) {
 	}
 
 	// op_seq continuity.
-	opB, _, _ := s.SendMessage(ctx, b, c1.ID, uuid.Must(uuid.NewV7()), "reply", 0, nil, nil)
+	opB, _, _ := s.SendMessage(ctx, b, c1.ID, uuid.Must(uuid.NewV7()), "reply", 0, nil, false, nil)
 	if opB.Seq != 2 {
 		t.Fatalf("second op seq = %d, want 2", opB.Seq)
 	}
@@ -105,7 +105,7 @@ func TestDMDedupAndMessaging(t *testing.T) {
 	if _, _, _, err := s.FetchOpsAfter(ctx, stranger, c1.ID, 0, 10); !errors.Is(err, ErrNotMember) {
 		t.Fatalf("stranger read: want ErrNotMember, got %v", err)
 	}
-	if _, _, err := s.SendMessage(ctx, stranger, c1.ID, uuid.Must(uuid.NewV7()), "x", 0, nil, nil); !errors.Is(err, ErrNotMember) {
+	if _, _, err := s.SendMessage(ctx, stranger, c1.ID, uuid.Must(uuid.NewV7()), "x", 0, nil, false, nil); !errors.Is(err, ErrNotMember) {
 		t.Fatalf("stranger send: want ErrNotMember, got %v", err)
 	}
 }
@@ -115,7 +115,7 @@ func TestEditRecallEffectiveView(t *testing.T) {
 	a, b := mk(uniqEmail()), mk(uniqEmail())
 	c, _ := s.CreateDM(ctx, a, b)
 
-	msg, _, _ := s.SendMessage(ctx, a, c.ID, uuid.Must(uuid.NewV7()), "original", 0, nil, nil)
+	msg, _, _ := s.SendMessage(ctx, a, c.ID, uuid.Must(uuid.NewV7()), "original", 0, nil, false, nil)
 
 	// Edit by author works; other member cannot edit.
 	if _, err := s.EditMessage(ctx, a, c.ID, msg.Seq, "edited text"); err != nil {
@@ -153,6 +153,85 @@ func TestEditRecallEffectiveView(t *testing.T) {
 	}
 }
 
+func TestGroupManageAndSearch(t *testing.T) {
+	s, ctx, mk := testEnv(t)
+	owner, m1, m2, outsider := mk(uniqEmail()), mk(uniqEmail()), mk(uniqEmail()), mk(uniqEmail())
+
+	g, err := s.CreateGroup(ctx, owner, "team-alpha", true, []uuid.UUID{m1})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Rename: member can't, owner can; title lands in directory.
+	if _, err := s.RenameConv(ctx, m1, g.ID, "x"); !errors.Is(err, ErrNoPermission) {
+		t.Fatalf("member rename: want ErrNoPermission, got %v", err)
+	}
+	if _, err := s.RenameConv(ctx, owner, g.ID, "team-beta"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	dir, _ := s.Directory(ctx, m1)
+	if dir[0].Title != "team-beta" {
+		t.Fatalf("title=%q", dir[0].Title)
+	}
+
+	// Public search + join.
+	hits, err := s.SearchPublicGroups(ctx, outsider, "beta", 10)
+	if err != nil || len(hits) != 1 || hits[0].Joined {
+		t.Fatalf("public search: %v %+v", err, hits)
+	}
+	if _, err := s.JoinPublicGroup(ctx, g.ID, outsider); err != nil {
+		t.Fatalf("join public: %v", err)
+	}
+	if !s.IsMember(ctx, g.ID, outsider) {
+		t.Fatal("joiner not member")
+	}
+	// Non-public conv can't be self-joined.
+	priv, _ := s.CreateGroup(ctx, owner, "secret", false, nil)
+	if _, err := s.JoinPublicGroup(ctx, priv.ID, m2); !errors.Is(err, ErrNoPermission) {
+		t.Fatalf("join private: want ErrNoPermission, got %v", err)
+	}
+
+	// Roles: owner grants admin; non-owner can't; transfer hands over.
+	if _, err := s.SetMemberRole(ctx, m1, g.ID, m2, RoleAdmin); !errors.Is(err, ErrNoPermission) {
+		t.Fatalf("set role by member: want ErrNoPermission, got %v", err)
+	}
+	if _, err := s.SetMemberRole(ctx, owner, g.ID, m1, RoleAdmin); err != nil {
+		t.Fatalf("set admin: %v", err)
+	}
+	role, _ := s.MemberRole(ctx, g.ID, m1)
+	if role != RoleAdmin {
+		t.Fatalf("role=%q", role)
+	}
+	if _, err := s.TransferOwner(ctx, m1, g.ID, m2); !errors.Is(err, ErrNoPermission) {
+		t.Fatalf("transfer by admin: want ErrNoPermission, got %v", err)
+	}
+	if _, err := s.TransferOwner(ctx, owner, g.ID, m1); err != nil {
+		t.Fatalf("transfer: %v", err)
+	}
+	role, _ = s.MemberRole(ctx, g.ID, m1)
+	if role != RoleOwner {
+		t.Fatalf("new owner role=%q", role)
+	}
+	role, _ = s.MemberRole(ctx, g.ID, owner)
+	if role != RoleAdmin {
+		t.Fatalf("old owner role=%q", role)
+	}
+
+	// Search: outsider (now member) finds it; m2 (not member of any) doesn't.
+	msgID := uuid.Must(uuid.NewV7())
+	if _, _, err := s.SendMessage(ctx, m1, g.ID, msgID, "部署手册 draft", 0, nil, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	found, err := s.SearchMessages(ctx, outsider, "手册", 10)
+	if err != nil || len(found) != 1 {
+		t.Fatalf("search zh: %v n=%d", err, len(found))
+	}
+	found, _ = s.SearchMessages(ctx, m2, "手册", 10)
+	if len(found) != 0 {
+		t.Fatalf("non-member search leaked %d hits", len(found))
+	}
+}
+
 func TestGroupMembersAndRead(t *testing.T) {
 	s, ctx, mk := testEnv(t)
 	owner, m1, m2, outsider := mk(uniqEmail()), mk(uniqEmail()), mk(uniqEmail()), mk(uniqEmail())
@@ -177,7 +256,7 @@ func TestGroupMembersAndRead(t *testing.T) {
 	}
 
 	// Directory: m2 sees the group with unread.
-	if _, _, err := s.SendMessage(ctx, owner, g.ID, uuid.Must(uuid.NewV7()), "welcome", 0, nil, nil); err != nil {
+	if _, _, err := s.SendMessage(ctx, owner, g.ID, uuid.Must(uuid.NewV7()), "welcome", 0, nil, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	dir, err := s.Directory(ctx, m2)

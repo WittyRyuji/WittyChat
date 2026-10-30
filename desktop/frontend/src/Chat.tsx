@@ -11,6 +11,7 @@ import {
   type UserPublic,
   type WsFrame,
 } from "./api";
+import { JoinGroupDialog, MembersPanel, Modal, NewGroupDialog, SearchDialog } from "./dialogs";
 import { Md } from "./md";
 
 const MSG_LIMIT = 2000;
@@ -106,6 +107,11 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
   const [typing, setTyping] = useState<Record<string, string>>({});
   const [online, setOnline] = useState<Record<string, boolean>>({});
   const [members, setMembers] = useState<Record<string, MemberInfo[]>>({});
+  const [contacts, setContacts] = useState<UserPublic[]>([]);
+  const [modal, setModal] = useState<"" | "newGroup" | "join" | "search" | "members" | "notify">(
+    ""
+  );
+  const [msgLimit, setMsgLimit] = useState(MSG_LIMIT);
   const [err, setErr] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const typingTimers = useRef<Record<string, number>>({});
@@ -219,6 +225,14 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
 
   useEffect(() => {
     refreshDirectory();
+    api
+      .users()
+      .then((d) => setContacts(d.users))
+      .catch(() => {});
+    api
+      .settings()
+      .then((s) => setMsgLimit(s.im.message_max_chars))
+      .catch(() => {});
     let dead = false;
     let retry = 0;
     const open = () => {
@@ -332,7 +346,7 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
   const send = async (e?: FormEvent) => {
     e?.preventDefault();
     const md = text.trim();
-    if ((!md && files.length === 0) || !activeId || md.length > MSG_LIMIT) return;
+    if ((!md && files.length === 0) || !activeId || md.length > msgLimit) return;
     const objIds = files.map((f) => f.id);
     const p: Pending = {
       id: newClientMsgId(),
@@ -419,7 +433,36 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
           <span className="nav-item active">消息</span>
           <span className="nav-item dim">邮件</span>
           <span className="nav-item dim">Zen</span>
+          <button type="button" className="nav-item dim btn" onClick={() => setModal("notify")}>
+            通知
+          </button>
         </nav>
+        <div className="conv-tools">
+          <button
+            type="button"
+            className="ghost"
+            title="新建群聊"
+            onClick={() => setModal("newGroup")}
+          >
+            +群
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            title="加入公开群"
+            onClick={() => setModal("join")}
+          >
+            公开群
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            title="搜索消息"
+            onClick={() => setModal("search")}
+          >
+            🔍
+          </button>
+        </div>
         <div className="conv-list">
           {convs.map((c) => (
             <button
@@ -450,6 +493,11 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
               {typingHere.length > 0 && (
                 <span className="typing">{typingHere.join("、")} 正在输入…</span>
               )}
+              {active.kind === "group" && (
+                <button type="button" className="ghost right" onClick={() => setModal("members")}>
+                  成员
+                </button>
+              )}
             </header>
             {err && (
               <button type="button" className="errbar" onClick={() => setErr("")}>
@@ -466,6 +514,9 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
                       {o.kind === "member_remove" && "离开了会话"}
                       {o.kind === "edit" && "编辑了消息"}
                       {o.kind === "recall" && "撤回了一条消息"}
+                      {o.kind === "rename" && `群名改为「${o.payload?.title ?? ""}」`}
+                      {o.kind === "transfer" && "转让了群主"}
+                      {o.kind === "role_change" && `成员角色调整为 ${o.payload?.role ?? ""}`}
                     </div>
                   );
                 }
@@ -480,6 +531,7 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
                       {o.actor_name || me.display_name} ·{" "}
                       {new Date(o.created_at).toLocaleTimeString()}
                       {o.edited && " · 已编辑"}
+                      {o.payload?.mentions_all === true && <span className="at-all"> @所有人</span>}
                     </div>
                     {q && (
                       <div className="quote">
@@ -589,12 +641,12 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
                 placeholder="输入消息…"
                 rows={Math.min(6, Math.max(1, text.split("\n").length))}
               />
-              <span className={`count ${text.length > MSG_LIMIT ? "over" : ""}`}>
-                {text.length}/{MSG_LIMIT}
+              <span className={`count ${text.length > msgLimit ? "over" : ""}`}>
+                {text.length}/{msgLimit}
               </span>
               <button
                 type="submit"
-                disabled={(!text.trim() && files.length === 0) || text.length > MSG_LIMIT}
+                disabled={(!text.trim() && files.length === 0) || text.length > msgLimit}
               >
                 发送
               </button>
@@ -602,6 +654,41 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
           </>
         )}
       </section>
+
+      {modal === "newGroup" && (
+        <NewGroupDialog
+          me={me}
+          onClose={() => setModal("")}
+          onCreated={(c) => {
+            refreshDirectory();
+            setActiveId(c.id);
+          }}
+        />
+      )}
+      {modal === "join" && (
+        <JoinGroupDialog onClose={() => setModal("")} onJoined={refreshDirectory} />
+      )}
+      {modal === "search" && (
+        <SearchDialog onClose={() => setModal("")} onPick={(id) => setActiveId(id)} />
+      )}
+      {modal === "members" && active && (
+        <MembersPanel
+          conv={active}
+          members={members[activeId] ?? []}
+          me={me}
+          contacts={contacts}
+          onClose={() => setModal("")}
+          onChanged={() => {
+            loadMembers(activeId);
+            refreshDirectory();
+          }}
+        />
+      )}
+      {modal === "notify" && (
+        <Modal title="通知中心" onClose={() => setModal("")}>
+          <p className="dim">还没有通知。@提及与审批提醒将出现在这里。</p>
+        </Modal>
+      )}
     </div>
   );
 }

@@ -22,6 +22,7 @@ import (
 	"wittychat/core/im"
 	"wittychat/core/migrations"
 	"wittychat/core/objects"
+	"wittychat/core/settings"
 	"wittychat/server/httpapi"
 	"wittychat/server/realtime"
 
@@ -93,6 +94,9 @@ func cmdServe() {
 	if err != nil {
 		log.Fatalf("objects: %v", err)
 	}
+	settingsStore := settings.New(pool)
+	imStore.RecallWindow = time.Duration(
+		settingsStore.Int(context.Background(), settings.KeyIMRecallTimeout, settings.DefRecallTimeout)) * time.Second
 	d := &httpapi.Deps{
 		Pool:      pool,
 		Store:     auth.NewStore(pool),
@@ -104,6 +108,7 @@ func cmdServe() {
 		IM:        imStore,
 		Hub:       realtime.NewHub(imStore.IsMember),
 		Objects:   objStore,
+		Settings:  settingsStore,
 	}
 
 	addr := envOr("WITTYCHAT_ADDR", ":8080")

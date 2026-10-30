@@ -20,6 +20,8 @@ const (
 	OpMemberAdd    = "member_add"
 	OpMemberRemove = "member_remove"
 	OpRoleChange   = "role_change"
+	OpRename       = "rename"
+	OpTransfer     = "transfer"
 )
 
 // ConversationInfo is one directory entry.
@@ -86,7 +88,43 @@ type SendMessageRequest struct {
 	Markdown    string   `json:"markdown" required:"true" minLength:"0" maxLength:"5000"` // may be "" when object_ids present
 	QuoteOpSeq  int64    `json:"quote_op_seq,omitempty"`
 	Mentions    []string `json:"mentions,omitempty" maxItems:"50"`
+	MentionAll  bool     `json:"mention_all,omitempty"`              // @所有人（受 im.at_all 策略限制）
 	ObjectIDs   []string `json:"object_ids,omitempty" maxItems:"20"` // attachments / 附件
+}
+
+type RenameConvRequest struct {
+	Title string `json:"title" required:"true" minLength:"1" maxLength:"80"`
+}
+
+type TransferRequest struct {
+	UserID string `json:"user_id" required:"true" format:"uuid"`
+}
+
+type SetRoleRequest struct {
+	Role string `json:"role" required:"true" enum:"admin,member"`
+}
+
+// PublicGroupInfo is one public-group search hit.
+type PublicGroupInfo struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	MemberCount int    `json:"member_count"`
+	Joined      bool   `json:"joined"`
+}
+
+// MessageSearchHit is one message-search result.
+type MessageSearchHit struct {
+	ConvID    string `json:"conv_id"`
+	OpSeq     int64  `json:"op_seq"`
+	Body      string `json:"body"`
+	ActorName string `json:"actor_name"`
+	ConvTitle string `json:"conv_title"`
+	CreatedAt string `json:"created_at"`
+}
+
+// UnreadSummary is the aggregate unread badge.
+type UnreadSummary struct {
+	Total int64 `json:"total"`
 }
 
 type EditMessageRequest struct {
