@@ -41,6 +41,13 @@ export interface OpEvent {
   created_at: string;
 }
 
+export interface MemberInfo {
+  user_id: string;
+  name: string;
+  role: string;
+  last_read_seq: number;
+}
+
 export interface WsFrame {
   type: string;
   conv_id?: string;
@@ -116,7 +123,7 @@ export const api = {
     clientMsgId: string,
     markdown: string,
     quoteOpSeq?: number,
-    objectIds?: string[],
+    objectIds?: string[]
   ) =>
     req<OpEvent>("POST", `/api/v1/conversations/${convId}/messages`, {
       client_msg_id: clientMsgId,
@@ -128,6 +135,8 @@ export const api = {
     req<OpEvent>("POST", `/api/v1/conversations/${convId}/messages/${seq}/recall`),
   markRead: (convId: string, seq: number) =>
     req("POST", `/api/v1/conversations/${convId}/read`, { op_seq: seq }),
+  members: (convId: string) =>
+    req<{ members: MemberInfo[] }>("GET", `/api/v1/conversations/${convId}/members`),
 };
 
 export const api2 = {

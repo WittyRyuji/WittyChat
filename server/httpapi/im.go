@@ -430,6 +430,11 @@ func (d *Deps) markRead(ctx context.Context, in *struct {
 	if err := d.IM.MarkRead(ctx, convID, u.ID, in.Body.OpSeq); err != nil {
 		return nil, imErr(err)
 	}
+	if d.Hub != nil {
+		if ids, err := d.IM.MemberIDs(ctx, convID); err == nil {
+			d.Hub.Read(ids, convID, u.ID, in.Body.OpSeq, true)
+		}
+	}
 	return &struct{}{}, nil
 }
 
@@ -448,14 +453,15 @@ func (d *Deps) listMembers(ctx context.Context, in *struct {
 		return nil, imErr(err)
 	}
 	type m struct {
-		UserID   string `json:"user_id"`
-		Name     string `json:"name"`
-		Role     string `json:"role"`
-		JoinedAt any    `json:"joined_at"`
+		UserID      string `json:"user_id"`
+		Name        string `json:"name"`
+		Role        string `json:"role"`
+		JoinedAt    any    `json:"joined_at"`
+		LastReadSeq int64  `json:"last_read_seq"`
 	}
 	out := []m{}
 	for _, mm := range members {
-		out = append(out, m{mm.UserID.String(), mm.Name, mm.Role, mm.JoinedAt})
+		out = append(out, m{mm.UserID.String(), mm.Name, mm.Role, mm.JoinedAt, mm.LastReadSeq})
 	}
 	return &struct{ Body any }{Body: map[string]any{"members": out}}, nil
 }

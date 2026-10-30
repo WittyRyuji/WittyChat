@@ -90,6 +90,18 @@ func (h *Hub) NotifyConv(memberIDs []uuid.UUID, convID uuid.UUID, seq int64, exc
 	}
 }
 
+// Read tells members "userID advanced read watermark to seq" — lightweight
+// frame so clients update read-receipt circles without refetching.
+func (h *Hub) Read(memberIDs []uuid.UUID, convID, reader uuid.UUID, seq int64, exclude bool) {
+	f := Frame{Type: "read", ConvID: convID.String(), UserID: reader.String(), LastSeq: seq}
+	for _, uid := range memberIDs {
+		if exclude && uid == reader {
+			continue
+		}
+		h.sendTo(uid, f)
+	}
+}
+
 // Typing fans a transient typing hint to other online members (no persist).
 func (h *Hub) Typing(memberIDs []uuid.UUID, convID, from uuid.UUID, name string) {
 	f := Frame{Type: "typing", ConvID: convID.String(), UserID: from.String(), Name: name}

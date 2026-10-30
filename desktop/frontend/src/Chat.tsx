@@ -4,6 +4,7 @@ import {
   api2,
   type ConversationInfo,
   connectWS,
+  type MemberInfo,
   newClientMsgId,
   type OpEvent,
   setToken,
@@ -52,6 +53,47 @@ interface Pending {
   failed?: boolean;
 }
 
+// ReadBadge — Feishu-style read receipt circle / 已读回执圈。
+// dm: solid gray (unread) → blue (read); group: pie fill by read ratio.
+function ReadBadge({
+  seq,
+  members,
+  meId,
+  isDm,
+}: {
+  seq: number;
+  members: MemberInfo[];
+  meId: string;
+  isDm: boolean;
+}) {
+  const others = members.filter((m) => m.user_id !== meId);
+  if (others.length === 0) return null;
+  const readers = others.filter((m) => m.last_read_seq >= seq);
+  const read = readers.length === others.length;
+  const tip = isDm
+    ? read
+      ? "已读"
+      : "未读"
+    : `已读 ${readers.length}/${others.length}` +
+      (readers.length > 0 ? `：${readers.map((m) => m.name).join("、")}` : "");
+  return (
+    <span
+      className={`read-badge ${isDm ? (read ? "read" : "unread") : "group"}`}
+      style={
+        isDm
+          ? undefined
+          : {
+              background: `conic-gradient(var(--accent) ${Math.round(
+                (readers.length / others.length) * 100
+              )}%, var(--line) ${Math.round((readers.length / others.length) * 100)}%)`,
+            }
+      }
+    >
+      <span className="rb-tip">{tip}</span>
+    </span>
+  );
+}
+
 export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void }) {
   const [convs, setConvs] = useState<ConversationInfo[]>([]);
   const [activeId, setActiveId] = useState("");
@@ -63,6 +105,7 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
   const fileInput = useRef<HTMLInputElement>(null);
   const [typing, setTyping] = useState<Record<string, string>>({});
   const [online, setOnline] = useState<Record<string, boolean>>({});
+  const [members, setMembers] = useState<Record<string, MemberInfo[]>>({});
   const [err, setErr] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const typingTimers = useRef<Record<string, number>>({});
@@ -146,6 +189,15 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
     [states]
   );
 
+  const loadMembers = useCallback(async (convId: string) => {
+    try {
+      const d = await api.members(convId);
+      setMembers((prev) => ({ ...prev, [convId]: d.members }));
+    } catch {
+      /* transient */
+    }
+  }, []);
+
   // ---------- ws ----------
 
   useEffect(() => {
@@ -160,11 +212,25 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
           switch (f.type) {
             case "conv_update":
               refreshDirectory();
+              if (f.conv_id) loadMembers(f.conv_id);
               setActiveId((cur) => {
                 if (f.conv_id === cur) fetchDelta(cur);
                 else if (f.conv_id) fetchDelta(f.conv_id);
                 return cur;
               });
+              break;
+            case "read":
+              // Someone advanced their watermark — update in place, no refetch.
+              if (f.conv_id && f.user_id) {
+                setMembers((prev) => ({
+                  ...prev,
+                  [f.conv_id as string]: (prev[f.conv_id as string] ?? []).map((m) =>
+                    m.user_id === f.user_id
+                      ? { ...m, last_read_seq: Math.max(m.last_read_seq, f.last_op_seq ?? 0) }
+                      : m
+                  ),
+                }));
+              }
               break;
             case "presence":
               if (f.user_id) setOnline((o) => ({ ...o, [f.user_id as string]: !!f.online }));
@@ -195,7 +261,7 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
       dead = true;
       wsRef.current?.close();
     };
-  }, [refreshDirectory, fetchDelta]);
+  }, [refreshDirectory, fetchDelta, loadMembers]);
 
   // Load a conversation when selected.
   // Keyed on activeId only — load/reset on conversation switch.
@@ -206,6 +272,7 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
     setText("");
     setFiles([]);
     if (!states[activeId]?.loaded) fetchDelta(activeId);
+    loadMembers(activeId);
     const c = convs.find((x) => x.id === activeId);
     if (c && c.last_op_seq > 0) api.markRead(activeId, c.last_op_seq).catch(() => {});
   }, [activeId]);
@@ -306,6 +373,8 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
       ? st?.ops.find((x) => x.op_seq === Number(o.payload?.quote_op_seq))
       : undefined;
 
+  // Feishu-style read receipt: 见顶部 ReadBadge 组件。
+
   return (
     <div className="chat">
       <aside className="sidebar">
@@ -379,16 +448,15 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
                 }
                 const mine = o.actor_id === me.id;
                 const q = quoteOf(o);
+                const atts = Array.isArray(o.payload?.attachments)
+                  ? (o.payload?.attachments as Attachment[])
+                  : [];
                 return (
                   <div key={o.op_seq} className={`msg ${mine ? "mine" : ""}`}>
                     <div className="msg-meta">
                       {o.actor_name || me.display_name} ·{" "}
                       {new Date(o.created_at).toLocaleTimeString()}
                       {o.edited && " · 已编辑"}
-                      {mine &&
-                        active.kind === "dm" &&
-                        (active.peer_read_seq ?? 0) >= o.op_seq &&
-                        " · 已读"}
                     </div>
                     {q && (
                       <div className="quote">
@@ -398,9 +466,17 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
                     <div className={`msg-body ${o.recalled ? "recalled" : ""}`}>
                       {o.recalled ? "消息已撤回" : <Md text={o.body ?? ""} />}
                     </div>
-                    {!o.recalled && Array.isArray(o.payload?.attachments) && (
+                    {mine && !o.recalled && (
+                      <ReadBadge
+                        seq={o.op_seq}
+                        members={members[activeId] ?? []}
+                        meId={me.id}
+                        isDm={active.kind === "dm"}
+                      />
+                    )}
+                    {!o.recalled && atts.length > 0 && (
                       <div className="atts">
-                        {(o.payload?.attachments as Attachment[]).map((a) => (
+                        {atts.map((a) => (
                           <button
                             type="button"
                             key={a.id}

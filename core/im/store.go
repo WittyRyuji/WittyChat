@@ -74,11 +74,12 @@ type Conversation struct {
 
 // Member of a conversation.
 type Member struct {
-	UserID   uuid.UUID
-	Role     string
-	JoinedAt time.Time
-	LeftAt   *time.Time
-	Name     string // display_name join
+	UserID      uuid.UUID
+	Role        string
+	JoinedAt    time.Time
+	LeftAt      *time.Time
+	Name        string // display_name join
+	LastReadSeq int64  // read watermark → 已读回执聚合
 }
 
 func (s *Store) conv(ctx context.Context, q Querier, id uuid.UUID) (*Conversation, error) {
@@ -277,7 +278,7 @@ func (s *Store) Members(ctx context.Context, convID, userID uuid.UUID) ([]*Membe
 		return nil, err
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT m.user_id, m.role, m.joined_at, u.display_name
+		`SELECT m.user_id, m.role, m.joined_at, u.display_name, m.last_read_op_seq
 		 FROM conv_members m JOIN users u ON u.id=m.user_id
 		 WHERE m.conv_id=$1 AND m.left_at IS NULL ORDER BY m.joined_at`, convID)
 	if err != nil {
@@ -287,7 +288,7 @@ func (s *Store) Members(ctx context.Context, convID, userID uuid.UUID) ([]*Membe
 	var out []*Member
 	for rows.Next() {
 		var m Member
-		if err := rows.Scan(&m.UserID, &m.Role, &m.JoinedAt, &m.Name); err != nil {
+		if err := rows.Scan(&m.UserID, &m.Role, &m.JoinedAt, &m.Name, &m.LastReadSeq); err != nil {
 			return nil, err
 		}
 		out = append(out, &m)
