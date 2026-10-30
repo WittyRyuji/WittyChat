@@ -4,8 +4,9 @@
 //
 // 设定页：左列子导航 + 右侧全宽内容。个人偏好存 localStorage；
 // 工作区策略只读（管理员经 /admin/ 改）。
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, setToken, type UserPublic } from "./api";
+import { Avatar } from "./avatar";
 
 interface WsSettings {
   workspace: { name: string };
@@ -69,11 +70,23 @@ function Toggle({
   );
 }
 
-export function Settings({ me, onLogout }: { me: UserPublic; onLogout: () => void }) {
+export function Settings({
+  me,
+  onLogout,
+  onMeUpdated,
+}: {
+  me: UserPublic;
+  onLogout: () => void;
+  onMeUpdated: () => void;
+}) {
   const [tab, setTab] = useState<"account" | "general" | "agent" | "about">("account");
   const [s, setS] = useState<WsSettings | null>(null);
   const [assistants, setAssistants] = useState<Assistant[]>([]);
   const [notify, setNotify] = useLocalToggle("notify", true);
+  const [name, setName] = useState(me.display_name);
+  const [saving, setSaving] = useState(false);
+  const [profileErr, setProfileErr] = useState("");
+  const avatarFile = useRef<HTMLInputElement>(null);
   const [sendRead, setSendRead] = useLocalToggle("send_read", true);
   const [friendVerify, setFriendVerify] = useLocalToggle("friend_verify", true);
 
@@ -121,12 +134,64 @@ export function Settings({ me, onLogout }: { me: UserPublic; onLogout: () => voi
             <section className="set-card">
               <h4>我的账号</h4>
               <div className="set-row">
-                <span className="avatar lg">{me.display_name.slice(0, 1)}</span>
+                <Avatar
+                  user={me}
+                  className="avatar lg clickable"
+                  title="点击更换头像"
+                  onClick={() => avatarFile.current?.click()}
+                />
+                <input
+                  ref={avatarFile}
+                  type="file"
+                  accept="image/*"
+                  hidden
+                  onChange={async (e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = "";
+                    if (!f) return;
+                    try {
+                      const obj = await api.uploadObject(f, "avatar");
+                      await api.updateMe({ avatar_object_id: obj.id });
+                      onMeUpdated();
+                    } catch (err) {
+                      setProfileErr(`头像上传失败：${err}`);
+                    }
+                  }}
+                />
                 <span className="lbl">
                   <b>{me.display_name}</b>
                   <p className="dim">{me.email}</p>
                 </span>
               </div>
+              <div className="set-row">
+                <span className="lbl">昵称</span>
+                <input
+                  className="set-input"
+                  value={name}
+                  maxLength={64}
+                  onChange={(e) => setName(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="primary sm"
+                  disabled={!name.trim() || name.trim() === me.display_name || saving}
+                  onClick={async () => {
+                    setSaving(true);
+                    setProfileErr("");
+                    try {
+                      await api.updateMe({ display_name: name.trim() });
+                      onMeUpdated();
+                    } catch (err) {
+                      setProfileErr(`改名失败：${err}`);
+                    } finally {
+                      setSaving(false);
+                    }
+                  }}
+                >
+                  {saving ? "保存中…" : "保存"}
+                </button>
+              </div>
+              {profileErr && <div className="errbar">{profileErr}</div>}
               <div className="set-row">
                 <span className="lbl">角色</span>
                 <b>{me.is_admin ? "管理员" : "成员"}</b>

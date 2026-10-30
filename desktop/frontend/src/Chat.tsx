@@ -99,7 +99,15 @@ function ReadBadge({
   );
 }
 
-export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void }) {
+export function Chat({
+  me,
+  onLogout,
+  onMeUpdated,
+}: {
+  me: UserPublic;
+  onLogout: () => void;
+  onMeUpdated: () => void;
+}) {
   const [convs, setConvs] = useState<ConversationInfo[]>([]);
   const [activeId, setActiveId] = useState("");
   const [states, setStates] = useState<Record<string, ConvState>>({});
@@ -467,7 +475,7 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
             <p className="empty">Zen 会话（P1）</p>
           </div>
         )}
-        {view === "settings" && <Settings me={me} onLogout={onLogout} />}
+        {view === "settings" && <Settings me={me} onLogout={onLogout} onMeUpdated={onMeUpdated} />}
         {modal === "newGroup" && (
           <NewGroupDialog
             contacts={contacts}

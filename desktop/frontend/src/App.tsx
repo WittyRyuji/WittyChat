@@ -18,5 +18,11 @@ export default function App() {
 
   if (booting) return <div className="boot">WittyChat…</div>;
   if (!user) return <Login onLogin={setUser} />;
-  return <Chat me={user} onLogout={() => setUser(null)} />;
+  return (
+    <Chat
+      me={user}
+      onLogout={() => setUser(null)}
+      onMeUpdated={() => api.me().then((r) => setUser(r.user))}
+    />
+  );
 }

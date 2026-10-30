@@ -53,6 +53,7 @@ func New(d *Deps) http.Handler {
 	registerAdmin(api, d)
 	registerIM(api, d)
 	registerIM2(api, d)
+	registerProfile(api, mux, d)
 	registerPages(mux, d)
 	registerWS(mux, d)
 	registerObjects(mux, d)
@@ -139,7 +140,7 @@ func securityHeaders(next http.Handler) http.Handler {
 }
 
 func publicUser(u *auth.User) *apitypes.UserPublic {
-	return &apitypes.UserPublic{
+	p := &apitypes.UserPublic{
 		ID:          u.ID.String(),
 		Email:       u.Email,
 		DisplayName: u.DisplayName,
@@ -148,4 +149,8 @@ func publicUser(u *auth.User) *apitypes.UserPublic {
 		TOTPEnabled: u.TOTPEnabled,
 		CreatedAt:   u.CreatedAt,
 	}
+	if u.AvatarObjectID != nil {
+		p.AvatarObjectID = u.AvatarObjectID.String()
+	}
+	return p
 }

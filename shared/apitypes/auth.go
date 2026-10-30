@@ -18,13 +18,19 @@ type LoginRequest struct {
 }
 
 type UserPublic struct {
-	ID          string    `json:"id"`
-	Email       string    `json:"email"`
-	DisplayName string    `json:"display_name"`
-	Status      string    `json:"status" enum:"pending,active,suspended,offboarded"`
-	IsAdmin     bool      `json:"is_admin"`
-	TOTPEnabled bool      `json:"totp_enabled"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID             string    `json:"id"`
+	Email          string    `json:"email"`
+	DisplayName    string    `json:"display_name"`
+	Status         string    `json:"status" enum:"pending,active,suspended,offboarded"`
+	IsAdmin        bool      `json:"is_admin"`
+	TOTPEnabled    bool      `json:"totp_enabled"`
+	AvatarObjectID string    `json:"avatar_object_id,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+type UpdateMeRequest struct {
+	DisplayName    string `json:"display_name,omitempty" maxLength:"64"`
+	AvatarObjectID string `json:"avatar_object_id,omitempty" format:"uuid"`
 }
 
 type LoginResponse struct {

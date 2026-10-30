@@ -4,6 +4,7 @@
 // 通讯录：固定列（搜索+用户+建群入口）+ 右侧详情。+群/公开群在此。
 import { useEffect, useState } from "react";
 import { api, type UserPublic } from "./api";
+import { Avatar } from "./avatar";
 import { IconPlus, IconSearch } from "./icons";
 
 export function Contacts({
@@ -62,7 +63,7 @@ export function Contacts({
               className={`conv contact-row ${sel?.id === u.id ? "active" : ""}`}
               onClick={() => setSel(u)}
             >
-              <span className="avatar sm">{u.display_name.slice(0, 1)}</span>
+              <Avatar user={u} className="avatar sm" />
               <span className="conv-title">{u.display_name}</span>
               {u.is_admin && <span className="tag">管理员</span>}
             </button>
@@ -76,7 +77,7 @@ export function Contacts({
           <div className="placeholder">选择联系人查看详情</div>
         ) : (
           <div className="pane contact-detail">
-            <span className="avatar lg">{sel.display_name.slice(0, 1)}</span>
+            <Avatar user={sel} className="avatar lg" />
             <h3>{sel.display_name}</h3>
             <p className="dim">{sel.email}</p>
             <button type="button" className="primary" onClick={() => onOpenDM(sel)}>

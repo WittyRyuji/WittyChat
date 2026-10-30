@@ -102,11 +102,13 @@ button {
   flex-direction: column;
 }
 .side-head {
-  padding: 14px 16px;
+  height: 52px;
+  padding: 0 16px;
   display: flex;
   justify-content: space-between;
   align-items: center;
   border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
 }
 .me {
   font-weight: 600;
@@ -346,11 +348,13 @@ button {
   color: var(--dim);
 }
 .conv-head {
-  padding: 13px 20px;
+  height: 52px;
+  padding: 0 20px;
   border-bottom: 1px solid var(--line);
   display: flex;
   gap: 12px;
-  align-items: baseline;
+  align-items: center;
+  flex-shrink: 0;
 }
 .typing {
   color: var(--dim);
@@ -565,10 +569,10 @@ button {
   border-radius: 10px;
   background: var(--bg2);
   color: var(--fg);
-  padding: 10px 13px;
+  padding: 9px 12px;
   font: inherit;
   outline: none;
-  line-height: 1.5;
+  line-height: 20px;
 }
 .composer textarea:focus {
   border-color: var(--accent);
@@ -644,9 +648,10 @@ button {
   font-weight: 600;
 }
 .composer button[type="submit"] {
-  padding: 7px 22px;
+  height: 40px;
+  padding: 0 18px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--accent);
   color: #fff;
   font-weight: 600;
@@ -910,6 +915,25 @@ button {
   height: 44px;
   font-size: 18px;
 }
+.avatar-img {
+  display: inline-block;
+  object-fit: cover;
+  text-indent: -9999px; /* 图片加载前不露出 alt 文字 */
+}
+.avatar.clickable {
+  cursor: pointer;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+}
+button.avatar {
+  font-family: inherit;
+}
+.avatar .avatar-img,
+button.avatar .avatar-img {
+  width: 100%;
+  height: 100%;
+}
 .contact-info {
   display: flex;
   flex-direction: column;
@@ -991,9 +1015,9 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 8px 10px;
+  margin: 10px 12px;
   padding: 0 10px;
-  height: 32px;
+  height: 36px;
   background: var(--bg3);
   border: 1px solid var(--line);
   border-radius: 8px;

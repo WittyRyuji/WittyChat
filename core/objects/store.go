@@ -126,14 +126,19 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 	}
 
 	obj := &Object{
-		ID: uuid.Must(uuid.NewV7()), Owner: owner, ConvID: &convID, Purpose: purpose,
+		ID: uuid.Must(uuid.NewV7()), Owner: owner, Purpose: purpose,
 		Name: name, Size: n, SHA256: sum, Mime: mime, Location: "local", Status: "ready",
+	}
+	var convArg any // uuid.Nil → NULL (non-conv objects: mail/avatar/…)
+	if convID != uuid.Nil {
+		obj.ConvID = &convID
+		convArg = convID
 	}
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO objects (id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, location, status)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'local','ready')`,
-			obj.ID, owner, convID, purpose, name, n, sum[:], mime); err != nil {
+			obj.ID, owner, convArg, purpose, name, n, sum[:], mime); err != nil {
 			return err
 		}
 		rel, _ := filepath.Rel(s.dataDir, dst)

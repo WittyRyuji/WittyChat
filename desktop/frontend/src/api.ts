@@ -8,6 +8,7 @@ export interface UserPublic {
   status: string;
   is_admin: boolean;
   totp_enabled: boolean;
+  avatar_object_id?: string;
 }
 
 export interface ConversationInfo {
@@ -119,6 +120,8 @@ export const api = {
       { email, password, device_name: "web", device_kind: "web" }
     ),
   me: () => req<{ user: UserPublic }>("GET", "/api/v1/auth/me"),
+  updateMe: (body: { display_name?: string; avatar_object_id?: string }) =>
+    req<{ user: UserPublic }>("PATCH", "/api/v1/users/me", body),
   logout: () => req("POST", "/api/v1/auth/logout"),
 
   directory: () => req<{ conversations: ConversationInfo[] }>("GET", "/api/v1/conversations"),
@@ -215,6 +218,18 @@ export const api2 = {
     return res.json() as Promise<{ id: string; name: string; size: number; mime: string }>;
   },
   downloadURL: (objId: string) => `${API_BASE}/api/v1/objects/${objId}/download`,
+  avatarURL: (userId: string) => `${API_BASE}/api/v1/users/${userId}/avatar`,
+  uploadObject: async (file: File, purpose: string) => {
+    const fd = new FormData();
+    fd.append("file", file, file.name);
+    const res = await fetch(`${API_BASE}/api/v1/objects/upload?purpose=${purpose}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${getToken()}` },
+      body: fd,
+    });
+    if (!res.ok) throw new Error(`upload ${res.status}`);
+    return res.json() as Promise<{ id: string; name: string; size: number; mime: string }>;
+  },
   fetchObject: async (objId: string) => {
     const res = await fetch(api2.downloadURL(objId), {
       headers: { Authorization: `Bearer ${getToken()}` },

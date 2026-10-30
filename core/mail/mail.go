@@ -179,12 +179,28 @@ func (s *Store) RemoveAddress(ctx context.Context, user, id uuid.UUID) error {
 }
 
 // UserForAddress resolves an internal recipient address → user id.
+// Falls back to the login email so recipients who never opened mail
+// still get direct delivery (address is backfilled on first lookup).
+// UserForAddress 解析内部收件人。若对方从未用过邮件，
+// 按其登录邮箱兜底并顺手补配主地址，保证内部直投可达。
 func (s *Store) UserForAddress(ctx context.Context, addr string) (uuid.UUID, error) {
+	addr = strings.ToLower(strings.TrimSpace(addr))
 	var uid uuid.UUID
 	err := s.pool.QueryRow(ctx,
-		`SELECT user_id FROM mail_addresses WHERE address=$1`,
-		strings.ToLower(addr)).Scan(&uid)
-	return uid, err
+		`SELECT user_id FROM mail_addresses WHERE address=$1`, addr).Scan(&uid)
+	if err == nil {
+		return uid, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, err
+	}
+	if err := s.pool.QueryRow(ctx,
+		`SELECT id FROM users WHERE lower(email)=$1 AND status='active'`, addr).Scan(&uid); err != nil {
+		return uuid.Nil, err
+	}
+	_ = s.AddAddress(ctx, uid, addr, "primary")
+	_ = s.EnsureFolders(ctx, uid)
+	return uid, nil
 }
 
 func (s *Store) IsLocal(addr string) bool {

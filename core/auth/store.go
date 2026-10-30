@@ -31,13 +31,14 @@ var (
 )
 
 type User struct {
-	ID          uuid.UUID
-	Email       string
-	DisplayName string
-	Status      string
-	IsAdmin     bool
-	TOTPEnabled bool
-	CreatedAt   time.Time
+	ID             uuid.UUID
+	Email          string
+	DisplayName    string
+	Status         string
+	IsAdmin        bool
+	TOTPEnabled    bool
+	AvatarObjectID *uuid.UUID
+	CreatedAt      time.Time
 }
 
 type Store struct {
@@ -48,11 +49,11 @@ func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
 const userCols = `id, email, display_name, status, is_admin,
 	COALESCE((SELECT totp_enabled FROM credentials c WHERE c.user_id = users.id), false),
-	created_at`
+	avatar_object_id, created_at`
 
 func scanUser(row pgx.Row) (*User, error) {
 	var u User
-	err := row.Scan(&u.ID, &u.Email, &u.DisplayName, &u.Status, &u.IsAdmin, &u.TOTPEnabled, &u.CreatedAt)
+	err := row.Scan(&u.ID, &u.Email, &u.DisplayName, &u.Status, &u.IsAdmin, &u.TOTPEnabled, &u.AvatarObjectID, &u.CreatedAt)
 	return &u, err
 }
 
@@ -182,6 +183,22 @@ func (s *Store) PasswordAuth(ctx context.Context, id uuid.UUID) (hash string, to
 		err = ErrUserNotFound
 	}
 	return
+}
+
+// UpdateProfile patches display_name and/or avatar (nil = keep).
+// UpdateProfile 部分更新昵称/头像（nil 字段保持不变）。
+func (s *Store) UpdateProfile(ctx context.Context, id uuid.UUID, displayName *string, avatar *uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE users SET display_name=COALESCE($2,display_name),
+			avatar_object_id=COALESCE($3,avatar_object_id), updated_at=now() WHERE id=$1`,
+		id, displayName, avatar)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return nil
 }
 
 func (s *Store) withTx(ctx context.Context, fn func(pgx.Tx) error) error {
