@@ -199,6 +199,7 @@ func (d *Deps) directory(ctx context.Context, in *struct{ Headers }) (*struct {
 		if e.PeerUserID != nil {
 			ci.PeerUserID = e.PeerUserID.String()
 			ci.PeerName = e.PeerName
+			ci.PeerReadSeq = e.PeerReadSeq
 		}
 		out.Body.Conversations = append(out.Body.Conversations, ci)
 	}
@@ -363,6 +364,7 @@ func (d *Deps) sendMessage(ctx context.Context, in *struct {
 	if !existed {
 		status = http.StatusCreated
 	}
+	op.ActorName = u.DisplayName // send response carries the name (fetch fills it via join)
 	event := opEvent(op)
 	d.enrichAttachments(ctx, convID, []*apitypes.OpEvent{event})
 	return &struct {

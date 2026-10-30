@@ -30,6 +30,7 @@ type DirectoryEntry struct {
 	PreviewAt   time.Time
 	PeerUserID  *uuid.UUID // dm: the other party
 	PeerName    string
+	PeerReadSeq int64 // dm: peer's read watermark → 已读回执
 	MemberCount int
 }
 
@@ -50,7 +51,11 @@ SELECT c.id, c.kind, COALESCE(c.title,''), c.is_public, c.last_op_seq,
        CASE WHEN c.kind='dm' THEN
          (SELECT cm.user_id FROM conv_members cm WHERE cm.conv_id=c.id
             AND cm.user_id <> $1 AND cm.left_at IS NULL LIMIT 1)
-       END AS peer_id
+       END AS peer_id,
+       CASE WHEN c.kind='dm' THEN
+         (SELECT cm.last_read_op_seq FROM conv_members cm WHERE cm.conv_id=c.id
+            AND cm.user_id <> $1 AND cm.left_at IS NULL LIMIT 1)
+       END AS peer_read_seq
 FROM conv_members m
 JOIN conversations c ON c.id = m.conv_id
 WHERE m.user_id=$1 AND m.left_at IS NULL
@@ -66,9 +71,13 @@ ORDER BY c.last_op_seq DESC`, userID)
 		e := &DirectoryEntry{}
 		var previewAt *time.Time
 		var peer *uuid.UUID
+		var peerRead *int64
 		if err := rows.Scan(&e.ConvID, &e.Kind, &e.Title, &e.IsPublic, &e.LastOpSeq,
-			&e.LastReadSeq, &e.Unread, &e.Preview, &previewAt, &e.MemberCount, &peer); err != nil {
+			&e.LastReadSeq, &e.Unread, &e.Preview, &previewAt, &e.MemberCount, &peer, &peerRead); err != nil {
 			return nil, err
+		}
+		if peerRead != nil {
+			e.PeerReadSeq = *peerRead
 		}
 		if previewAt != nil {
 			e.PreviewAt = *previewAt

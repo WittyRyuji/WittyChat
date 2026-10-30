@@ -35,6 +35,7 @@ type ConversationInfo struct {
 	PreviewAt   time.Time `json:"preview_at,omitempty"`
 	PeerUserID  string    `json:"peer_user_id,omitempty"` // dm only
 	PeerName    string    `json:"peer_name,omitempty"`
+	PeerReadSeq int64     `json:"peer_read_seq,omitempty"` // dm: peer watermark → 已读回执
 	MemberCount int       `json:"member_count,omitempty"`
 }
 

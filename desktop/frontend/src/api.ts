@@ -22,6 +22,7 @@ export interface ConversationInfo {
   preview_at?: string;
   peer_user_id?: string;
   peer_name?: string;
+  peer_read_seq?: number; // dm: peer's watermark → 已读回执
   member_count?: number;
 }
 

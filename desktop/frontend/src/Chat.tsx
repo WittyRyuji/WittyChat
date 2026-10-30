@@ -10,6 +10,7 @@ import {
   type UserPublic,
   type WsFrame,
 } from "./api";
+import { Md } from "./md";
 
 const MSG_LIMIT = 2000;
 
@@ -381,8 +382,13 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
                 return (
                   <div key={o.op_seq} className={`msg ${mine ? "mine" : ""}`}>
                     <div className="msg-meta">
-                      {o.actor_name} · {new Date(o.created_at).toLocaleTimeString()}
+                      {o.actor_name || me.display_name} ·{" "}
+                      {new Date(o.created_at).toLocaleTimeString()}
                       {o.edited && " · 已编辑"}
+                      {mine &&
+                        active.kind === "dm" &&
+                        (active.peer_read_seq ?? 0) >= o.op_seq &&
+                        " · 已读"}
                     </div>
                     {q && (
                       <div className="quote">
@@ -390,7 +396,7 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
                       </div>
                     )}
                     <div className={`msg-body ${o.recalled ? "recalled" : ""}`}>
-                      {o.recalled ? "消息已撤回" : o.body}
+                      {o.recalled ? "消息已撤回" : <Md text={o.body ?? ""} />}
                     </div>
                     {!o.recalled && Array.isArray(o.payload?.attachments) && (
                       <div className="atts">
