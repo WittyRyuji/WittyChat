@@ -406,9 +406,12 @@ button {
 .composer {
   border-top: 1px solid var(--line);
   padding: 12px 20px;
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
 }
 .composer textarea {
-  width: 100%;
+  flex: 1;
   resize: none;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -422,19 +425,24 @@ button {
 .composer textarea:focus {
   border-color: var(--accent);
 }
-.composer-foot {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-top: 8px;
-  gap: 10px;
-}
 .attach-btn {
-  font-size: 16px;
-  padding: 4px 8px;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg2);
+  color: var(--dim);
+  font-size: 20px;
+  line-height: 1;
+  flex-shrink: 0;
 }
-.composer-foot .count {
-  margin-left: auto;
+.attach-btn:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.composer .count {
+  align-self: center;
+  white-space: nowrap;
 }
 .atts {
   display: flex;

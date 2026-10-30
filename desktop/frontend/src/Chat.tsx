@@ -569,6 +569,14 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
                 hidden
                 onChange={(e) => pickFile(e.target.files)}
               />
+              <button
+                type="button"
+                className="attach-btn"
+                title="发送附件"
+                onClick={() => fileInput.current?.click()}
+              >
+                +
+              </button>
               <textarea
                 value={text}
                 onChange={(e) => setText(e.target.value)}
@@ -581,25 +589,15 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
                 placeholder="输入消息…"
                 rows={Math.min(6, Math.max(1, text.split("\n").length))}
               />
-              <div className="composer-foot">
-                <button
-                  type="button"
-                  className="ghost attach-btn"
-                  title="发送附件"
-                  onClick={() => fileInput.current?.click()}
-                >
-                  📎
-                </button>
-                <span className={`count ${text.length > MSG_LIMIT ? "over" : ""}`}>
-                  {text.length}/{MSG_LIMIT}
-                </span>
-                <button
-                  type="submit"
-                  disabled={(!text.trim() && files.length === 0) || text.length > MSG_LIMIT}
-                >
-                  发送
-                </button>
-              </div>
+              <span className={`count ${text.length > MSG_LIMIT ? "over" : ""}`}>
+                {text.length}/{MSG_LIMIT}
+              </span>
+              <button
+                type="submit"
+                disabled={(!text.trim() && files.length === 0) || text.length > MSG_LIMIT}
+              >
+                发送
+              </button>
             </form>
           </>
         )}
