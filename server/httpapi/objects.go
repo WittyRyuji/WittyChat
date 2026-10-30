@@ -36,6 +36,7 @@ func registerObjects(mux *http.ServeMux, d *Deps) {
 	mux.HandleFunc("POST /api/v1/objects/multipart/init", d.multipartInit)
 	mux.HandleFunc("POST /api/v1/objects/multipart/complete", d.multipartComplete)
 	mux.HandleFunc("GET /api/v1/objects/quota", d.storageQuota)
+	mux.HandleFunc("GET /api/v1/workspace/logo", d.workspaceLogo)
 }
 
 // objectUser authorizes by session bearer OR a valid exp+sig signature
@@ -549,4 +550,39 @@ func escapeName(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// GET /workspace/logo — the org logo set via admin settings
+// (workspace.logo_object_id). Any workspace member may read it; logo is
+// org-shared rather than owner-scoped, so normal object ACL doesn't apply.
+// 组织 Logo：管理员在工作区设置里绑定的对象，任意成员可读（非属主私有 ACL）。
+func (d *Deps) workspaceLogo(w http.ResponseWriter, r *http.Request) {
+	if _, err := d.bearerUser(r); err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	raw := d.Settings.Str(r.Context(), "workspace.logo_object_id", "")
+	objID, err := uuid.Parse(raw)
+	if raw == "" || err != nil {
+		http.Error(w, "no logo", http.StatusNotFound)
+		return
+	}
+	obj, err := d.Objects.Peek(r.Context(), objID)
+	if err != nil {
+		http.Error(w, "no logo", http.StatusNotFound)
+		return
+	}
+	rc, err := d.Objects.Open(r.Context(), obj)
+	if err != nil {
+		http.Error(w, "read failed", http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = rc.Close() }()
+	mime := obj.Mime
+	if !strings.HasPrefix(mime, "image/") {
+		mime = "image/png"
+	}
+	w.Header().Set("Content-Type", mime)
+	w.Header().Set("Cache-Control", "private, max-age=300")
+	_, _ = io.Copy(w, rc)
 }

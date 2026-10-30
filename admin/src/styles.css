@@ -194,3 +194,16 @@ code {
 	font-family: Consolas, monospace;
 	font-size: 12px;
 }
+
+.wslogo {
+	width: 34px;
+	height: 34px;
+	border-radius: 8px;
+	object-fit: cover;
+	border: 1px solid var(--bd, #ddd);
+}
+
+.wslogo-btn {
+	cursor: pointer;
+	display: inline-block;
+}

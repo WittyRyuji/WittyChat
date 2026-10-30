@@ -144,6 +144,7 @@ export function Chat({
   const [viewer, setViewer] = useState<{ url: string; name: string } | null>(null);
   const [msgLimit, setMsgLimit] = useState(MSG_LIMIT);
   const [wsName, setWsName] = useState("W");
+  const [wsLogo, setWsLogo] = useState("");
   const [searchQ, setSearchQ] = useState("");
   const [searchHits, setSearchHits] = useState<MessageSearchHit[] | null>(null);
 
@@ -284,6 +285,7 @@ export function Chat({
       .then((s) => {
         setMsgLimit(s.im.message_max_chars);
         setWsName(s.workspace.name);
+        setWsLogo(s.workspace.logo_object_id ? api2.workspaceLogoURL() : "");
       })
       .catch(() => {});
     let dead = false;
@@ -482,7 +484,7 @@ export function Chat({
   if (view !== "chat") {
     return (
       <div className="app">
-        <Rail view={view} setView={setView} logo={wsName} />
+        <Rail view={view} setView={setView} logo={wsName} logoUrl={wsLogo} />
         {view === "mail" && <Mail />}
         {view === "contacts" && (
           <Contacts
@@ -511,7 +513,7 @@ export function Chat({
 
   return (
     <div className="app">
-      <Rail view={view} setView={setView} logo={wsName} />
+      <Rail view={view} setView={setView} logo={wsName} logoUrl={wsLogo} />
       <div className="chat">
         <aside className="sidebar">
           <div className="side-head">
@@ -839,10 +841,12 @@ function Rail({
   view,
   setView,
   logo,
+  logoUrl,
 }: {
   view: string;
   setView: (v: "chat" | "contacts" | "mail" | "zen" | "settings") => void;
   logo: string;
+  logoUrl?: string;
 }) {
   const items = [
     { key: "chat", title: "消息", icon: <IconChat /> },
@@ -853,7 +857,7 @@ function Rail({
   return (
     <nav className="rail">
       <span className="rail-logo" title={logo}>
-        {logo.slice(0, 1).toUpperCase()}
+        {logoUrl ? <img src={logoUrl} alt={logo} /> : logo.slice(0, 1).toUpperCase()}
       </span>
       {items.map((i) => (
         <button

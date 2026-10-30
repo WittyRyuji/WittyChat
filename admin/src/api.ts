@@ -88,6 +88,19 @@ export const api = {
 	settingsSet: (settings: Record<string, unknown>) =>
 		req("PUT", "/api/v1/admin/settings", { settings }),
 
+	uploadLogo: async (file: File) => {
+		const fd = new FormData();
+		fd.append("file", file, file.name);
+		const res = await fetch("/api/v1/objects/upload?purpose=workspace_logo", {
+			method: "POST",
+			headers: { Authorization: `Bearer ${getToken()}` },
+			body: fd,
+		});
+		if (!res.ok) throw new Error(`upload ${res.status}`);
+		return res.json() as Promise<{ id: string; name: string }>;
+	},
+	logoUrl: () => `/api/v1/workspace/logo?token=${getToken()}`,
+
 	objects: (owner: string, from: string, to: string) =>
 		req<{ objects: AdminObject[] }>(
 			"GET",

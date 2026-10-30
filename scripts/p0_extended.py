@@ -387,5 +387,40 @@ check("session list", st == 200 and len(json.loads(b).get("sessions", json.loads
 st, b = req("POST", "/api/v1/auth/login", {"email": email, "password": "wrong"})
 check("wrong password rejected", st == 401, str(st))
 
+# ================= workspace logo =================
+import struct as _st, zlib as _zl
+def _png():
+    w = h = 32
+    raw = b"".join(b"\x00" + b"\x11\x22\x33" * w for _ in range(h))
+    def _c(t, d):
+        return _st.pack(">I", len(d)) + t + d + _st.pack(">I", _zl.crc32(t + d) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + _c(b"IHDR", _st.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + _c(b"IDAT", _zl.compress(raw)) + _c(b"IEND", b""))
+
+st, logo_obj = upload_purpose(admin, "workspace_logo", f"p0x-logo-{uuid.uuid4().hex[:6]}.png", "image/png", _png())
+check("logo upload", st == 200, str(st))
+logo_id = logo_obj.get("id") if isinstance(logo_obj, dict) else None
+st, b = req("PUT", "/api/v1/admin/settings",
+            {"settings": {"workspace.logo_object_id": logo_id}}, admin)
+check("logo set admin", st in (200, 204), str(st))
+st, b = req("PUT", "/api/v1/admin/settings",
+            {"settings": {"workspace.logo_object_id": "x"}}, p0x)
+check("logo set non-admin denied", st == 403, str(st))
+st, b = req("GET", "/api/v1/settings", None, p0x)
+check("effective settings exposes logo",
+      st == 200 and json.loads(b).get("workspace", {}).get("logo_object_id") == logo_id, str(st))
+st, b = req("GET", "/api/v1/workspace/logo", None, p0x)
+check("logo readable by member", st == 200 and b.startswith(b"\x89PNG"), str(st))
+st, b = req("GET", "/api/v1/workspace/logo", None, None)
+check("logo requires auth", st == 401, str(st))
+st, b = req("PUT", "/api/v1/admin/settings",
+            {"settings": {"workspace.logo_object_id": ""}}, admin)
+check("logo clear", st in (200, 204), str(st))
+st, b = req("GET", "/api/v1/workspace/logo", None, admin)
+check("logo 404 after clear", st == 404, str(st))
+# restore so the desktop rail keeps a logo for manual QA
+req("PUT", "/api/v1/admin/settings",
+    {"settings": {"workspace.logo_object_id": logo_id}}, admin)
+
 print(f"\n{len(passed)} passed, {len(failed)} failed")
 sys.exit(1 if failed else 0)

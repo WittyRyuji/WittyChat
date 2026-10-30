@@ -9,6 +9,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"wittychat/core/agents"
 	"wittychat/core/audit"
@@ -76,7 +77,51 @@ func New(d *Deps) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	return securityHeaders(mux)
+	return cors(securityHeaders(mux))
+}
+
+// cors allows cross-origin API access for trusted client shells only —
+// the Wails desktop app serves assets from http(s)://wails.localhost /
+// wails://wails.localhost, so its fetch to the backend is cross-origin.
+// Extra origins via WITTYCHAT_CORS_ORIGINS (comma-separated). Bearer-token
+// auth means cookies are never involved, so ACAO reflection is safe.
+// CORS：仅放行受信客户端壳（桌面 App 的资源源是 wails.localhost，
+// 跨域 fetch 需要 ACAO）；其余来源不带 CORS 头，浏览器继续拦截。
+func cors(next http.Handler) http.Handler {
+	allowed := map[string]bool{
+		"http://wails.localhost":     true,
+		"https://wails.localhost":    true,
+		"wails://wails.localhost":    true,
+		"tauri://localhost":          true,
+		"http://tauri.localhost":     true,
+		"http://localhost:9245":      true,
+		"https://localhost:9245":     true,
+		"capacitor://localhost":      true,
+		"http://capacitor.localhost": true,
+	}
+	for _, o := range strings.Split(os.Getenv("WITTYCHAT_CORS_ORIGINS"), ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			allowed[o] = true
+		}
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin == "" || !allowed[origin] {
+			next.ServeHTTP(w, r)
+			return
+		}
+		h := w.Header()
+		h.Set("Access-Control-Allow-Origin", origin)
+		h.Set("Vary", "Origin")
+		if r.Method == http.MethodOptions {
+			h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			h.Set("Access-Control-Max-Age", "600")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ---------- helpers / 辅助 ----------

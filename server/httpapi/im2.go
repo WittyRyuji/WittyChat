@@ -276,7 +276,8 @@ func (d *Deps) effectiveSettings(ctx context.Context, in *struct{ Headers }) (*s
 	}
 	return &struct{ Body any }{Body: map[string]any{
 		"workspace": map[string]any{
-			"name": d.Settings.Str(ctx, "workspace.name", "WittyChat"),
+			"name":           d.Settings.Str(ctx, "workspace.name", "WittyChat"),
+			"logo_object_id": d.Settings.Str(ctx, "workspace.logo_object_id", ""),
 		},
 		"im": map[string]any{
 			"message_max_chars":  limit,

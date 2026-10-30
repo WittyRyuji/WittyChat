@@ -417,6 +417,7 @@ const POLICY_FIELDS: {
 	label: string;
 	kind: "int" | "bool" | "str";
 }[] = [
+	{ key: "workspace.name", label: "组织名称", kind: "str" },
 	{ key: "security.min_password", label: "密码最小长度", kind: "int" },
 	{
 		key: "security.lock_threshold",
@@ -435,12 +436,39 @@ const POLICY_FIELDS: {
 function Security() {
 	const [vals, setVals] = useState<Record<string, unknown>>({});
 	const [msg, setMsg] = useState("");
+	const [logoId, setLogoId] = useState("");
+	const [logoVer, setLogoVer] = useState(0);
 	useEffect(() => {
 		api
 			.settingsGet()
-			.then((d) => setVals(d.settings))
+			.then((d) => {
+				setVals(d.settings);
+				setLogoId(String(d.settings["workspace.logo_object_id"] ?? ""));
+			})
 			.catch(() => {});
 	}, []);
+
+	const uploadLogo = async (f: File) => {
+		setMsg("");
+		try {
+			const o = await api.uploadLogo(f);
+			await api.settingsSet({ "workspace.logo_object_id": o.id });
+			setLogoId(o.id);
+			setLogoVer((v) => v + 1);
+			setMsg("Logo 已更新");
+		} catch (e) {
+			setMsg(e instanceof Error ? e.message : "上传失败");
+		}
+	};
+	const removeLogo = async () => {
+		setMsg("");
+		try {
+			await api.settingsSet({ "workspace.logo_object_id": "" });
+			setLogoId("");
+		} catch (e) {
+			setMsg(e instanceof Error ? e.message : "移除失败");
+		}
+	};
 
 	const save = async () => {
 		setMsg("");
@@ -455,6 +483,36 @@ function Security() {
 	return (
 		<section className="panel">
 			<h3>安全与工作区策略</h3>
+			<div className="row">
+				<span className="flabel">组织 Logo</span>
+				{logoId ? (
+					<img
+						src={`${api.logoUrl()}&v=${logoVer}`}
+						className="wslogo"
+						alt="组织 Logo"
+					/>
+				) : (
+					<span className="dim">未设置（客户端显示组织名首字母）</span>
+				)}
+				<label className="primary wslogo-btn">
+					{logoId ? "更换" : "上传"}
+					<input
+						type="file"
+						accept="image/*"
+						hidden
+						onChange={(e) => {
+							const f = e.target.files?.[0];
+							if (f) uploadLogo(f);
+							e.target.value = "";
+						}}
+					/>
+				</label>
+				{logoId && (
+					<button type="button" className="ghost" onClick={removeLogo}>
+						移除
+					</button>
+				)}
+			</div>
 			{POLICY_FIELDS.map((f) => (
 				<div key={f.key} className="row">
 					<span className="flabel">{f.label}</span>

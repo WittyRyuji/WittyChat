@@ -84,14 +84,19 @@ export function setToken(t: string) {
   else localStorage.removeItem(TOKEN_KEY);
 }
 
-// API base: "" in browser dev (vite proxy), :8080 inside the Wails shell.
-// localStorage "wittychat.server" overrides (e.g. https://im.corp.example for
-// a remote TLS endpoint — set once from devtools or a future server-picker UI).
-// API 基址：浏览器开发环境走 vite 代理（""），Wails 壳内直连服务端；
+// API base: "" in browser dev (vite proxy), backend origin inside Wails.
+// Wails v3 serves assets via http(s)://wails.localhost — protocol alone can't
+// distinguish the shell from a real browser, so detect it explicitly.
+// localStorage "wittychat.server" overrides for remote/HTTPS instances.
+// API 基址：浏览器开发环境走 vite 代理（""）；Wails 壳内资源也是 http(s)
+// 来源（wails.localhost），需显式识别壳环境后直连服务端；
 // localStorage "wittychat.server" 可覆盖指向远程/HTTPS 实例。
+const inWails = location.hostname === "wails.localhost" || location.protocol === "wails:";
 export const API_BASE =
   localStorage.getItem("wittychat.server") ??
-  (location.protocol === "http:" || location.protocol === "https:" ? "" : "http://localhost:8080");
+  (inWails || !(location.protocol === "http:" || location.protocol === "https:")
+    ? "http://localhost:8080"
+    : "");
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(API_BASE + path, {
@@ -199,7 +204,7 @@ export const api = {
     }>("GET", "/api/v1/assistants"),
   settings: () =>
     req<{
-      workspace: { name: string };
+      workspace: { name: string; logo_object_id?: string };
       im: {
         message_max_chars: number;
         recall_timeout_sec: number;
@@ -237,6 +242,7 @@ export const api2 = {
     if (!res.ok) throw new Error(`thumb ${res.status}`);
   },
   avatarURL: (userId: string) => `${API_BASE}/api/v1/users/${userId}/avatar`,
+  workspaceLogoURL: () => `${API_BASE}/api/v1/workspace/logo?token=${getToken()}`,
   uploadObject: async (file: File, purpose: string) => {
     const fd = new FormData();
     fd.append("file", file, file.name);

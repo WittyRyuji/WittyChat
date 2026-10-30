@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"log"
+	"os"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -26,6 +27,15 @@ func init() {
 // main function serves as the application's entry point. It initializes the application, creates a window,
 // and starts a goroutine that emits a time-based event every second. It subsequently runs the application and
 // logs any error that might occur.
+// debugArgs enables WebView2 CDP when WITTYCHAT_DEBUG_PORT is set.
+// WITTYCHAT_DEBUG_PORT 设置时才开 WebView2 远程调试端口。
+func debugArgs() []string {
+	if p := os.Getenv("WITTYCHAT_DEBUG_PORT"); p != "" {
+		return []string{"--remote-debugging-port=" + p}
+	}
+	return nil
+}
+
 func main() {
 	// Create a new Wails application by providing the necessary options.
 	// Variables 'Name' and 'Description' are for application metadata.
@@ -43,6 +53,12 @@ func main() {
 		},
 		Mac: application.MacOptions{
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
+		},
+		Windows: application.WindowsOptions{
+			// Remote debugging only when explicitly requested — an open CDP
+			// port lets any local process drive the webview and read session
+			// tokens. Enable with WITTYCHAT_DEBUG_PORT=9333 for support.
+			AdditionalBrowserArgs: debugArgs(),
 		},
 	})
 
