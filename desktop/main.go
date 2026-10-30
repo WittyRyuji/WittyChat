@@ -55,6 +55,12 @@ func main() {
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
 		},
 		Windows: application.WindowsOptions{
+			// Visual hosting: composes the webview into the window's visual
+			// tree instead of a child HWND — fixes content trailing behind
+			// the frame when the window is dragged (windowed-hosting lag).
+			// 可视托管：WebView 内容合成进窗口视觉树而非子 HWND，
+			// 修复拖动窗口时内容拖尾的 lag。
+			UseVisualHosting: true,
 			// Remote debugging only when explicitly requested — an open CDP
 			// port lets any local process drive the webview and read session
 			// tokens. Enable with WITTYCHAT_DEBUG_PORT=9333 for support.
