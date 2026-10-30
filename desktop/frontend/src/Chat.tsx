@@ -642,44 +642,44 @@ export function Chat({
                         )}
                         {!o.recalled && atts.length > 0 && (
                           <div className="atts">
-                          {atts.map((a) =>
-                            a.mime?.startsWith("image/") ? (
-                              <button
-                                type="button"
-                                key={a.id}
-                                className="att-img"
-                                title={`${a.name} · 点击查看大图`}
-                                onClick={() =>
-                                  setViewer({ url: api2.downloadURL(a.id), name: a.name })
-                                }
-                              >
-                                <img
-                                  src={api2.thumbURL(a.id)}
-                                  alt={a.name}
-                                  loading="lazy"
-                                  onError={(e) => {
-                                    // thumb task may not have run yet — fall back to full image
-                                    const img = e.currentTarget;
-                                    if (!img.dataset.fbk) {
-                                      img.dataset.fbk = "1";
-                                      img.src = api2.downloadURL(a.id);
-                                    }
-                                  }}
-                                />
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                key={a.id}
-                                className="att"
-                                title="下载"
-                                onClick={() => saveBlob(a.id, a.name)}
-                              >
-                                📎 {a.name}
-                                <span className="att-size">{fmtSize(a.size)}</span>
-                              </button>
-                            )
-                          )}
+                            {atts.map((a) =>
+                              a.mime?.startsWith("image/") ? (
+                                <button
+                                  type="button"
+                                  key={a.id}
+                                  className="att-img"
+                                  title={`${a.name} · 点击查看大图`}
+                                  onClick={() =>
+                                    setViewer({ url: api2.downloadURL(a.id), name: a.name })
+                                  }
+                                >
+                                  <img
+                                    src={api2.thumbURL(a.id)}
+                                    alt={a.name}
+                                    loading="lazy"
+                                    onError={(e) => {
+                                      // thumb task may not have run yet — fall back to full image
+                                      const img = e.currentTarget;
+                                      if (!img.dataset.fbk) {
+                                        img.dataset.fbk = "1";
+                                        img.src = api2.downloadURL(a.id);
+                                      }
+                                    }}
+                                  />
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  key={a.id}
+                                  className="att"
+                                  title="下载"
+                                  onClick={() => saveBlob(a.id, a.name)}
+                                >
+                                  📎 {a.name}
+                                  <span className="att-size">{fmtSize(a.size)}</span>
+                                </button>
+                              )
+                            )}
                           </div>
                         )}
                         {mine && !o.recalled && (

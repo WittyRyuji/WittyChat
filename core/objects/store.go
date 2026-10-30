@@ -128,12 +128,16 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 	var sum [32]byte
 	copy(sum[:], h.Sum(nil))
 
-	// Dedup: same sha256 already exists → reuse object, drop temp.
+	// Dedup: same sha256 by the same owner into the same conv → reuse the row.
+	// Cross-owner/conv uploads need their own row for correct ownership + ACL;
+	// identical bytes still share the sha-named file on disk.
+	// 去重仅限同主同会话；跨主/跨会话各自建行以保归属与 ACL，磁盘文件仍共享。
 	var existing Object
 	var sha []byte
 	err = s.pool.QueryRow(ctx,
 		`SELECT id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, location, status, created_at
-		 FROM objects WHERE sha256=$1 AND status<>'deleted' LIMIT 1`, sum[:]).
+		 FROM objects WHERE sha256=$1 AND owner_user=$2 AND conv_id IS NOT DISTINCT FROM $3::uuid
+		   AND status<>'deleted' LIMIT 1`, sum[:], owner, nilUUID(convID)).
 		Scan(&existing.ID, &existing.Owner, &existing.ConvID, &existing.Purpose, &existing.Name,
 			&existing.Size, &sha, &existing.Mime, &existing.Location, &existing.Status, &existing.CreatedAt)
 	if err == nil {

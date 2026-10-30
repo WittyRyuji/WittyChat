@@ -592,6 +592,14 @@ button {
   color: var(--fg);
   border-color: var(--accent);
 }
+.count {
+  font-size: 12px;
+  color: var(--dim);
+}
+.count.over {
+  color: var(--danger);
+  font-weight: 600;
+}
 .composer .count {
   align-self: center;
   white-space: nowrap;
@@ -644,14 +652,6 @@ button {
 .chip em {
   color: var(--dim);
   font-style: normal;
-}
-.count {
-  font-size: 12px;
-  color: var(--dim);
-}
-.count.over {
-  color: var(--danger);
-  font-weight: 600;
 }
 .composer button[type="submit"] {
   height: 40px;
@@ -753,10 +753,6 @@ button {
 .mail-item.active {
   background: var(--bg3);
 }
-.mail-item.unread .mail-subj,
-.mail-item.unread .mail-from {
-  font-weight: 700;
-}
 .mail-line1 {
   display: flex;
   justify-content: space-between;
@@ -775,6 +771,10 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.mail-item.unread .mail-subj,
+.mail-item.unread .mail-from {
+  font-weight: 700;
 }
 .mail-date {
   flex-shrink: 0;
@@ -1225,9 +1225,6 @@ button.avatar .avatar-img {
   color: #e5534b;
   width: 100%;
 }
-.dim {
-  color: var(--dim);
-}
 
 /* ---------- rail logo / 工作区标 ---------- */
 .rail-logo {
@@ -1257,6 +1254,7 @@ button.avatar .avatar-img {
   border-radius: 8px;
   color: var(--dim);
 }
+/* biome-ignore lint/style/noDescendingSpecificity: disjoint subtree from .modal.compose input / 子树不相交 */
 .conv-search input {
   flex: 1;
   min-width: 0;
@@ -1330,6 +1328,7 @@ button.avatar .avatar-img {
   flex-shrink: 0;
   padding: 0;
 }
+/* biome-ignore lint/style/noDescendingSpecificity: disjoint subtree from .set-row>.lbl i / 子树不相交 */
 .switch i {
   position: absolute;
   top: 2px;

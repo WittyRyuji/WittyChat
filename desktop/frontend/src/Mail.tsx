@@ -328,6 +328,7 @@ export function Mail() {
       </section>
 
       {menu && (
+        /* biome-ignore lint/a11y/noStaticElementInteractions: click-away dismiss layer / 点空白处关菜单 */
         <div
           className="ctxmask"
           role="presentation"

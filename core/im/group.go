@@ -186,13 +186,23 @@ func (s *Store) SearchMessages(ctx context.Context, userID uuid.UUID, q string, 
 		limit = 50
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT o.conv_id, o.op_seq, o.body, COALESCE(u.display_name,''),
+		`SELECT o.conv_id, o.op_seq, COALESCE(e.payload->>'markdown', o.body),
+		        COALESCE(u.display_name,''),
 		        COALESCE(c.title,''), o.created_at::text
 		 FROM conv_ops o
 		 JOIN conv_members m ON m.conv_id=o.conv_id AND m.user_id=$1 AND m.left_at IS NULL
 		 JOIN conversations c ON c.id=o.conv_id
 		 LEFT JOIN users u ON u.id=o.actor_id
-		 WHERE o.kind='message' AND o.body IS NOT NULL AND o.body ILIKE '%'||$2||'%'
+		 LEFT JOIN LATERAL (
+		   SELECT payload FROM conv_ops e
+		   WHERE e.conv_id=o.conv_id AND e.kind='edit' AND e.target_op_seq=o.op_seq
+		   ORDER BY e.op_seq DESC LIMIT 1
+		 ) e ON true
+		 WHERE o.kind='message'
+		   AND COALESCE(e.payload->>'markdown', o.body) ILIKE '%'||$2||'%'
+		   AND NOT EXISTS (
+		     SELECT 1 FROM conv_ops r
+		     WHERE r.conv_id=o.conv_id AND r.kind='recall' AND r.target_op_seq=o.op_seq)
 		 ORDER BY o.created_at DESC LIMIT $3`, userID, q, limit)
 	if err != nil {
 		return nil, err

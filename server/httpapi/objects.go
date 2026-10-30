@@ -197,7 +197,12 @@ func (d *Deps) thumbObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := d.Objects.Get(r.Context(), objID, uid); err != nil {
-		if !errors.Is(err, objects.ErrForbidden) || !d.objectViaMail(r.Context(), objID, uid) {
+		if errors.Is(err, objects.ErrForbidden) {
+			if !d.objectViaMail(r.Context(), objID, uid) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+		} else {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -229,8 +234,12 @@ func (d *Deps) uploadThumb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	obj, err := d.Objects.Peek(r.Context(), objID)
-	if err != nil || obj.Owner != uid {
+	if err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if obj.Owner != uid {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<20) // thumbs must stay tiny / 缩略图限 2MB
@@ -332,7 +341,7 @@ func (d *Deps) objectFilter(w http.ResponseWriter, r *http.Request) (uuid.UUID, 
 	}
 	to, err := time.Parse("2006-01-02", q.Get("to"))
 	if err != nil {
-		to = from.AddDate(0, 0, 1)
+		to = time.Now().UTC().AddDate(0, 0, 1) // default: through today / 缺省含今天
 	}
 	return owner, from.UTC(), to.UTC(), nil
 }

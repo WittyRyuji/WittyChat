@@ -36,6 +36,9 @@ func (d *Deps) agentList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "query failed", http.StatusInternalServerError)
 		return
 	}
+	if as == nil {
+		as = []agents.Assistant{} // keep the JSON shape a list, not null / 空列表不返 null
+	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"assistants": as})
 }
 
