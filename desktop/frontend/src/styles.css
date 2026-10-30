@@ -316,6 +316,9 @@ button {
 }
 
 /* markdown / 渲染 */
+.md {
+  white-space: normal; /* 阻断 .msg-body 的 pre-wrap:标签间换行不渲染成空行 */
+}
 .md > :first-child {
   margin-top: 0;
 }

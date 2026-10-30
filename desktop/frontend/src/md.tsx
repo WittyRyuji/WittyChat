@@ -51,5 +51,5 @@ export function renderMd(src: string): string {
 export function Md({ text }: { text: string }) {
   const html = useMemo(() => renderMd(text), [text]);
   // biome-ignore lint/security/noDangerouslySetInnerHtml: sanitized above
-  return <span className="md" dangerouslySetInnerHTML={{ __html: html }} />;
+  return <div className="md" dangerouslySetInnerHTML={{ __html: html }} />;
 }
