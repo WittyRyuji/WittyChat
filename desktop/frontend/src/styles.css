@@ -364,7 +364,9 @@ button {
 }
 .ops {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden; /* 消息内容再宽也不许撑出横向滚动 */
   padding: 16px 20px;
   display: flex;
   flex-direction: column;
@@ -383,6 +385,7 @@ button {
 }
 .msg {
   max-width: 70%;
+  min-width: 0;
   position: relative;
 }
 .msg.mine {
@@ -801,7 +804,7 @@ button {
 .app {
   display: flex;
   height: 100vh;
-  width: 100vw;
+  width: 100%;
   overflow: hidden;
   background: var(--bg);
 }
