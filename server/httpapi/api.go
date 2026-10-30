@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"wittychat/core/agents"
 	"wittychat/core/audit"
 	"wittychat/core/auth"
 	"wittychat/core/im"
@@ -40,6 +41,7 @@ type Deps struct {
 	Settings  *settings.Store
 	Signer    *objects.Signer // short-lived download URLs / 签名下载URL
 	Mail      *mail.Store
+	Agents    *agents.Store
 }
 
 // New builds the root handler: API routes + HTML pages + healthz.
@@ -55,6 +57,7 @@ func New(d *Deps) http.Handler {
 	registerWS(mux, d)
 	registerObjects(mux, d)
 	registerMail(mux, d)
+	registerAgents(mux, d)
 
 	// Typing fan-out: hub asks im for the member list lazily.
 	// 输入中扇出：hub 按需向 im 要成员列表。

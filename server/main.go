@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	"wittychat/core/agents"
 	"wittychat/core/audit"
 	"wittychat/core/auth"
 	"wittychat/core/db"
@@ -114,6 +115,7 @@ func cmdServe() {
 		Settings:  settingsStore,
 		Signer:    objects.NewSigner(key),
 		Mail:      mail.NewStore(pool, envOr("WITTYCHAT_MAIL_DOMAIN", "wittyloong.com")),
+		Agents:    agents.NewStore(pool),
 	}
 
 	addr := envOr("WITTYCHAT_ADDR", ":8080")
