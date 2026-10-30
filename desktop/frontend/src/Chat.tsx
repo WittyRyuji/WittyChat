@@ -147,7 +147,13 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
           acc.sort((a, b) => a.op_seq - b.op_seq);
           setStates((p) => ({
             ...p,
-            [convId]: { ops: acc, watermark: wm, hasOlder: cur.hasOlder, loaded: true },
+            // Full fetch from seq 0 → nothing older exists.
+            [convId]: {
+              ops: acc,
+              watermark: wm,
+              hasOlder: cur.watermark === 0 ? false : cur.hasOlder,
+              loaded: true,
+            },
           }));
           setPending((p) => {
             const got = new Set(acc.map((o) => o.client_msg_id).filter(Boolean));
@@ -165,26 +171,37 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
     });
   }, []);
 
+  const loadingOlder = useRef<Record<string, boolean>>({});
+  const needInitScroll = useRef(false);
+
   const loadOlder = useCallback(
     async (convId: string) => {
       const cur = states[convId];
-      if (!cur?.hasOlder || cur.ops.length === 0) return;
-      const el = scrollRef.current;
-      const prevHeight = el?.scrollHeight ?? 0;
-      const oldest = cur.ops[0].op_seq;
-      const page = await api.opsBefore(convId, oldest);
-      setStates((p) => {
-        const c = p[convId];
-        if (!c) return p;
-        const older = page.ops.filter((o) => !c.ops.some((x) => x.op_seq === o.op_seq));
-        return {
-          ...p,
-          [convId]: { ...c, ops: [...older, ...c.ops], hasOlder: page.has_more },
-        };
-      });
-      requestAnimationFrame(() => {
-        if (el) el.scrollTop = el.scrollHeight - prevHeight;
-      });
+      if (!cur?.hasOlder || cur.ops.length === 0 || loadingOlder.current[convId]) return;
+      loadingOlder.current[convId] = true;
+      try {
+        const el = scrollRef.current;
+        const prevHeight = el?.scrollHeight ?? 0;
+        const page = await api.opsBefore(convId, cur.ops[0].op_seq);
+        setStates((p) => {
+          const c = p[convId];
+          if (!c) return p;
+          const older = page.ops.filter((o) => !c.ops.some((x) => x.op_seq === o.op_seq));
+          return {
+            ...p,
+            [convId]: { ...c, ops: [...older, ...c.ops], hasOlder: page.has_more },
+          };
+        });
+        // Only restore viewport when older ops actually prepended —
+        // an empty page must not snap scrollTop to 0.
+        if (page.ops.length > 0) {
+          requestAnimationFrame(() => {
+            if (el) el.scrollTop = el.scrollHeight - prevHeight;
+          });
+        }
+      } finally {
+        loadingOlder.current[convId] = false;
+      }
     },
     [states]
   );
@@ -271,20 +288,26 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
     setQuote(null);
     setText("");
     setFiles([]);
+    needInitScroll.current = true; // 进会话跳到底
     if (!states[activeId]?.loaded) fetchDelta(activeId);
     loadMembers(activeId);
     const c = convs.find((x) => x.id === activeId);
     if (c && c.last_op_seq > 0) api.markRead(activeId, c.last_op_seq).catch(() => {});
   }, [activeId]);
 
-  // Scroll to bottom on new messages (when near bottom) or conv switch.
+  // Conv switch → jump to latest; new ops while near bottom → keep pinned.
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll triggers
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el) return;
+    if (!el || !st?.loaded) return;
+    if (needInitScroll.current) {
+      needInitScroll.current = false;
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
     if (nearBottom) el.scrollTop = el.scrollHeight;
-  }, [st?.ops.length, activeId]);
+  }, [st?.ops.length, st?.loaded, activeId]);
 
   const onScroll = () => {
     const el = scrollRef.current;
