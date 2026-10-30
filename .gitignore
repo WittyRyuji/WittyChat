@@ -34,3 +34,5 @@ data/
 .task
 bin/
 desktop/frontend/bindings/
+admin/dist
+server/adminui/dist

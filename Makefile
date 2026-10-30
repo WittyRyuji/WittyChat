@@ -37,3 +37,6 @@ bindings: ## Regenerate Wails TS bindings / 重新生成前端绑定
 
 frontend-build: bindings ## Build desktop frontend / 构建桌面前端
 	cd desktop/frontend && corepack pnpm install --frozen-lockfile && corepack pnpm build
+
+admin-build: ## Build admin SPA → server/adminui/dist (embedded) / 构建管理后台
+	cd admin && corepack pnpm install --frozen-lockfile && corepack pnpm build
