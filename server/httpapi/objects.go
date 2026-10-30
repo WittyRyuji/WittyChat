@@ -9,18 +9,43 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 	"wittychat/core/objects"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/google/uuid"
 )
 
 func registerObjects(mux *http.ServeMux, d *Deps) {
 	mux.HandleFunc("POST /api/v1/conversations/{id}/attachments", d.uploadAttachment)
+	mux.HandleFunc("POST /api/v1/objects/upload", d.uploadObject) // purpose=mail etc, no conv
 	mux.HandleFunc("GET /api/v1/objects/{id}/download", d.downloadObject)
 	mux.HandleFunc("GET /api/v1/objects/{id}/thumb", d.thumbObject)
+	mux.HandleFunc("GET /api/v1/objects/{id}/url", d.signedObjectURL)
+	mux.HandleFunc("POST /api/v1/objects/multipart/init", d.multipartInit)
+	mux.HandleFunc("POST /api/v1/objects/multipart/complete", d.multipartComplete)
+	mux.HandleFunc("GET /api/v1/objects/quota", d.storageQuota)
+}
+
+// objectUser authorizes by session bearer OR a valid exp+sig signature
+// (signed URLs for <img>/mail contexts / 短时效签名 URL 场景).
+func (d *Deps) objectUser(r *http.Request, objID uuid.UUID) (uuid.UUID, error) {
+	if sig := r.URL.Query().Get("sig"); sig != "" && d.Signer != nil {
+		if d.Signer.Verify(objID, r.URL.Query().Get("exp"), sig) {
+			// Possession of a valid signature is itself the authorization
+			// (like s3 presigned URLs). Serve as the owner so Get() passes.
+			obj, err := d.Objects.Peek(r.Context(), objID)
+			if err == nil {
+				return obj.Owner, nil
+			}
+		}
+	}
+	return d.bearerUser(r)
 }
 
 func (d *Deps) bearerUser(r *http.Request) (uuid.UUID, error) {
@@ -46,7 +71,20 @@ func (d *Deps) uploadAttachment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not a member", http.StatusForbidden)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, objects.MaxDirectUpload+1<<20)
+	var maxBytes int64 = objects.MaxDirectUpload
+	quotaBytes := int64(0)
+	if d.Settings != nil {
+		maxBytes = d.Settings.Int(r.Context(), "upload_max_mb", objects.MaxDirectUpload/(1<<20)) << 20
+		quotaBytes = d.Settings.Int(r.Context(), "storage_quota_mb", 0) << 20
+	}
+	if quotaBytes > 0 {
+		used, err := d.Objects.UsedBytes(r.Context())
+		if err == nil && used >= quotaBytes {
+			http.Error(w, "storage quota exceeded / 存储配额已满", http.StatusInsufficientStorage)
+			return
+		}
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes+1<<20)
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		http.Error(w, "missing file / 缺少文件", http.StatusBadRequest)
@@ -55,7 +93,7 @@ func (d *Deps) uploadAttachment(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = file.Close() }()
 
 	obj, dedup, err := d.Objects.Put(r.Context(), uid, convID, "attachment",
-		header.Filename, header.Header.Get("Content-Type"), file, objects.MaxDirectUpload)
+		header.Filename, header.Header.Get("Content-Type"), file, maxBytes)
 	if err != nil {
 		if errors.Is(err, objects.ErrTooLarge) {
 			http.Error(w, "file too large / 文件过大", http.StatusRequestEntityTooLarge)
@@ -63,6 +101,12 @@ func (d *Deps) uploadAttachment(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "upload failed", http.StatusInternalServerError)
 		return
+	}
+	// Antivirus scan hook for every new object (noop scanner by default).
+	if !dedup {
+		_ = d.Objects.Enqueue(r.Context(), "avscan", map[string]any{
+			"object_id": obj.ID.String(),
+		})
 	}
 	// Image → enqueue thumbnail (worker picks it up).
 	if !dedup && strings.HasPrefix(obj.Mime, "image/") {
@@ -78,14 +122,14 @@ func (d *Deps) uploadAttachment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Deps) downloadObject(w http.ResponseWriter, r *http.Request) {
-	uid, err := d.bearerUser(r)
-	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
 	objID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	uid, err := d.objectUser(r, objID)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	obj, err := d.Objects.Get(r.Context(), objID, uid)
@@ -111,6 +155,77 @@ func (d *Deps) downloadObject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Deps) thumbObject(w http.ResponseWriter, r *http.Request) {
+	objID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	uid, err := d.objectUser(r, objID)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if _, err := d.Objects.Get(r.Context(), objID, uid); err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	// Path derived from a parsed uuid under a fixed data dir — safe.
+	//nolint:gosec // no user-controlled path component
+	http.ServeFile(w, r, d.Objects.ThumbPath(objID))
+}
+
+// POST /objects/upload — direct upload not tied to a conversation
+// (mail attachments, future purposes). Same streaming/quota/dedup path.
+func (d *Deps) uploadObject(w http.ResponseWriter, r *http.Request) {
+	uid, err := d.bearerUser(r)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var maxBytes int64 = objects.MaxDirectUpload
+	quotaBytes := int64(0)
+	if d.Settings != nil {
+		maxBytes = d.Settings.Int(r.Context(), "upload_max_mb", objects.MaxDirectUpload/(1<<20)) << 20
+		quotaBytes = d.Settings.Int(r.Context(), "storage_quota_mb", 0) << 20
+	}
+	if quotaBytes > 0 {
+		if used, err := d.Objects.UsedBytes(r.Context()); err == nil && used >= quotaBytes {
+			http.Error(w, "storage quota exceeded / 存储配额已满", http.StatusInsufficientStorage)
+			return
+		}
+	}
+	purpose := r.URL.Query().Get("purpose")
+	if purpose == "" {
+		purpose = "mail"
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes+1<<20)
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "missing file / 缺少文件", http.StatusBadRequest)
+		return
+	}
+	defer func() { _ = file.Close() }()
+	obj, dedup, err := d.Objects.Put(r.Context(), uid, uuid.Nil, purpose,
+		header.Filename, header.Header.Get("Content-Type"), file, maxBytes)
+	if err != nil {
+		if errors.Is(err, objects.ErrTooLarge) {
+			http.Error(w, "file too large / 文件过大", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "upload failed", http.StatusInternalServerError)
+		return
+	}
+	if !dedup {
+		_ = d.Objects.Enqueue(r.Context(), "avscan", map[string]any{"object_id": obj.ID.String()})
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"id": obj.ID.String(), "name": obj.Name, "size": obj.Size,
+		"mime": obj.Mime, "deduplicated": dedup,
+	})
+}
+
+// GET /objects/{id}/url → {url} a short-lived signed download URL.
+func (d *Deps) signedObjectURL(w http.ResponseWriter, r *http.Request) {
 	uid, err := d.bearerUser(r)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -125,9 +240,127 @@ func (d *Deps) thumbObject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	// Path derived from a parsed uuid under a fixed data dir — safe.
-	//nolint:gosec // no user-controlled path component
-	http.ServeFile(w, r, d.Objects.ThumbPath(objID))
+	if d.Signer == nil {
+		http.Error(w, "signing disabled", http.StatusServiceUnavailable)
+		return
+	}
+	exp, sig := d.Signer.Params(objID, 15*time.Minute)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"url": fmt.Sprintf("/api/v1/objects/%s/download?exp=%d&sig=%s", objID, exp, sig),
+	})
+}
+
+// POST /objects/multipart/init {conv_id,name,size,mime,sha256}
+// → {object_id,upload_id,part_size,urls[],deduplicated}
+func (d *Deps) multipartInit(w http.ResponseWriter, r *http.Request) {
+	uid, err := d.bearerUser(r)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		ConvID uuid.UUID `json:"conv_id"`
+		Name   string    `json:"name"`
+		Size   int64     `json:"size"`
+		Mime   string    `json:"mime"`
+		SHA256 string    `json:"sha256"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.Size <= 0 {
+		http.Error(w, "bad request / 请求无效", http.StatusBadRequest)
+		return
+	}
+	if !d.IM.IsMember(r.Context(), req.ConvID, uid) {
+		http.Error(w, "not a member", http.StatusForbidden)
+		return
+	}
+	sha, err := objects.ParseSHA(req.SHA256)
+	if err != nil {
+		http.Error(w, "sha256 must be 64-hex / sha256 需为64位十六进制", http.StatusBadRequest)
+		return
+	}
+	up, urls, err := d.Objects.BeginMultipart(r.Context(), uid, req.ConvID,
+		"attachment", req.Name, req.Mime, req.Size, sha)
+	if errors.Is(err, objects.ErrS3Disabled) {
+		http.Error(w, "multipart disabled: use direct upload / 未启用S3,请用直传", http.StatusNotImplemented)
+		return
+	}
+	if err != nil {
+		http.Error(w, "init failed", http.StatusInternalServerError)
+		return
+	}
+	if len(urls) == 0 {
+		// Dedup hit: object already exists, nothing to upload.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"object_id": up.ObjectID.String(), "deduplicated": true,
+		})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"object_id": up.ObjectID.String(), "upload_id": up.UploadID,
+		"part_size": up.PartSize, "urls": urls, "expires_at": up.ExpiresAt,
+	})
+}
+
+// POST /objects/multipart/complete {object_id, parts:[{part_number,etag}]}
+func (d *Deps) multipartComplete(w http.ResponseWriter, r *http.Request) {
+	uid, err := d.bearerUser(r)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		ObjectID uuid.UUID `json:"object_id"`
+		Parts    []struct {
+			PartNumber int32  `json:"part_number"`
+			ETag       string `json:"etag"`
+		} `json:"parts"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ObjectID == uuid.Nil {
+		http.Error(w, "bad request / 请求无效", http.StatusBadRequest)
+		return
+	}
+	etags := make([]s3types.CompletedPart, len(req.Parts))
+	for i, p := range req.Parts {
+		etags[i] = s3types.CompletedPart{
+			PartNumber: aws.Int32(p.PartNumber), ETag: aws.String(p.ETag),
+		}
+	}
+	obj, err := d.Objects.CompleteMultipart(r.Context(), req.ObjectID, uid, etags)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, objects.ErrForbidden) {
+			status = http.StatusForbidden
+		} else if errors.Is(err, objects.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	if strings.HasPrefix(obj.Mime, "image/") {
+		_ = d.Objects.Enqueue(r.Context(), "thumb", map[string]any{
+			"object_id": obj.ID.String(), "owner": uid.String(),
+		})
+	}
+	_ = d.Objects.Enqueue(r.Context(), "avscan", map[string]any{"object_id": obj.ID.String()})
+	_ = json.NewEncoder(w).Encode(map[string]any{"id": obj.ID.String(), "status": obj.Status})
+}
+
+// GET /objects/quota → {used_bytes, quota_bytes}
+func (d *Deps) storageQuota(w http.ResponseWriter, r *http.Request) {
+	if _, err := d.bearerUser(r); err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	used, err := d.Objects.UsedBytes(r.Context())
+	if err != nil {
+		http.Error(w, "query failed", http.StatusInternalServerError)
+		return
+	}
+	quota := int64(0)
+	if d.Settings != nil {
+		quota = d.Settings.Int(r.Context(), "storage_quota_mb", 0) << 20
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"used_bytes": used, "quota_bytes": quota})
 }
 
 func escapeName(s string) string {

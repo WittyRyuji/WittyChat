@@ -12,6 +12,7 @@ import {
   type WsFrame,
 } from "./api";
 import { JoinGroupDialog, MembersPanel, Modal, NewGroupDialog, SearchDialog } from "./dialogs";
+import { Mail } from "./Mail";
 import { Md } from "./md";
 
 const MSG_LIMIT = 2000;
@@ -112,6 +113,7 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
     ""
   );
   const [msgLimit, setMsgLimit] = useState(MSG_LIMIT);
+  const [view, setView] = useState<"chat" | "mail" | "zen">("chat");
   const [err, setErr] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const typingTimers = useRef<Record<string, number>>({});
@@ -412,6 +414,8 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
 
   // Feishu-style read receipt: 见顶部 ReadBadge 组件。
 
+  if (view === "mail") return <Mail onNav={setView} />;
+
   return (
     <div className="chat">
       <aside className="sidebar">
@@ -431,7 +435,9 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
         </div>
         <nav className="nav">
           <span className="nav-item active">消息</span>
-          <span className="nav-item dim">邮件</span>
+          <button type="button" className="nav-item dim btn" onClick={() => setView("mail")}>
+            邮件
+          </button>
           <span className="nav-item dim">Zen</span>
           <button type="button" className="nav-item dim btn" onClick={() => setModal("notify")}>
             通知

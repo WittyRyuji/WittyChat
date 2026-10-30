@@ -17,5 +17,23 @@ services:
       timeout: 3s
       retries: 10
 
+  # maddy: all-in-one SMTP/IMAP server for the mail module.
+  # Dev runs unauthenticated submission on :1587; inbound :25 needs a real
+  # DNS/MX setup — kept for local container-to-container testing.
+  # maddy：一体化邮件服务器。开发态用 :1587 免认证提交；
+  # 入站 :25 需要真实 DNS/MX 配置。
+  maddy:
+    image: docker.io/foxcpp/maddy:0.8
+    environment:
+      MADDY_HOSTNAME: mail.wittyloong.com
+      MADDY_DOMAIN: wittyloong.com
+    ports:
+      - "1025:25"   # smtp inbound (host port 1025 → container 25)
+      - "1143:143"  # imap (future)
+      - "1587:587"  # submission
+    volumes:
+      - maddydata:/data
+
 volumes:
   pgdata:
+  maddydata:

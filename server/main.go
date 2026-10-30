@@ -20,6 +20,7 @@ import (
 	"wittychat/core/auth"
 	"wittychat/core/db"
 	"wittychat/core/im"
+	"wittychat/core/mail"
 	"wittychat/core/migrations"
 	"wittychat/core/objects"
 	"wittychat/core/settings"
@@ -94,6 +95,8 @@ func cmdServe() {
 	if err != nil {
 		log.Fatalf("objects: %v", err)
 	}
+	objStore.EnableS3(objects.NewS3(objects.S3ConfigFromEnv(),
+		envOr("WITTYCHAT_DATA_DIR", "./data")))
 	settingsStore := settings.New(pool)
 	imStore.RecallWindow = time.Duration(
 		settingsStore.Int(context.Background(), settings.KeyIMRecallTimeout, settings.DefRecallTimeout)) * time.Second
@@ -109,6 +112,8 @@ func cmdServe() {
 		Hub:       realtime.NewHub(imStore.IsMember),
 		Objects:   objStore,
 		Settings:  settingsStore,
+		Signer:    objects.NewSigner(key),
+		Mail:      mail.NewStore(pool, envOr("WITTYCHAT_MAIL_DOMAIN", "wittyloong.com")),
 	}
 
 	addr := envOr("WITTYCHAT_ADDR", ":8080")

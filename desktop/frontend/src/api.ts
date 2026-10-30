@@ -211,6 +211,79 @@ export const api2 = {
   },
 };
 
+// ---- mail ----
+export interface MailFolder {
+  id: string;
+  kind: string;
+  name: string;
+  unread: number;
+}
+export interface MailAttach {
+  object_id: string;
+  name: string;
+  mime: string;
+  size_bytes: number;
+}
+export interface MailMessage {
+  id: string;
+  folder_id: string;
+  direction: "in" | "out";
+  from_addr: string;
+  to_addrs: string[];
+  cc_addrs: string[];
+  subject: string;
+  text_body: string;
+  preview: string;
+  is_read: boolean;
+  is_starred: boolean;
+  rfc_msgid?: string;
+  in_reply_to?: string;
+  received_at: string;
+  attachments?: MailAttach[];
+}
+
+export const mailApi = {
+  folders: () => req<MailFolder[]>("GET", "/api/v1/mail/folders"),
+  messages: (folderId: string, offset = 0) =>
+    req<MailMessage[]>("GET", `/api/v1/mail/messages?folder=${folderId}&offset=${offset}`),
+  get: (id: string) => req<MailMessage>("GET", `/api/v1/mail/messages/${id}`),
+  search: (q: string) =>
+    req<MailMessage[]>("GET", `/api/v1/mail/search?q=${encodeURIComponent(q)}`),
+  send: (
+    to: string[],
+    cc: string[],
+    subject: string,
+    body: string,
+    inReplyTo?: string,
+    objectIds?: string[]
+  ) =>
+    req<{ id: string; external_queued: number }>("POST", "/api/v1/mail/send", {
+      to,
+      cc,
+      subject,
+      body,
+      ...(inReplyTo ? { in_reply_to: inReplyTo } : {}),
+      ...(objectIds?.length ? { object_ids: objectIds } : {}),
+    }),
+  flags: (id: string, read?: boolean, starred?: boolean) =>
+    req("POST", `/api/v1/mail/messages/${id}/flags`, {
+      ...(read !== undefined ? { read } : {}),
+      ...(starred !== undefined ? { starred } : {}),
+    }),
+  move: (id: string, folder: string) => req("POST", `/api/v1/mail/messages/${id}/move`, { folder }),
+  upload: async (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file, file.name);
+    const res = await fetch(`${API_BASE}/api/v1/objects/upload?purpose=mail`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${getToken()}` },
+      body: fd,
+    });
+    if (!res.ok) throw new Error(`upload failed: ${res.status}`);
+    return res.json() as Promise<{ id: string; name: string }>;
+  },
+};
+
 // connectWS opens the notification socket; calls onFrame per frame.
 // Auto-reconnect handled by the caller via onClose.
 export function connectWS(onFrame: (f: WsFrame) => void, onClose: () => void): WebSocket {

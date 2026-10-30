@@ -50,6 +50,7 @@ type Object struct {
 type Store struct {
 	pool    *pgxpool.Pool
 	dataDir string // <dataDir>/objects/ab/<sha256hex>
+	s3      *S3    // nil → local only / 未启用 S3
 }
 
 func NewStore(pool *pgxpool.Pool, dataDir string) (*Store, error) {
@@ -180,10 +181,16 @@ func (s *Store) Get(ctx context.Context, id, userID uuid.UUID) (*Object, error) 
 	return nil, ErrForbidden
 }
 
-// Open streams object bytes for download.
+// Open streams object bytes for download (local or s3 by location).
 func (s *Store) Open(ctx context.Context, o *Object) (io.ReadCloser, error) {
 	if o.Status != "ready" {
 		return nil, ErrNotReady
+	}
+	if o.Location == "s3" {
+		if s.s3 == nil {
+			return nil, ErrNotReady
+		}
+		return s.openS3(ctx, o)
 	}
 	f, err := os.Open(s.path(o.SHA256))
 	if err != nil {
@@ -192,6 +199,35 @@ func (s *Store) Open(ctx context.Context, o *Object) (io.ReadCloser, error) {
 	// Best-effort access-time touch for the cold-migration signal.
 	_, _ = s.pool.Exec(ctx, `UPDATE objects SET last_accessed_at=now() WHERE id=$1`, o.ID)
 	return f, nil
+}
+
+// Peek loads metadata with no ACL check — for signed-URL flows where
+// possession of the signature is itself the authorization.
+func (s *Store) Peek(ctx context.Context, id uuid.UUID) (*Object, error) {
+	var o Object
+	var sha []byte
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime,
+		        location, status, created_at
+		 FROM objects WHERE id=$1`, id).
+		Scan(&o.ID, &o.Owner, &o.ConvID, &o.Purpose, &o.Name, &o.Size,
+			&sha, &o.Mime, &o.Location, &o.Status, &o.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	copy(o.SHA256[:], sha)
+	return &o, nil
+}
+
+// UsedBytes sums ready-object sizes for the workspace quota check.
+func (s *Store) UsedBytes(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT COALESCE(SUM(size_bytes),0) FROM objects WHERE status='ready'`).Scan(&n)
+	return n, err
 }
 
 // LinkAttachments binds objects to a message op (attachment_refs).

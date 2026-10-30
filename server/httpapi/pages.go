@@ -80,7 +80,6 @@ func registerPages(mux *http.ServeMux, d *Deps) {
 	// Admin SPA (embedded build) / 管理后台单页应用
 	mux.Handle("/admin/", adminui.Handler())
 
-
 	mux.HandleFunc("GET /activate", func(w http.ResponseWriter, r *http.Request) {
 		token := r.URL.Query().Get("token")
 		data := pageData{Token: token}

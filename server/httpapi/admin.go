@@ -95,6 +95,12 @@ func (d *Deps) adminCreateUser(ctx context.Context, in *struct {
 		}
 		return nil, err
 	}
+	// Auto-provision a primary mail address from the login email.
+	// 自动配置主邮箱地址（登录邮箱即邮箱地址）。
+	if d.Mail != nil {
+		_ = d.Mail.AddAddress(ctx, u.ID, u.Email, "primary")
+		_ = d.Mail.EnsureFolders(ctx, u.ID)
+	}
 	token, expiresAt, err := d.Store.CreateActivationLink(ctx, u.ID, auth.LinkKindActivation, admin.ID)
 	if err != nil {
 		return nil, err

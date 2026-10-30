@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 	"wittychat/core/db"
+	"wittychat/core/mail"
 	"wittychat/core/objects"
 
 	"github.com/google/uuid"
@@ -46,9 +47,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("objects: %v", err)
 	}
+	store.EnableS3(objects.NewS3(objects.S3ConfigFromEnv(), envOr("WITTYCHAT_DATA_DIR", "./data")))
 
 	hostname, _ := os.Hostname()
-	w := &worker{pool: pool, store: store, name: "worker-" + hostname}
+	w := &worker{pool: pool, store: store, name: "worker-" + hostname, scanner: objects.NoopScanner{}}
 	log.Printf("worker %s started", w.name)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -57,9 +59,11 @@ func main() {
 }
 
 type worker struct {
-	pool  *pgxpool.Pool
-	store *objects.Store
-	name  string
+	pool    *pgxpool.Pool
+	store   *objects.Store
+	name    string
+	scanner objects.Scanner // AV plugin; NoopScanner default / 杀毒插件
+	mail    *mail.Store     // lazily built / 惰性构造
 }
 
 func (w *worker) run(ctx context.Context) {
@@ -93,6 +97,56 @@ func (w *worker) dispatch(ctx context.Context, t *objects.Task) error {
 	switch t.Kind {
 	case "thumb":
 		return w.thumb(ctx, t)
+	case "gc":
+		n, err := w.store.OrphanGC(ctx)
+		log.Printf("gc: %d orphans deleted", n)
+		return err
+	case "verify":
+		objID, err := uuid.Parse(str(t.Payload["object_id"]))
+		if err != nil {
+			return err
+		}
+		ok, err := w.store.VerifyHash(ctx, objID)
+		if err == nil && !ok {
+			return errors.New("hash mismatch / 哈希校验失败")
+		}
+		return err
+	case "verify_all":
+		n, err := w.store.EnqueueVerifyAll(ctx)
+		log.Printf("verify_all: %d tasks enqueued", n)
+		return err
+	case "migrate_cold":
+		n, err := w.store.MigrateCold(ctx, 90*24*time.Hour, 100)
+		log.Printf("migrate_cold: %d objects moved to s3", n)
+		if errors.Is(err, objects.ErrS3Disabled) {
+			return nil // local-only deployment — no-op
+		}
+		return err
+	case "avscan":
+		objID, err := uuid.Parse(str(t.Payload["object_id"]))
+		if err != nil {
+			return err
+		}
+		det, err := w.store.ScanObject(ctx, objID, w.scanner)
+		if det != "" {
+			return errors.New("av detection: " + det)
+		}
+		return err
+	case "mail_send":
+		// External delivery: render RFC822 from the sent message + MX send.
+		msgID, err := uuid.Parse(str(t.Payload["message_id"]))
+		if err != nil {
+			return err
+		}
+		rcpt, _ := t.Payload["rcpt"].(string)
+		return w.mailSend(ctx, msgID, rcpt)
+	case "mail_parse":
+		// Inbound .eml in objects → parse + deliver to local mailboxes.
+		objID, err := uuid.Parse(str(t.Payload["object_id"]))
+		if err != nil {
+			return err
+		}
+		return w.mailParse(ctx, objID)
 	default:
 		return errors.New("unknown task kind: " + t.Kind)
 	}
@@ -105,7 +159,7 @@ func (w *worker) thumb(ctx context.Context, t *objects.Task) error {
 	if err != nil {
 		return err
 	}
-	owner, _ := uuid.Parse(fmt(t.Payload["owner"]))
+	owner, _ := uuid.Parse(str(t.Payload["owner"]))
 	obj, err := w.store.Get(ctx, objID, owner)
 	if err != nil {
 		return err
@@ -141,7 +195,7 @@ func (w *worker) thumb(ctx context.Context, t *objects.Task) error {
 	return jpeg.Encode(out, dst, &jpeg.Options{Quality: 82})
 }
 
-func fmt(v any) string {
+func str(v any) string {
 	if s, ok := v.(string); ok {
 		return s
 	}
