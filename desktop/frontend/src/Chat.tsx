@@ -640,17 +640,8 @@ export function Chat({
                             {o.recalled ? "消息已撤回" : <Md text={o.body ?? ""} />}
                           </div>
                         )}
-                        {mine && !o.recalled && (
-                          <ReadBadge
-                            seq={o.op_seq}
-                            members={members[activeId] ?? []}
-                            meId={me.id}
-                            isDm={active.kind === "dm"}
-                          />
-                        )}
-                      </div>
-                      {!o.recalled && atts.length > 0 && (
-                        <div className="atts">
+                        {!o.recalled && atts.length > 0 && (
+                          <div className="atts">
                           {atts.map((a) =>
                             a.mime?.startsWith("image/") ? (
                               <button
@@ -689,8 +680,17 @@ export function Chat({
                               </button>
                             )
                           )}
-                        </div>
-                      )}
+                          </div>
+                        )}
+                        {mine && !o.recalled && (
+                          <ReadBadge
+                            seq={o.op_seq}
+                            members={members[activeId] ?? []}
+                            meId={me.id}
+                            isDm={active.kind === "dm"}
+                          />
+                        )}
+                      </div>
                       {!o.recalled && (
                         <div className="msg-tools">
                           <button type="button" className="ghost" onClick={() => setQuote(o)}>

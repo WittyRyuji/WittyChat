@@ -602,6 +602,12 @@ button {
   gap: 6px;
   margin-top: 5px;
 }
+.atts:first-child {
+  margin-top: 0;
+}
+.msg.mine .atts {
+  justify-content: flex-end;
+}
 .att {
   display: inline-flex;
   gap: 6px;
