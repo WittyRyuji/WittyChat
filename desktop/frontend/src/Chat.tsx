@@ -836,9 +836,7 @@ export function Chat({
                                   onClick={() => reactEmoji(o, r.emoji)}
                                 >
                                   {r.emoji}
-                                  {r.users.length > 1 && (
-                                    <span className="rx-n">{r.users.length}</span>
-                                  )}
+                                  <span className="rx-n">{r.users.length}</span>
                                 </button>
                               ))}
                             </div>

@@ -596,6 +596,11 @@ button {
 .msg:has(.rx-pill) .msg-tools {
   margin-top: 13px;
 }
+/* When pills exist the standalone 👍 would sit on top of them — the pill
+   itself is the toggle, so hide the add-button. 有回应时 pill 即切换钮。 */
+.rx-zone:has(.rx-pill) + .rx-add {
+  display: none;
+}
 
 /* emoji picker popover / 表情选择弹层 */
 .emoji-anchor {
