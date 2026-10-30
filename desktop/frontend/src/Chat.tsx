@@ -13,6 +13,7 @@ import {
 } from "./api";
 import { Contacts } from "./Contacts";
 import { JoinGroupDialog, MembersPanel, NewGroupDialog } from "./dialogs";
+import { EMOJI_GROUPS } from "./emoji";
 import { IconChat, IconContacts, IconGear, IconMail, IconSearch, IconZen } from "./icons";
 import { Mail } from "./Mail";
 import { Md } from "./md";
@@ -25,6 +26,32 @@ interface Attachment {
   name: string;
   size: number;
   mime: string;
+}
+
+// Reaction aggregate attached to message payloads (server-side applyEffectiveView
+// and reaction ops' "reactions_full" both carry this shape).
+// 消息 payload.reactions 与 reaction op 的 reactions_full 共用此结构。
+interface RxGroup {
+  emoji: string;
+  users: { id: string; name: string }[];
+}
+
+function rxGroupsOf(o: OpEvent): RxGroup[] {
+  return Array.isArray(o.payload?.reactions) ? (o.payload.reactions as RxGroup[]) : [];
+}
+
+// applyReaction — SET the target message's reactions from a reaction op's
+// "reactions_full" aggregate (authoritative, includes out-of-page ops).
+// 用 reaction op 携带的 reactions_full 聚合直接覆盖目标消息状态（非重放）。
+function applyReaction(ops: OpEvent[], ro: OpEvent) {
+  const i = ops.findIndex((x) => x.op_seq === ro.target_seq);
+  if (i < 0) return;
+  const full = ro.payload?.reactions_full;
+  const t = ops[i];
+  ops[i] = {
+    ...t,
+    payload: { ...(t.payload ?? {}), reactions: Array.isArray(full) ? full : [] },
+  };
 }
 
 // makeThumb: client-side thumbnail (canvas, <=320px jpeg) — cheap, avoids the
@@ -147,6 +174,9 @@ export function Chat({
   const [wsLogo, setWsLogo] = useState("");
   const [searchQ, setSearchQ] = useState("");
   const [searchHits, setSearchHits] = useState<MessageSearchHit[] | null>(null);
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const caretRef = useRef(0); // last textarea caret — emoji inserts land there
 
   // Inline message search (Feishu-style): typing swaps the conv list for hits.
   useEffect(() => {
@@ -193,6 +223,9 @@ export function Chat({
             const page = await api.opsAfter(convId, wm);
             for (const o of page.ops) {
               if (o.op_seq > wm) {
+                if (o.kind === "reaction") {
+                  applyReaction(acc, o);
+                }
                 acc.push(o);
               }
             }
@@ -446,6 +479,40 @@ export function Chat({
     }
   };
 
+  // Toggle my reaction on a message: click 👍 (or an existing pill's emoji).
+  // The response carries reactions_full → SET the target's state right away;
+  // the same op then arriving via WS delta re-applies the same value.
+  const reactEmoji = async (o: OpEvent, emoji: string) => {
+    const groups = rxGroupsOf(o);
+    const mine = groups.find((g) => g.emoji === emoji)?.users.some((u) => u.id === me.id);
+    try {
+      const ev = await api.react(activeId, o.op_seq, emoji, !mine);
+      setStates((p) => {
+        const c = p[activeId];
+        if (!c) return p;
+        const ops = [...c.ops];
+        applyReaction(ops, ev);
+        return { ...p, [activeId]: { ...c, ops } };
+      });
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : "reaction failed");
+    }
+  };
+
+  // Insert emoji at the remembered textarea caret.
+  const insertEmoji = (e: string) => {
+    const pos = caretRef.current;
+    setText((t) => t.slice(0, pos) + e + t.slice(pos));
+    caretRef.current = pos + e.length;
+    requestAnimationFrame(() => {
+      const ta = taRef.current;
+      if (ta) {
+        ta.focus();
+        ta.setSelectionRange(caretRef.current, caretRef.current);
+      }
+    });
+  };
+
   const convTitle = (c: ConversationInfo) =>
     c.kind === "dm" ? c.peer_name || "私聊" : c.title || "群聊";
 
@@ -599,6 +666,7 @@ export function Chat({
               <div className="ops" ref={scrollRef} onScroll={onScroll}>
                 {st?.hasOlder && <div className="hint">上滑加载更早的消息</div>}
                 {st?.ops.map((o) => {
+                  if (o.kind === "reaction") return null; // folded into its target bubble
                   if (o.kind !== "message") {
                     return (
                       <div key={o.op_seq} className="sys">
@@ -692,6 +760,34 @@ export function Chat({
                             isDm={active.kind === "dm"}
                           />
                         )}
+                        {!o.recalled && (
+                          <div className="rx-zone">
+                            {rxGroupsOf(o).map((r) => (
+                              <button
+                                type="button"
+                                key={r.emoji}
+                                className={`rx-pill${
+                                  r.users.some((u) => u.id === me.id) ? " mine" : ""
+                                }`}
+                                title={r.users.map((u) => u.name).join("、")}
+                                onClick={() => reactEmoji(o, r.emoji)}
+                              >
+                                {r.emoji}
+                                {r.users.length > 1 && (
+                                  <span className="rx-n">{r.users.length}</span>
+                                )}
+                              </button>
+                            ))}
+                            <button
+                              type="button"
+                              className="rx-add"
+                              title="点赞"
+                              onClick={() => reactEmoji(o, "👍")}
+                            >
+                              👍
+                            </button>
+                          </div>
+                        )}
                       </div>
                       {!o.recalled && (
                         <div className="msg-tools">
@@ -759,9 +855,47 @@ export function Chat({
                 >
                   +
                 </button>
+                <span className="emoji-anchor">
+                  <button
+                    type="button"
+                    className="attach-btn emoji-btn"
+                    title="表情"
+                    onClick={() => setEmojiOpen((o) => !o)}
+                  >
+                    😊
+                  </button>
+                  {emojiOpen && (
+                    <>
+                      {/* biome-ignore lint/a11y/noStaticElementInteractions: click-away dismiss layer / 点空白处关面板 */}
+                      <div
+                        className="ctxmask"
+                        role="presentation"
+                        onClick={() => setEmojiOpen(false)}
+                      />
+                      <div className="emoji-pop">
+                        {EMOJI_GROUPS.map((g) => (
+                          <div key={g.label}>
+                            <div className="emoji-grp">{g.label}</div>
+                            <div className="emoji-grid">
+                              {g.items.map((e) => (
+                                <button type="button" key={e} onClick={() => insertEmoji(e)}>
+                                  {e}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </span>
                 <textarea
+                  ref={taRef}
                   value={text}
                   onChange={(e) => setText(e.target.value)}
+                  onSelect={(e) => {
+                    caretRef.current = e.currentTarget.selectionStart;
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();

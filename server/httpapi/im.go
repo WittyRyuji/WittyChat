@@ -67,6 +67,12 @@ func registerIM(api huma.API, d *Deps) {
 	}, d.recallMessage)
 
 	huma.Register(api, huma.Operation{
+		OperationID: "im-react", Method: http.MethodPost,
+		Path: "/api/v1/conversations/{id}/messages/{seq}/reaction", Summary: "Toggle an emoji reaction (👍 etc.) / 表情回应",
+		Tags: []string{"im"}, Security: sec,
+	}, d.reactMessage)
+
+	huma.Register(api, huma.Operation{
 		OperationID: "im-read", Method: http.MethodPost,
 		Path: "/api/v1/conversations/{id}/read", Summary: "Advance read watermark / 推进已读水印",
 		Tags: []string{"im"}, Security: sec,
@@ -125,6 +131,10 @@ func imErr(err error) error {
 		return huma.Error403Forbidden("no permission / 无权限")
 	case errors.Is(err, im.ErrRecallExpired):
 		return huma.Error400BadRequest("recall window expired / 已过撤回时限")
+	case errors.Is(err, im.ErrBadTarget):
+		return huma.Error404NotFound("target not found / 目标不存在")
+	case errors.Is(err, im.ErrBadEmoji):
+		return huma.Error400BadRequest("bad emoji / 无效表情")
 	case errors.Is(err, im.ErrMessageTooLong):
 		return huma.Error400BadRequest("message too long / 消息过长")
 	case errors.Is(err, im.ErrSelfDM):
@@ -291,6 +301,7 @@ func (d *Deps) fetchOps(ctx context.Context, in *struct {
 		}
 		out.Body.HasMore = hasMore
 		d.enrichAttachments(ctx, convID, out.Body.Ops)
+		d.enrichReactions(ctx, convID, out.Body.Ops)
 		return out, nil
 	}
 	var after int64
@@ -307,6 +318,7 @@ func (d *Deps) fetchOps(ctx context.Context, in *struct {
 	out.Body.HasMore = hasMore
 	out.Body.LatestSeq = latest
 	d.enrichAttachments(ctx, convID, out.Body.Ops)
+	d.enrichReactions(ctx, convID, out.Body.Ops)
 	return out, nil
 }
 
@@ -431,6 +443,70 @@ func (d *Deps) recallMessage(ctx context.Context, in *struct {
 	return &struct{ Body apitypes.OpEvent }{
 		Body: apitypes.OpEvent{OpSeq: seq, Kind: apitypes.OpRecall, TargetSeq: in.Seq},
 	}, nil
+}
+
+// enrichReactions attaches the CURRENT aggregate ("reactions_full") onto each
+// reaction op in the page. Clients SET state from it instead of replaying ops —
+// the aggregate already reflects ops beyond the page boundary.
+// 给页内 reaction op 附上当前聚合值：客户端直接覆盖状态而非重放 op，
+// 聚合值已包含页边界之外的 op。
+func (d *Deps) enrichReactions(ctx context.Context, convID uuid.UUID, events []*apitypes.OpEvent) {
+	targets := make([]int64, 0, len(events))
+	seen := map[int64]bool{}
+	for _, e := range events {
+		if e.Kind == apitypes.OpReaction && e.TargetSeq > 0 && !seen[e.TargetSeq] {
+			seen[e.TargetSeq] = true
+			targets = append(targets, e.TargetSeq)
+		}
+	}
+	if len(targets) == 0 {
+		return
+	}
+	agg, err := d.IM.ReactionsFor(ctx, convID, targets)
+	if err != nil {
+		return
+	}
+	for _, e := range events {
+		if e.Kind != apitypes.OpReaction {
+			continue
+		}
+		if e.Payload == nil {
+			e.Payload = map[string]any{}
+		}
+		e.Payload["reactions_full"] = agg[e.TargetSeq]
+	}
+}
+
+func (d *Deps) reactMessage(ctx context.Context, in *struct {
+	Headers
+	ID   string `path:"id" format:"uuid"`
+	Seq  int64  `path:"seq"`
+	Body apitypes.ReactMessageRequest
+},
+) (*struct{ Body apitypes.OpEvent }, error) {
+	_, u, err := d.requireUser(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	convID, err := uuid.Parse(in.ID)
+	if err != nil {
+		return nil, huma.Error400BadRequest("bad conversation id")
+	}
+	seq, err := d.IM.ReactMessage(ctx, u.ID, convID, in.Seq, in.Body.Emoji, in.Body.Add)
+	if err != nil {
+		return nil, imErr(err)
+	}
+	e := &apitypes.OpEvent{
+		OpSeq: seq, Kind: apitypes.OpReaction, TargetSeq: in.Seq,
+		ActorID: u.ID.String(), ActorName: u.DisplayName,
+	}
+	if agg, err := d.IM.ReactionsFor(ctx, convID, []int64{in.Seq}); err == nil {
+		e.Payload = map[string]any{"reactions_full": agg[in.Seq]}
+	}
+	if seq > 0 {
+		d.notifyMembers(ctx, convID, seq, u.ID)
+	}
+	return &struct{ Body apitypes.OpEvent }{Body: *e}, nil
 }
 
 func (d *Deps) markRead(ctx context.Context, in *struct {

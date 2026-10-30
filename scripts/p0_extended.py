@@ -184,6 +184,52 @@ rc = [o for o in ops if o["op_seq"] == rseq]
 check("peer sees recalled state", rc and rc[0].get("recalled") is True,
       json.dumps(rc[0].get("recalled")) if rc else "missing")
 
+# ================= reactions (👍 like) =================
+st, b = send_msg(p0x, conv, "like this msg")
+lseq = json.loads(b)["op_seq"]
+st, b = req("POST", f"/api/v1/conversations/{conv}/messages/{lseq}/reaction",
+            {"emoji": "👍", "add": True}, alice)
+check("like a peer msg", st in (200, 201), str(st))
+ops = get_ops(p0x, conv)
+lm = [o for o in ops if o["op_seq"] == lseq][0]
+rx = lm["payload"].get("reactions") or []
+thumbs = [r for r in rx if r["emoji"] == "👍"]
+check("reaction aggregated on msg",
+      thumbs and len(thumbs[0]["users"]) == 1
+      and thumbs[0]["users"][0]["id"] == alice_id,
+      json.dumps(rx, ensure_ascii=False))
+st, b = req("POST", f"/api/v1/conversations/{conv}/messages/{lseq}/reaction",
+            {"emoji": "👍", "add": True}, p0x)
+check("second liker", st in (200, 201), str(st))
+ops = get_ops(alice, conv)
+rx2 = [o for o in ops if o["op_seq"] == lseq][0]["payload"].get("reactions") or []
+check("two likers counted",
+      any(r["emoji"] == "👍" and len(r["users"]) == 2 for r in rx2),
+      json.dumps(rx2, ensure_ascii=False))
+rops = [o for o in ops if o.get("kind") == "reaction" and o.get("target_seq") == lseq]
+check("reaction op carries full aggregate",
+      bool(rops) and bool(rops[-1]["payload"].get("reactions_full")),
+      str(len(rops)))
+# idempotent re-add: p0x's latest is already add → op_seq 0, no new op
+st, b = req("POST", f"/api/v1/conversations/{conv}/messages/{lseq}/reaction",
+            {"emoji": "👍", "add": True}, p0x)
+check("repeat add is no-op", json.loads(b).get("op_seq", -1) == 0, str(st) + b[:60].decode(errors="replace"))
+st, b = req("POST", f"/api/v1/conversations/{conv}/messages/{lseq}/reaction",
+            {"emoji": "👍", "add": False}, alice)
+check("unlike own", st in (200, 201), str(st))
+ops = get_ops(alice, conv)
+rx3 = [o for o in ops if o["op_seq"] == lseq][0]["payload"].get("reactions") or []
+like3 = [r for r in rx3 if r["emoji"] == "👍"]
+check("unlike leaves one",
+      like3 and len(like3[0]["users"]) == 1 and like3[0]["users"][0]["id"] == p0x_id,
+      json.dumps(rx3, ensure_ascii=False))
+st, b = req("POST", f"/api/v1/conversations/{conv}/messages/999999/reaction",
+            {"emoji": "👍", "add": True}, alice)
+check("react missing target 404", st == 404, str(st))
+st, b = req("POST", f"/api/v1/conversations/{conv}/messages/{lseq}/reaction",
+            {"emoji": "", "add": True}, alice)
+check("empty emoji 400", st in (400, 422), str(st))
+
 # ================= multi-attachment + placeholders =================
 img1 = upload(alice, conv, "i1.jpg", "image/jpeg", JPEG + uuid.uuid4().bytes[:8])
 img2 = upload(alice, conv, "i2.jpg", "image/jpeg", JPEG + uuid.uuid4().bytes[:8])
@@ -234,9 +280,14 @@ check("peer reads thumb", st == 200 and b[:2] == b"\xff\xd8", str(st))
 st, b = req("GET", f"/api/v1/objects/{img1}/thumb", None, admin)
 check("non-member thumb denied", st == 403, str(st))
 
-# date-partitioned storage on disk
-today = time.strftime("%Y/%m/%d")
-obj_dir = os.path.join(DATA, "objects", *today.split("/"))
+# date-partitioned storage on disk — upload unique bytes so dedup can't
+# skip the write, then derive the expected partition from the object's own
+# uuidv7 ms timestamp (server partitions by UTC date, not local date).
+st, uniq_obj = upload_purpose(p0x, "chat", f"p0x-part-{uuid.uuid4().hex}.bin",
+                              "application/octet-stream", uuid.uuid4().bytes)
+check("unique upload for partition check", st == 200, str(st))
+ms = int(uniq_obj["id"].replace("-", "")[:12], 16)  # uuidv7 top 48 bits = unix ms
+obj_dir = os.path.join(DATA, "objects", *time.strftime("%Y/%m/%d", time.gmtime(ms / 1000)).split("/"))
 check("date-partitioned object dir exists", os.path.isdir(obj_dir), obj_dir)
 
 # ================= mail: full lifecycle =================

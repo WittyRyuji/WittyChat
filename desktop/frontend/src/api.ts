@@ -162,6 +162,11 @@ export const api = {
     }),
   recall: (convId: string, seq: number) =>
     req<OpEvent>("POST", `/api/v1/conversations/${convId}/messages/${seq}/recall`),
+  react: (convId: string, seq: number, emoji: string, add: boolean) =>
+    req<OpEvent>("POST", `/api/v1/conversations/${convId}/messages/${seq}/reaction`, {
+      emoji,
+      add,
+    }),
   markRead: (convId: string, seq: number) =>
     req("POST", `/api/v1/conversations/${convId}/read`, { op_seq: seq }),
   members: (convId: string) =>

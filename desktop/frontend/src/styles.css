@@ -392,6 +392,7 @@ button {
   max-width: 70%;
   min-width: 0;
   position: relative;
+  padding-bottom: 4px;
 }
 .msg.mine {
   align-self: flex-end;
@@ -532,6 +533,99 @@ button {
 }
 .msg.pending {
   opacity: 0.55;
+}
+
+/* reaction zone — like button + pills at the bubble's lower-right corner.
+   点赞区：气泡右下角（👍 按钮悬停出现，有回应时 pill 常驻）。 */
+.rx-zone {
+  position: absolute;
+  right: 4px;
+  bottom: -10px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  z-index: 6;
+}
+.rx-pill,
+.rx-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg2);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+.rx-pill.mine {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.rx-pill:hover,
+.rx-add:hover {
+  border-color: var(--accent);
+}
+.rx-n {
+  font-size: 11px;
+  color: var(--dim);
+}
+.rx-pill.mine .rx-n {
+  color: var(--accent);
+}
+.rx-add {
+  min-width: 26px;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.msg:hover .rx-add {
+  opacity: 1;
+}
+
+/* emoji picker popover / 表情选择弹层 */
+.emoji-anchor {
+  position: relative;
+  display: inline-flex;
+}
+.emoji-pop {
+  position: absolute;
+  bottom: 50px;
+  left: 0;
+  width: 336px;
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  padding: 8px 10px;
+  z-index: 95;
+}
+.emoji-grp {
+  font-size: 12px;
+  color: var(--dim);
+  margin: 8px 2px 4px;
+}
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+}
+.emoji-grid button {
+  font-size: 19px;
+  line-height: 1;
+  padding: 5px;
+  background: none;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.emoji-grid button:hover {
+  background: var(--bg3);
 }
 .quote {
   border-left: 3px solid var(--accent);

@@ -22,6 +22,7 @@ const (
 	OpRoleChange   = "role_change"
 	OpRename       = "rename"
 	OpTransfer     = "transfer"
+	OpReaction     = "reaction"
 )
 
 // ConversationInfo is one directory entry.
@@ -129,6 +130,13 @@ type UnreadSummary struct {
 
 type EditMessageRequest struct {
 	Markdown string `json:"markdown" required:"true" minLength:"1" maxLength:"5000"`
+}
+
+// ReactMessageRequest toggles an emoji reaction on a message (👍 etc.).
+// add=true likes; add=false removes the same user's reaction. Idempotent.
+type ReactMessageRequest struct {
+	Emoji string `json:"emoji" required:"true" minLength:"1" maxLength:"32"`
+	Add   bool   `json:"add"`
 }
 
 type MarkReadRequest struct {

@@ -225,6 +225,107 @@ func scanOps(rows pgx.Rows) ([]*Op, error) {
 	return out, rows.Err()
 }
 
+// ReactionUser is one reactor inside a group.
+type ReactionUser struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// ReactionGroup is one emoji's aggregate on a message:
+// users whose LATEST reaction op for that emoji is "add", in first-react order.
+// ReactionGroup 是消息上某个 emoji 的聚合：最新 op 为 add 的用户，按首赞排序。
+type ReactionGroup struct {
+	Emoji string         `json:"emoji"`
+	Users []ReactionUser `json:"users"`
+}
+
+// ReactionsFor replays the full reaction op stream per target message —
+// convergent regardless of page boundaries. Returns target seq → groups.
+func (s *Store) ReactionsFor(ctx context.Context, convID uuid.UUID, targets []int64) (map[int64][]ReactionGroup, error) {
+	out := map[int64][]ReactionGroup{}
+	if len(targets) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT o.target_op_seq, o.actor_id, COALESCE(u.display_name,''),
+       o.payload->>'emoji', COALESCE((o.payload->>'add')::boolean,false)
+FROM conv_ops o LEFT JOIN users u ON u.id = o.actor_id
+WHERE o.conv_id=$1 AND o.kind=$2 AND o.target_op_seq = ANY($3)
+ORDER BY o.op_seq ASC`, convID, OpReaction, targets)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type emojiAcc struct {
+		users []uuid.UUID
+		names map[uuid.UUID]string
+		on    map[uuid.UUID]bool
+	}
+	type targetAcc struct {
+		order  []string
+		emojis map[string]*emojiAcc
+	}
+	perTarget := map[int64]*targetAcc{}
+	for rows.Next() {
+		var tgt int64
+		var actor *uuid.UUID
+		var name, emoji string
+		var add bool
+		if err := rows.Scan(&tgt, &actor, &name, &emoji, &add); err != nil {
+			return nil, err
+		}
+		if actor == nil || emoji == "" {
+			continue
+		}
+		ta := perTarget[tgt]
+		if ta == nil {
+			ta = &targetAcc{emojis: map[string]*emojiAcc{}}
+			perTarget[tgt] = ta
+		}
+		ea := ta.emojis[emoji]
+		if ea == nil {
+			ea = &emojiAcc{names: map[uuid.UUID]string{}, on: map[uuid.UUID]bool{}}
+			ta.emojis[emoji] = ea
+			ta.order = append(ta.order, emoji)
+		}
+		if add {
+			if !ea.on[*actor] {
+				ea.on[*actor] = true
+				ea.users = append(ea.users, *actor)
+			}
+			ea.names[*actor] = name
+		} else if ea.on[*actor] {
+			delete(ea.on, *actor)
+			for i, u := range ea.users {
+				if u == *actor {
+					ea.users = append(ea.users[:i], ea.users[i+1:]...)
+					break
+				}
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for tgt, ta := range perTarget {
+		groups := make([]ReactionGroup, 0, len(ta.order))
+		for _, emoji := range ta.order {
+			ea := ta.emojis[emoji]
+			if len(ea.users) == 0 {
+				continue
+			}
+			g := ReactionGroup{Emoji: emoji, Users: make([]ReactionUser, 0, len(ea.users))}
+			for _, uid := range ea.users {
+				g.Users = append(g.Users, ReactionUser{ID: uid.String(), Name: ea.names[uid]})
+			}
+			groups = append(groups, g)
+		}
+		out[tgt] = groups
+	}
+	return out, nil
+}
+
 // applyEffectiveView merges later edits into returned messages and redacts
 // recalled ones. Original rows stay in the table for admin audit.
 // 有效视图：把之后的编辑合并进消息、撤回的消息脱敏。原始行留库供审计。
@@ -288,5 +389,24 @@ WHERE conv_id=$1 AND kind='recall' AND target_op_seq = ANY($2)`, convID, msgSeqs
 			o.Payload = map[string]any{"recalled": true}
 		}
 	}
-	return rrows.Err()
+	if err := rrows.Err(); err != nil {
+		return err
+	}
+	rrows.Close()
+
+	// Attach reaction aggregates (recalled messages keep none).
+	// 聚合表情回应；已撤回消息不挂回应。
+	rx, err := s.ReactionsFor(ctx, convID, msgSeqs)
+	if err != nil {
+		return err
+	}
+	for tgt, groups := range rx {
+		if o, ok := bySeq[tgt]; ok && !o.Recalled && len(groups) > 0 {
+			if o.Payload == nil {
+				o.Payload = map[string]any{}
+			}
+			o.Payload["reactions"] = groups
+		}
+	}
+	return nil
 }

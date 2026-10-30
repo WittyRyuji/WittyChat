@@ -28,6 +28,7 @@ const (
 	OpRoleChange   = "role_change"
 	OpRename       = "rename"
 	OpTransfer     = "transfer"
+	OpReaction     = "reaction"
 
 	RoleOwner  = "owner"
 	RoleAdmin  = "admin"
@@ -40,6 +41,7 @@ var (
 	ErrNoPermission  = errors.New("no permission")
 	ErrRecallExpired = errors.New("recall window expired")
 	ErrBadTarget     = errors.New("bad target op")
+	ErrBadEmoji      = errors.New("bad emoji")
 	ErrDMExists      = errors.New("dm already exists")
 	ErrSelfDM        = errors.New("cannot dm yourself")
 )

@@ -194,6 +194,49 @@ func (s *Store) RecallMessage(ctx context.Context, actor, convID uuid.UUID, targ
 	return seq, err
 }
 
+// ReactMessage appends a reaction op (add/remove) on a message — any member.
+// Repeating the same state is a no-op returning seq 0 (idempotent toggles).
+// 表情回应 op（点赞/取消）：任意成员可对消息操作；重复同状态为幂等空操作。
+func (s *Store) ReactMessage(ctx context.Context, actor, convID uuid.UUID,
+	targetSeq int64, emoji string, add bool,
+) (int64, error) {
+	if n := len([]rune(emoji)); n == 0 || n > 32 {
+		return 0, ErrBadEmoji
+	}
+	var seq int64
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, _, err := s.requireMember(ctx, tx, convID, actor); err != nil {
+			return err
+		}
+		_, kind, err := s.opOwner(ctx, tx, convID, targetSeq)
+		if err != nil {
+			return err
+		}
+		if kind != OpMessage {
+			return ErrBadTarget
+		}
+		// Latest op by this actor on (target, emoji) is the current state —
+		// converging ops replay to the same result on every client.
+		var lastAdd *bool
+		err = tx.QueryRow(ctx,
+			`SELECT (payload->>'add')::boolean FROM conv_ops
+			 WHERE conv_id=$1 AND kind=$2 AND target_op_seq=$3 AND actor_id=$4
+			   AND payload->>'emoji'=$5
+			 ORDER BY op_seq DESC LIMIT 1`,
+			convID, OpReaction, targetSeq, actor, emoji).Scan(&lastAdd)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if (lastAdd == nil && !add) || (lastAdd != nil && *lastAdd == add) {
+			return nil // already in the desired state / 已是目标状态
+		}
+		seq, err = s.appendOpTx(ctx, tx, convID, actor, OpReaction,
+			nil, targetSeq, "", map[string]any{"emoji": emoji, "add": add})
+		return err
+	})
+	return seq, err
+}
+
 // MarkRead advances my read watermark (monotonic, coalescing).
 func (s *Store) MarkRead(ctx context.Context, convID, userID uuid.UUID, seq int64) error {
 	tag, err := s.pool.Exec(ctx,
