@@ -247,11 +247,15 @@ button {
   text-align: right;
 }
 
-/* read-receipt circle / 已读回执圈(飞书式) */
+/* read-receipt circle / 已读回执圈(飞书式):贴气泡左下角 */
+.msg-body-wrap {
+  position: relative;
+  display: inline-block;
+}
 .read-badge {
   position: absolute;
-  left: -22px;
-  bottom: 8px;
+  left: -17px;
+  bottom: 0;
   width: 13px;
   height: 13px;
   border-radius: 50%;
@@ -296,11 +300,11 @@ button {
   display: inline-block;
   text-align: left;
   background: var(--bg3);
-  padding: 9px 13px;
-  border-radius: 12px;
+  padding: 7px 11px;
+  border-radius: 8px;
   white-space: pre-wrap;
   word-break: break-word;
-  line-height: 1.55;
+  line-height: 1.45;
 }
 .msg.mine .msg-body {
   background: #2b4a7c;

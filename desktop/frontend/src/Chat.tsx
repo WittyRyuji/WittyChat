@@ -463,17 +463,19 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
                         {q.actor_name}: {q.recalled ? "已撤回" : q.body?.slice(0, 80)}
                       </div>
                     )}
-                    <div className={`msg-body ${o.recalled ? "recalled" : ""}`}>
-                      {o.recalled ? "消息已撤回" : <Md text={o.body ?? ""} />}
+                    <div className="msg-body-wrap">
+                      <div className={`msg-body ${o.recalled ? "recalled" : ""}`}>
+                        {o.recalled ? "消息已撤回" : <Md text={o.body ?? ""} />}
+                      </div>
+                      {mine && !o.recalled && (
+                        <ReadBadge
+                          seq={o.op_seq}
+                          members={members[activeId] ?? []}
+                          meId={me.id}
+                          isDm={active.kind === "dm"}
+                        />
+                      )}
                     </div>
-                    {mine && !o.recalled && (
-                      <ReadBadge
-                        seq={o.op_seq}
-                        members={members[activeId] ?? []}
-                        meId={me.id}
-                        isDm={active.kind === "dm"}
-                      />
-                    )}
                     {!o.recalled && atts.length > 0 && (
                       <div className="atts">
                         {atts.map((a) => (
