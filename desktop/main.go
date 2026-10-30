@@ -67,6 +67,9 @@ func main() {
 			// 原生窗口遮挡计算在拖动期间反复跑、阻塞合成器——
 			// 是窗口拖拽不跟手的经典元凶，禁用。
 			DisabledFeatures: []string{"CalculateNativeWinOcclusion"},
+			// Throttle Wails' synchronous per-move WebView2 COM notify —
+			// see wndProcThrottle (main_windows.go).
+			WndProcInterceptor: wndProcThrottle,
 			// Remote debugging only when explicitly requested — an open CDP
 			// port lets any local process drive the webview and read session
 			// tokens. Enable with WITTYCHAT_DEBUG_PORT=9333 for support.
