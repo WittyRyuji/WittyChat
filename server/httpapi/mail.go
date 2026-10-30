@@ -128,6 +128,16 @@ func (d *Deps) mailSend(w http.ResponseWriter, r *http.Request) {
 	}
 	msgID, external, err := d.Mail.Compose(r.Context(), uid, req.To, req.Cc,
 		req.Subject, req.Body, req.InReplyTo, req.ObjectIDs)
+	if errors.Is(err, mail.ErrNoAddress) {
+		// Legacy users predate auto-provisioning — backfill primary
+		// address from login email on first send.
+		if _, u, uerr := d.requireUser(r.Context(), r.Header.Get("Authorization")); uerr == nil {
+			_ = d.Mail.AddAddress(r.Context(), uid, u.Email, "primary")
+			_ = d.Mail.EnsureFolders(r.Context(), uid)
+			msgID, external, err = d.Mail.Compose(r.Context(), uid, req.To, req.Cc,
+				req.Subject, req.Body, req.InReplyTo, req.ObjectIDs)
+		}
+	}
 	if err != nil {
 		http.Error(w, "send failed: "+err.Error(), http.StatusBadRequest)
 		return

@@ -111,7 +111,7 @@ func (s *Store) Folders(ctx context.Context, user uuid.UUID) ([]Folder, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Folder
+	out := []Folder{}
 	for rows.Next() {
 		var f Folder
 		if err := rows.Scan(&f.ID, &f.Kind, &f.Name, &f.Position, &f.Unread); err != nil {
@@ -149,7 +149,7 @@ func (s *Store) Addresses(ctx context.Context, user uuid.UUID) ([]Address, error
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Address
+	out := []Address{}
 	for rows.Next() {
 		var a Address
 		if err := rows.Scan(&a.ID, &a.Address, &a.Kind); err != nil {
@@ -214,7 +214,7 @@ func (s *Store) List(ctx context.Context, user, folder uuid.UUID, limit, off int
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Message
+	out := []Message{}
 	for rows.Next() {
 		m, err := scanMsg(rows)
 		if err != nil {
@@ -258,7 +258,7 @@ func (s *Store) Search(ctx context.Context, user uuid.UUID, q string, limit int)
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Message
+	out := []Message{}
 	for rows.Next() {
 		m, err := scanMsg(rows)
 		if err != nil {
@@ -314,6 +314,12 @@ func (s *Store) Deliver(ctx context.Context, toUser uuid.UUID, folder string,
 	fid, err := s.folderID(ctx, toUser, folder)
 	if err != nil {
 		return uuid.Nil, err
+	}
+	if to == nil {
+		to = []string{}
+	}
+	if cc == nil {
+		cc = []string{}
 	}
 	thread := inReplyTo
 	if thread == "" {

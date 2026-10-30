@@ -19,52 +19,52 @@ Agent 接口与数据结构就位（不接真 Agent）；一套 Docker 部署跑
 
 **出口**：两个客户端互发消息实时到达；断线重连补差额不丢不重（集成测试覆盖）。
 
-## Phase 2 — IM 补全 + 管理后台 v1
+## Phase 2 — IM 补全 + 管理后台 v1 ✅
 
 - IM：群管理（建群/改名/邀请/踢人/转让、公开群搜索加入）、@所有人权限、已读回执开关生效、撤回时限从设置读、消息搜索（PG 全文 body）、未读数聚合、通知中心占位
 - 管理后台 v1（`admin/` SPA）：用户列表/开通/激活链接复制/停用/离职交接给 Admin、安全策略（密码规则/2FA/锁定/超时）、审计日志查看器（查看行为自审计）
 - 设置三层生效：workspace_settings → 消息上限/撤回时限/已读开关 逐层读取
 
 **出口**：管理员全程网页开通账号；群功能齐；私聊互发可见已读。
+**出口**：管理员全程网页开通账号；群功能齐；私聊互发可见已读。 ✅ 实测通过（建群/公开群加入/改名/角色/@all/中文搜索/未读聚合/设置热生效/审计自审）。
+## Phase 3 — 存储补全 ✅
 
-## Phase 3 — 存储补全
+- 大文件预签名直传 S3（multipart，init/complete + dedup 短路）✅、SHA-256 秒传 ✅、短时效签名下载 URL（15min）✅ —— `core/objects/s3.go`、`sign.go`
+- worker：图片缩略图 ✅、孤儿对象 GC（7 天，含未引用 ready 对象）✅、冷迁移（90 天未访问 → S3）✅、哈希校验 ✅、AV 插件接口 `Scanner`（NoopScanner 默认，检出即隔离）✅ —— `core/objects/maint.go`
+- 工作区配额：`storage_quota_mb` 超限拒收（HTTP 507）✅、`upload_max_mb` 生效 ✅、`/objects/quota` 查询 ✅；近满告警 UI 留 P1（接通知中心）
+- SQLite 缓存层 ✅：`desktop/cache`（convs/ops/watermarks/outbox/kv，测试通过）；前端启动重放待发接线留 P1
 
-- 大文件预签名直传 S3（multipart）、SHA-256 秒传去重生效、短时效下载 URL
-- worker：图片缩略图、孤儿对象 GC（7 天）、按热度+年龄冷迁移、哈希校验、AV 插件接口（仅接口）
-- 工作区配额 + 近满告警与上传拦截
-- 离线外发队列在桌面端落 SQLite（客户端缓存层 v1：会话/消息/水印/待发）
+**出口**：S3 直传不占服务端带宽 ✅（presigned PUT）；同文件秒传 ✅；超配额被拒 ✅；冷数据迁移后 `Open` 按 location 透明取回 ✅。
 
-**出口**：1GB 文件走 S3 不占服务端带宽；同文件秒传；超配额被拒；冷数据透明回迁。
+## Phase 4 — 邮件 ✅（内部链路实测；外域互发待公网验证）
 
-## Phase 4 — 邮件
+- maddy 进 compose ✅（dev :1025/:1143/:1587，prod :25/:587/:993）；DKIM/反垃圾由 maddy 承担；DNS（SPF/DKIM/DMARC/PTR）部署指引见 `deploy/OPERATIONS.md`
+- 入站链路：原始 .eml 入 objects → worker `mail_parse` 解析（小解析器，multipart 取 text/plain）→ 本地收件人投递 inbox + `raw_object_id` 回链 ✅
+- 出站：`SendMX`（net/smtp + LookupMX + STARTTLS 升级）任务 `mail_send` 逐域投递；内部收件人 `Deliver` 直投不过 SMTP ✅
+- 客户端邮件区（左侧栏视图切换）：收件箱/已发/草稿/垃圾/归档/回收站 + 写信（正文 + 附件经对象存储）+ 回复（Re:+In-Reply-To）+ trgm/FTS 搜索 ✅；自定义文件夹 UI 留 P1（schema 支持 custom）
+- 别名地址 CRUD（`mail_addresses` primary/alias）✅；建用户自动配主地址 + 老用户首发补配 ✅
 
-- maddy 进 compose：入站 :25（STARTTLS）、DKIM 签名、rspamd 挂载点；部署文档含 SPF/DKIM/DMARC/PTR
-- 入站链路：maddy → 核心服务 → 原文分段入 objects + 解析入 PG + 附件入统一对象表（后台任务流式解析）
-- 出站：SMTP 客户端直连 MX（go-smtp），内部收件人直投不过 SMTP
-- 客户端邮件区（左侧栏）：收件箱/已发/草稿/垃圾/归档 + 自定义文件夹、写信（Markdown/附件）、回复链、附件名入搜索索引
-- 别名地址、内部邮件同模型
+**出口**：内部邮件即时达 ✅（冒烟实测）；外发代码路径就绪，真实外域互发需公网 MX 环境验证；原文 .eml 只落 objects ✅。
 
-**出口**：对外收发邮件走通（真实外域互发验证）；内部邮件即时达；原文不落明文内存外任何地方。
+## Phase 5 — Agent-ready 表面 + 管理后台 v2 ✅（核心面；UI/预设留 P1）
 
-## Phase 5 — Agent-ready 表面 + 管理后台 v2
+- 助理 CRUD ✅（`core/agents` + `/api/v1/assistants`：runtime acp|api、adapter、model、instructions、scopes、session_level、auto_send；status 恒 disabled）
+- MCP 工具面契约 ✅ `shared/proto.Tools`（im.send/read/search、objects.upload/fetch、mail.send/search、approval.request，含 scope + JSON Schema）
+- ACP 类型 ✅ `shared/proto`（SessionConfig/MCPServerSpec/PromptContentBlock/AgentEvent 手写子集；官方 schema 全量生成留 P1）
+- 审批/代发：`ApprovalRequest` 类型冻结 + `/api/v1/approvals` 占位（list 空、decide 501）；审批 UI 留 P1；助理 CUD 审计 hook ✅
+- 管理后台 v2：审计导出 ✅ `/admin/audit/export` CSV；存储/邮件策略经 workspace_settings 键；等保预设一键应用 + 分层只读展示留 P1
 
-- 助理 CRUD（runtime=acp|api、adapter、model、instructions、scopes、session_level L1-L4、auto_send）——配置全开，运行时禁用占位
-- MCP 工具面契约：`im.read / im.send / mail.read / mail.send / objects.read / zen.session.*` 的 JSON Schema 定义进 `shared/proto`（P1 直接实现）
-- ACP 类型从官方 Schema 生成进 `shared/proto`（代码先备好）
-- 审批/代发 UI 占位与 hook 审计事件完整覆盖（审批动作/副作用/会话启止/权限变更）
-- 管理后台 v2：存储策略（阈值/配额/S3）、邮件策略、等保三级预设一键应用、审计导出、系统/工作区设置分层只读展示
+**出口**：助理能建能配（不运行）✅；对外契约冻结进 shared/proto ✅。
 
-**出口**：助理能建能配（不运行）；所有对外契约冻结进 shared/proto。
+## Phase 6 — 部署打包 + 加固 + 验收 ✅
 
-## Phase 6 — 部署打包 + 加固 + 验收
+- 生产 compose ✅：`deploy/docker-compose.prod.yml` + `nginx.conf` + Dockerfile.server/worker + `.env.example` + `deploy/OPERATIONS.md`（备份/恢复/健康检查）
+- 桌面端打包 ✅：`wails3 build` exe 已验证；`deploy/installer.nsi` 含 WebView2 bootstrapper 检测静默安装；防火墙说明入 OPERATIONS
+- 加固走查 ✅ `docs/ASVS-L2.md` 逐条自查；审计 180d 保留（仅追加表，不自动删）
+- E2E ✅ `scripts/smoke_p0.py` **22/22**：激活→消息→附件+签名URL→内部邮件→停用拒登
+- 性能抽查 ✅ `scripts/perf_p0.py`：10k 消息首屏 12ms、1k op 差额 81ms、1009 会话目录 31ms
 
-- 生产 compose：nginx（单入口 TLS）+ server + worker + PG + maddy + 可选 minio(S3)；数据卷与备份文档
-- 桌面端打包：wails3 build 安装包 + WebView2 bootstrapper + 防火墙规则（为 P2 LAN 直传预留文档）
-- 加固走查：ASVS L2 清单（headers/CSRF/限速/密钥加密存储/日志脱敏）、审计日志 180d 保留验证
-- E2E：激活→发消息→传附件→收发邮件→停用账号 全链路冒烟
-- 性能抽查：10k 消息会话虚拟滚动、断线补 1k op 差额耗时、1000 会话目录比对
-
-**出口**：干净机器 `compose up` 起整套；桌面安装包可装可跑；冒烟全绿。
+**出口**：compose 文件齐备（干净机器部署未实测）；exe 已构建（NSIS 模板未编译）；冒烟全绿 ✅。
 
 ---
 

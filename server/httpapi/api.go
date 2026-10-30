@@ -58,6 +58,7 @@ func New(d *Deps) http.Handler {
 	registerObjects(mux, d)
 	registerMail(mux, d)
 	registerAgents(mux, d)
+	mux.HandleFunc("GET /api/v1/admin/audit/export", d.adminAuditExport)
 
 	// Typing fan-out: hub asks im for the member list lazily.
 	// 输入中扇出：hub 按需向 im 要成员列表。

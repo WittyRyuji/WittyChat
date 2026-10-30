@@ -5,8 +5,11 @@ package httpapi
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -335,4 +338,54 @@ func (d *Deps) adminSettingsSet(ctx context.Context, in *struct {
 	d.Audit.Log(ctx, &admin.ID, audit.ActorAdmin, "admin.settings.set", "",
 		in.Body.Settings, clientIP(in.XForwardedFor))
 	return &struct{}{}, nil
+}
+
+// adminAuditExport streams audit events as CSV (raw mux route — huma wraps
+// responses and can't stream). Admin-only; viewing is audited.
+//
+// 审计 CSV 导出（裸 mux 路由，huma 没法流式）。仅管理员，导出自审计。
+func (d *Deps) adminAuditExport(w http.ResponseWriter, r *http.Request) {
+	_, admin, err := d.requireAdmin(r.Context(), r.Header.Get("Authorization"))
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	d.Audit.Log(r.Context(), &admin.ID, audit.ActorAdmin, "admin.audit.export", "", nil,
+		net.ParseIP(r.Header.Get("X-Forwarded-For")))
+	rows, err := d.Pool.Query(r.Context(),
+		`SELECT id, actor_id, actor_kind, action, target, detail, ip, created_at
+		 FROM audit_events ORDER BY id`)
+	if err != nil {
+		http.Error(w, "query failed", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", "attachment; filename=audit.csv")
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{"id", "actor_id", "actor_kind", "action", "target", "detail", "ip", "created_at"})
+	for rows.Next() {
+		var id int64
+		var actorID *uuid.UUID
+		var kind, action string
+		var target, detail []byte
+		var ip *string
+		var ts time.Time
+		if err := rows.Scan(&id, &actorID, &kind, &action, &target, &detail, &ip, &ts); err != nil {
+			break
+		}
+		actor := ""
+		if actorID != nil {
+			actor = actorID.String()
+		}
+		ipStr := ""
+		if ip != nil {
+			ipStr = *ip
+		}
+		_ = cw.Write([]string{
+			fmt.Sprintf("%d", id), actor, kind, action, string(target),
+			string(detail), ipStr, ts.Format(time.RFC3339),
+		})
+	}
+	cw.Flush()
 }
