@@ -666,7 +666,7 @@ button {
 
 /* ---------- mail / 邮件 ---------- */
 .mailview .mailfolders {
-  width: 200px;
+  width: 260px;
   flex-shrink: 0;
 }
 .mailmain {
@@ -947,9 +947,14 @@ button {
   border-top: 1px solid var(--line);
   font-size: 13px;
 }
-.set-row > span:first-child {
+.set-row > .lbl {
   flex: 1;
   color: var(--dim);
+  min-width: 0;
+}
+.set-row > .lbl b,
+.set-row > .lbl .dim {
+  color: var(--fg);
 }
 .set-row a {
   color: var(--accent);
@@ -960,4 +965,124 @@ button {
 }
 .dim {
   color: var(--dim);
+}
+
+/* ---------- rail logo / 工作区标 ---------- */
+.rail-logo {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, var(--accent), #7c5cff);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 15px;
+  margin-bottom: 8px;
+  user-select: none;
+}
+
+/* ---------- conv search box / 搜索框 ---------- */
+.conv-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 10px;
+  padding: 0 10px;
+  height: 32px;
+  background: var(--bg3);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--dim);
+}
+.conv-search input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+}
+
+/* ---------- contacts / 通讯录列 ---------- */
+.head-actions {
+  display: flex;
+  gap: 2px;
+}
+.head-actions .ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+}
+.avatar.sm {
+  width: 26px;
+  height: 26px;
+  font-size: 12px;
+}
+.contact-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.contact-detail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 100%;
+}
+.contact-detail h3 {
+  margin: 4px 0 0;
+}
+.contact-detail .primary {
+  margin-top: 12px;
+  padding: 8px 28px;
+}
+
+/* ---------- settings body / 设定主体 ---------- */
+.settings-body {
+  padding: 28px 36px;
+  overflow-y: auto;
+}
+.settings-body .set-card {
+  max-width: 720px;
+}
+.set-row > .lbl i {
+  font-style: normal;
+  font-size: 12px;
+}
+
+/* ---------- toggle switch / 开关 ---------- */
+.switch {
+  width: 38px;
+  height: 22px;
+  border-radius: 11px;
+  border: 1px solid var(--line);
+  background: var(--bg3);
+  position: relative;
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+}
+.switch i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--dim);
+  transition: all 0.15s;
+}
+.switch.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.switch.on i {
+  left: 18px;
+  background: #fff;
 }

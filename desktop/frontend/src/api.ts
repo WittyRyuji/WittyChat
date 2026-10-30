@@ -178,8 +178,21 @@ export const api = {
   joinGroup: (id: string) => req("POST", `/api/v1/groups/${id}/join`),
   searchMessages: (q: string) =>
     req<{ hits: MessageSearchHit[] }>("GET", `/api/v1/search/messages?q=${encodeURIComponent(q)}`),
+  assistants: () =>
+    req<{
+      assistants: {
+        id: string;
+        name: string;
+        runtime: string;
+        adapter: string;
+        model: string;
+        auto_send: boolean;
+        status: string;
+      }[];
+    }>("GET", "/api/v1/assistants"),
   settings: () =>
     req<{
+      workspace: { name: string };
       im: {
         message_max_chars: number;
         recall_timeout_sec: number;

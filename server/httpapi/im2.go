@@ -275,6 +275,9 @@ func (d *Deps) effectiveSettings(ctx context.Context, in *struct{ Headers }) (*s
 		limit = settings.MaxMessageCharsCap
 	}
 	return &struct{ Body any }{Body: map[string]any{
+		"workspace": map[string]any{
+			"name": d.Settings.Str(ctx, "workspace.name", "WittyChat"),
+		},
 		"im": map[string]any{
 			"message_max_chars":  limit,
 			"recall_timeout_sec": d.Settings.Int(ctx, settings.KeyIMRecallTimeout, settings.DefRecallTimeout),

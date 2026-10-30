@@ -47,6 +47,19 @@ export const IconZen = ({ size }: P) => (
   </svg>
 );
 
+export const IconSearch = ({ size }: P) => (
+  <svg {...base(size)} aria-hidden="true">
+    <circle cx="11" cy="11" r="7" />
+    <path d="m21 21-4.3-4.3" />
+  </svg>
+);
+
+export const IconPlus = ({ size }: P) => (
+  <svg {...base(size)} aria-hidden="true">
+    <path d="M12 5v14M5 12h14" />
+  </svg>
+);
+
 export const IconGear = ({ size }: P) => (
   <svg {...base(size)} aria-hidden="true">
     <circle cx="12" cy="12" r="3" />

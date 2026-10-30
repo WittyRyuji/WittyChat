@@ -182,11 +182,13 @@ export function JoinGroupDialog({
 export function SearchDialog({
   onClose,
   onPick,
+  initialQ = "",
 }: {
   onClose: () => void;
   onPick: (convId: string) => void;
+  initialQ?: string;
 }) {
-  const [q, setQ] = useState("");
+  const [q, setQ] = useState(initialQ);
   const [hits, setHits] = useState<MessageSearchHit[]>([]);
 
   useEffect(() => {

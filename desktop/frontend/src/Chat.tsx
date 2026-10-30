@@ -12,7 +12,7 @@ import {
 } from "./api";
 import { Contacts } from "./Contacts";
 import { JoinGroupDialog, MembersPanel, NewGroupDialog, SearchDialog } from "./dialogs";
-import { IconChat, IconContacts, IconGear, IconMail, IconZen } from "./icons";
+import { IconChat, IconContacts, IconGear, IconMail, IconSearch, IconZen } from "./icons";
 import { Mail } from "./Mail";
 import { Md } from "./md";
 import { Settings } from "./Settings";
@@ -113,6 +113,8 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
   const [contacts, setContacts] = useState<UserPublic[]>([]);
   const [modal, setModal] = useState<"" | "newGroup" | "join" | "search" | "members">("");
   const [msgLimit, setMsgLimit] = useState(MSG_LIMIT);
+  const [wsName, setWsName] = useState("W");
+  const [searchQ, setSearchQ] = useState("");
   const [view, setView] = useState<"chat" | "contacts" | "mail" | "zen" | "settings">("chat");
   const [err, setErr] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -233,7 +235,10 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
       .catch(() => {});
     api
       .settings()
-      .then((s) => setMsgLimit(s.im.message_max_chars))
+      .then((s) => {
+        setMsgLimit(s.im.message_max_chars);
+        setWsName(s.workspace.name);
+      })
       .catch(() => {});
     let dead = false;
     let retry = 0;
@@ -429,9 +434,16 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
   if (view !== "chat") {
     return (
       <div className="app">
-        <Rail view={view} setView={setView} />
+        <Rail view={view} setView={setView} logo={wsName} />
         {view === "mail" && <Mail />}
-        {view === "contacts" && <Contacts me={me} onOpenDM={openDM} />}
+        {view === "contacts" && (
+          <Contacts
+            me={me}
+            onOpenDM={openDM}
+            onNewGroup={() => setModal("newGroup")}
+            onJoin={() => setModal("join")}
+          />
+        )}
         {view === "zen" && (
           <div className="pane">
             <h3>Zen</h3>
@@ -439,43 +451,39 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
           </div>
         )}
         {view === "settings" && <Settings me={me} onLogout={onLogout} />}
+        {modal === "newGroup" && (
+          <NewGroupDialog
+            contacts={contacts}
+            onClose={() => setModal("")}
+            onCreated={refreshDirectory}
+          />
+        )}
+        {modal === "join" && (
+          <JoinGroupDialog onClose={() => setModal("")} onJoined={refreshDirectory} />
+        )}
       </div>
     );
   }
 
   return (
     <div className="app">
-      <Rail view={view} setView={setView} />
+      <Rail view={view} setView={setView} logo={wsName} />
       <div className="chat">
         <aside className="sidebar">
           <div className="side-head">
             <span className="me">{me.display_name}</span>
           </div>
-          <div className="conv-tools">
-            <button
-              type="button"
-              className="ghost"
-              title="新建群聊"
-              onClick={() => setModal("newGroup")}
-            >
-              +群
-            </button>
-            <button
-              type="button"
-              className="ghost"
-              title="加入公开群"
-              onClick={() => setModal("join")}
-            >
-              公开群
-            </button>
-            <button
-              type="button"
-              className="ghost"
-              title="搜索消息"
+          <div className="conv-search">
+            <IconSearch size={16} />
+            <input
+              placeholder="搜索消息"
+              value={searchQ}
+              onChange={(e) => setSearchQ(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") setModal("search");
+              }}
               onClick={() => setModal("search")}
-            >
-              🔍
-            </button>
+            />
           </div>
           <div className="conv-list">
             {convs.map((c) => (
@@ -689,7 +697,11 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
           <JoinGroupDialog onClose={() => setModal("")} onJoined={refreshDirectory} />
         )}
         {modal === "search" && (
-          <SearchDialog onClose={() => setModal("")} onPick={(id) => setActiveId(id)} />
+          <SearchDialog
+            initialQ={searchQ}
+            onClose={() => setModal("")}
+            onPick={(id) => setActiveId(id)}
+          />
         )}
         {modal === "members" && active && (
           <MembersPanel
@@ -713,9 +725,11 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
 function Rail({
   view,
   setView,
+  logo,
 }: {
   view: string;
   setView: (v: "chat" | "contacts" | "mail" | "zen" | "settings") => void;
+  logo: string;
 }) {
   const items = [
     { key: "chat", title: "消息", icon: <IconChat /> },
@@ -725,6 +739,9 @@ function Rail({
   ] as const;
   return (
     <nav className="rail">
+      <span className="rail-logo" title={logo}>
+        {logo.slice(0, 1).toUpperCase()}
+      </span>
       {items.map((i) => (
         <button
           type="button"
