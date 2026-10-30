@@ -42,8 +42,8 @@ export const IconMail = ({ size }: P) => (
 
 export const IconZen = ({ size }: P) => (
   <svg {...base(size)} aria-hidden="true">
-    <circle cx="12" cy="12" r="9" />
-    <circle cx="12" cy="12" r="3" />
+    <path d="M5.5 7.5 10 12l-4.5 4.5" />
+    <path d="M12.5 17.5H19" />
   </svg>
 );
 

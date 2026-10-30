@@ -5,13 +5,14 @@ import {
   type ConversationInfo,
   connectWS,
   type MemberInfo,
+  type MessageSearchHit,
   newClientMsgId,
   type OpEvent,
   type UserPublic,
   type WsFrame,
 } from "./api";
 import { Contacts } from "./Contacts";
-import { JoinGroupDialog, MembersPanel, NewGroupDialog, SearchDialog } from "./dialogs";
+import { JoinGroupDialog, MembersPanel, NewGroupDialog } from "./dialogs";
 import { IconChat, IconContacts, IconGear, IconMail, IconSearch, IconZen } from "./icons";
 import { Mail } from "./Mail";
 import { Md } from "./md";
@@ -111,10 +112,26 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
   const [online, setOnline] = useState<Record<string, boolean>>({});
   const [members, setMembers] = useState<Record<string, MemberInfo[]>>({});
   const [contacts, setContacts] = useState<UserPublic[]>([]);
-  const [modal, setModal] = useState<"" | "newGroup" | "join" | "search" | "members">("");
+  const [modal, setModal] = useState<"" | "newGroup" | "join" | "members">("");
   const [msgLimit, setMsgLimit] = useState(MSG_LIMIT);
   const [wsName, setWsName] = useState("W");
   const [searchQ, setSearchQ] = useState("");
+  const [searchHits, setSearchHits] = useState<MessageSearchHit[] | null>(null);
+
+  // Inline message search (Feishu-style): typing swaps the conv list for hits.
+  useEffect(() => {
+    if (!searchQ.trim()) {
+      setSearchHits(null);
+      return;
+    }
+    const t = setTimeout(() => {
+      api
+        .searchMessages(searchQ)
+        .then((d) => setSearchHits(d.hits))
+        .catch(() => setSearchHits([]));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [searchQ]);
   const [view, setView] = useState<"chat" | "contacts" | "mail" | "zen" | "settings">("chat");
   const [err, setErr] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -479,30 +496,54 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
               placeholder="搜索消息"
               value={searchQ}
               onChange={(e) => setSearchQ(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") setModal("search");
-              }}
-              onClick={() => setModal("search")}
             />
-          </div>
-          <div className="conv-list">
-            {convs.map((c) => (
-              <button
-                type="button"
-                key={c.id}
-                className={`conv ${c.id === activeId ? "active" : ""}`}
-                onClick={() => setActiveId(c.id)}
-              >
-                <span className="conv-title">
-                  {c.kind === "dm" && online[c.peer_user_id ?? ""] && <i className="dot" />}
-                  {convTitle(c)}
-                </span>
-                {c.unread > 0 && <span className="badge">{c.unread}</span>}
-                <span className="conv-preview">{c.preview}</span>
+            {searchQ && (
+              <button type="button" className="ghost sm" onClick={() => setSearchQ("")}>
+                ✕
               </button>
-            ))}
-            {convs.length === 0 && <p className="empty">还没有会话</p>}
+            )}
           </div>
+          {searchHits !== null ? (
+            <div className="conv-list">
+              {searchHits.map((h) => (
+                <button
+                  type="button"
+                  key={`${h.conv_id}-${h.op_seq}`}
+                  className="conv"
+                  onClick={() => {
+                    setActiveId(h.conv_id);
+                    setSearchQ("");
+                  }}
+                >
+                  <span className="conv-title">
+                    {h.conv_title}
+                    <i className="dim"> · {h.actor_name}</i>
+                  </span>
+                  <span className="conv-preview">{h.body}</span>
+                </button>
+              ))}
+              {searchHits.length === 0 && <p className="empty">没有匹配的消息</p>}
+            </div>
+          ) : (
+            <div className="conv-list">
+              {convs.map((c) => (
+                <button
+                  type="button"
+                  key={c.id}
+                  className={`conv ${c.id === activeId ? "active" : ""}`}
+                  onClick={() => setActiveId(c.id)}
+                >
+                  <span className="conv-title">
+                    {c.kind === "dm" && online[c.peer_user_id ?? ""] && <i className="dot" />}
+                    {convTitle(c)}
+                  </span>
+                  {c.unread > 0 && <span className="badge">{c.unread}</span>}
+                  <span className="conv-preview">{c.preview}</span>
+                </button>
+              ))}
+              {convs.length === 0 && <p className="empty">还没有会话</p>}
+            </div>
+          )}
         </aside>
 
         <section className="main">
@@ -695,13 +736,6 @@ export function Chat({ me, onLogout }: { me: UserPublic; onLogout: () => void })
         )}
         {modal === "join" && (
           <JoinGroupDialog onClose={() => setModal("")} onJoined={refreshDirectory} />
-        )}
-        {modal === "search" && (
-          <SearchDialog
-            initialQ={searchQ}
-            onClose={() => setModal("")}
-            onPick={(id) => setActiveId(id)}
-          />
         )}
         {modal === "members" && active && (
           <MembersPanel
