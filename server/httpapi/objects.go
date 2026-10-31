@@ -8,6 +8,7 @@ package httpapi
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -568,9 +569,14 @@ func escapeName(s string) string {
 }
 
 // GET /workspace/logo — the org logo set via admin settings
-// (workspace.logo_object_id). Any workspace member may read it; logo is
-// org-shared rather than owner-scoped, so normal object ACL doesn't apply.
-// 组织 Logo：管理员在工作区设置里绑定的对象，任意成员可读（非属主私有 ACL）。
+// (workspace.logo_object_id), or the built-in dragon mark when unset.
+// Any workspace member may read it; logo is org-shared rather than
+// owner-scoped, so normal object ACL doesn't apply.
+// 组织 Logo：管理员绑定的对象，未配置时返回内置默认图；任意成员可读。
+//
+//go:embed default_logo.png
+var defaultLogoPNG []byte
+
 func (d *Deps) workspaceLogo(w http.ResponseWriter, r *http.Request) {
 	if _, err := d.bearerUser(r); err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -579,7 +585,12 @@ func (d *Deps) workspaceLogo(w http.ResponseWriter, r *http.Request) {
 	raw := d.Settings.Str(r.Context(), "workspace.logo_object_id", "")
 	objID, err := uuid.Parse(raw)
 	if raw == "" || err != nil {
-		http.Error(w, "no logo", http.StatusNotFound)
+		// No custom logo configured — serve the built-in default so every
+		// workspace has a recognizable mark out of the box.
+		// 未配置自定义 logo 时返回内置默认图，开箱即有标识。
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(defaultLogoPNG)
 		return
 	}
 	obj, err := d.Objects.Peek(r.Context(), objID)

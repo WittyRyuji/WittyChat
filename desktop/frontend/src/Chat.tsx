@@ -333,7 +333,7 @@ export function Chat({
       .then((s) => {
         setMsgLimit(s.im.message_max_chars);
         setWsName(s.workspace.name);
-        setWsLogo(s.workspace.logo_object_id ? api2.workspaceLogoURL() : "");
+        setWsLogo(api2.workspaceLogoURL()); // server falls back to built-in logo
       })
       .catch(() => {});
     let dead = false;

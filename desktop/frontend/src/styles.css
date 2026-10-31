@@ -1734,6 +1734,9 @@ button.avatar .avatar-img {
   font-family: inherit;
   resize: vertical;
 }
+.hr-field textarea {
+  height: 120px;
+}
 .hr-field textarea:focus,
 .hr-field input:focus,
 .hr-field select:focus {

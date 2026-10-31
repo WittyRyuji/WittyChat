@@ -468,10 +468,7 @@ st, b = req("PUT", "/api/v1/admin/settings",
             {"settings": {"workspace.logo_object_id": ""}}, admin)
 check("logo clear", st in (200, 204), str(st))
 st, b = req("GET", "/api/v1/workspace/logo", None, admin)
-check("logo 404 after clear", st == 404, str(st))
-# restore so the desktop rail keeps a logo for manual QA
-req("PUT", "/api/v1/admin/settings",
-    {"settings": {"workspace.logo_object_id": logo_id}}, admin)
+check("logo default after clear", st == 200 and b.startswith(b"\x89PNG"), str(st))
 
 # ---- user prefs (per-user, cross-device) ----
 st, b = req("GET", "/api/v1/me/prefs", None, alice)

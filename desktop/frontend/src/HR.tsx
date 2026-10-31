@@ -124,22 +124,27 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
+// Local-today ISO date (toISOString is UTC — off by a day in UTC+N mornings).
+// 本地今天的 YYYY-MM-DD（toISOString 是 UTC，UTC+N 的早上会差一天）。
+function todayISO() {
+  const d = new Date();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
+function defaultFields() {
+  const t = todayISO();
+  return { start_date: t, end_date: t, invoice_date: t };
+}
+
 function MyRequests() {
-  const [rows, setRows] = useState<HRRequest[]>([]);
   const [kind, setKind] = useState<Kind>("leave");
-  const [f, setF] = useState<Record<string, string>>({});
+  const [f, setF] = useState<Record<string, string>>(() => defaultFields());
   const [atts, setAtts] = useState<Att[]>([]);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
-
-  const reload = useCallback(() => {
-    hrApi
-      .list("mine")
-      .then((r) => setRows(r.requests))
-      .catch(() => {});
-  }, []);
-  useEffect(reload, [reload]);
 
   const set =
     (k: string) =>
@@ -192,10 +197,9 @@ function MyRequests() {
     setBusy(true);
     try {
       await hrApi.create(kind, payload);
-      setF({});
+      setF(defaultFields());
       setAtts([]);
       setMsg("已提交");
-      reload();
     } catch (e) {
       setMsg(`提交失败：${e instanceof Error ? e.message : e}`);
     } finally {
@@ -220,7 +224,7 @@ function MyRequests() {
               className={`hr-seg-item ${kind === k ? "active" : ""}`}
               onClick={() => {
                 setKind(k);
-                setF({});
+                setF(defaultFields());
                 setMsg("");
               }}
             >
@@ -340,36 +344,6 @@ function MyRequests() {
             提交申请
           </button>
         </div>
-      </div>
-
-      <h3>进行中</h3>
-      <div className="hr-list">
-        {rows.filter((r) => r.status === "pending").length === 0 && (
-          <p className="dim">暂无进行中的申请</p>
-        )}
-        {rows
-          .filter((r) => r.status === "pending")
-          .map((r) => (
-            <div key={r.id} className="hr-row">
-              <span className={`hr-kind k-${r.kind}`}>{KIND_LABEL[r.kind]}</span>
-              <span className="hr-sum">
-                {payloadSummary(r)}
-                <AttLinks ids={payloadAtts(r)} />
-              </span>
-              <span className={`hr-status s-${r.status}`}>{STATUS_LABEL[r.status]}</span>
-              <span className="dim">{new Date(r.created_at).toLocaleDateString("zh-CN")}</span>
-              {r.status === "pending" && (
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => hrApi.cancel(r.id).then(reload)}
-                >
-                  撤销
-                </button>
-              )}
-              {r.decision_note && <span className="dim">批注:{r.decision_note}</span>}
-            </div>
-          ))}
       </div>
     </div>
   );
