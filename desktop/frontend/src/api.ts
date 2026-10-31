@@ -366,3 +366,49 @@ export function connectWS(onFrame: (f: WsFrame) => void, onClose: () => void): W
 export function newClientMsgId(): string {
   return crypto.randomUUID();
 }
+
+// ---- HR / 人力 ----
+export interface HRRequest {
+  id: string;
+  kind: "leave" | "contract" | "expense";
+  requester: string;
+  requester_name?: string;
+  status: "pending" | "approved" | "rejected" | "cancelled";
+  payload: Record<string, unknown>;
+  decider_name?: string;
+  decided_at?: string;
+  decision_note?: string;
+  created_at: string;
+}
+export interface HRDay {
+  work_date: string;
+  check_in: string;
+  check_out?: string;
+  note?: string;
+  minutes: number;
+  late: boolean;
+}
+export interface HRSummary {
+  user_id: string;
+  user_name?: string;
+  days: number;
+  total_minutes: number;
+  late_days: number;
+  missing_checkout: number;
+}
+
+export const hrApi = {
+  create: (kind: string, payload: Record<string, unknown>) =>
+    req<HRRequest>("POST", "/api/v1/hr/requests", { kind, payload }),
+  list: (scope: "mine" | "pending" | "all") =>
+    req<{ requests: HRRequest[] }>("GET", `/api/v1/hr/requests?scope=${scope}`),
+  decide: (id: string, approve: boolean, note?: string) =>
+    req<HRRequest>("POST", `/api/v1/hr/requests/${id}/decide`, { approve, note }),
+  cancel: (id: string) => req("POST", `/api/v1/hr/requests/${id}/cancel`),
+  checkIn: (note?: string) => req("POST", "/api/v1/hr/attendance/check-in", { note }),
+  checkOut: () => req("POST", "/api/v1/hr/attendance/check-out"),
+  myMonth: (month: string) =>
+    req<{ days: HRDay[]; summary: HRSummary }>("GET", `/api/v1/hr/attendance/mine?month=${month}`),
+  monthSummary: (month: string) =>
+    req<{ rows: HRSummary[] }>("GET", `/api/v1/hr/attendance/summary?month=${month}`),
+};

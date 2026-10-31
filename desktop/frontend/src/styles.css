@@ -1568,3 +1568,135 @@ button.avatar .avatar-img {
 .atts.stk-msg .att-img img {
   max-height: 200px;
 }
+
+/* HR page / 人力页 */
+.hr-page {
+  padding: 20px 28px;
+  max-width: 860px;
+  overflow-y: auto;
+}
+.hr-page h3 {
+  margin: 18px 0 10px;
+  font-size: 14px;
+  color: var(--tx2, #aaa);
+}
+.hr-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.hr-form input,
+.hr-form select {
+  background: var(--bg2, #1e1e24);
+  border: 1px solid var(--bd, #333);
+  color: inherit;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.hr-form .primary {
+  margin-left: 4px;
+}
+.hr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.hr-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: var(--bg2, #1e1e24);
+  border: 1px solid var(--bd, #2c2c34);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+.hr-row input {
+  background: var(--bg, #141418);
+  border: 1px solid var(--bd, #333);
+  color: inherit;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  width: 110px;
+}
+.hr-kind {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  background: #2d4a6b;
+  color: #cfe3ff;
+}
+.hr-kind.k-expense {
+  background: #5a4426;
+  color: #ffe1b3;
+}
+.hr-kind.k-contract {
+  background: #3d5a3d;
+  color: #cfeecc;
+}
+.hr-sum {
+  flex: 1;
+  min-width: 200px;
+}
+.hr-status {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+.hr-status.s-pending {
+  background: #4a4a2a;
+  color: #ffe98a;
+}
+.hr-status.s-approved {
+  background: #2a4a2a;
+  color: #9fe6a0;
+}
+.hr-status.s-rejected {
+  background: #5a2a2a;
+  color: #ff9d9d;
+}
+.hr-status.s-cancelled {
+  background: #3a3a3a;
+  color: #999;
+}
+.hr-clock {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+.hr-month {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.hr-month input {
+  background: var(--bg2, #1e1e24);
+  border: 1px solid var(--bd, #333);
+  color: inherit;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
+}
+.hr-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.hr-table th,
+.hr-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--bd, #2c2c34);
+}
+.hr-table th {
+  color: var(--tx2, #888);
+  font-weight: 500;
+}

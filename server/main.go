@@ -32,6 +32,7 @@ import (
 	"wittychat/core/audit"
 	"wittychat/core/auth"
 	"wittychat/core/db"
+	"wittychat/core/hr"
 	"wittychat/core/im"
 	"wittychat/core/mail"
 	"wittychat/core/migrations"
@@ -136,6 +137,7 @@ func cmdServe() {
 		Signer:    objects.NewSigner(key),
 		Mail:      mail.NewStore(pool, envOr("WITTYCHAT_MAIL_DOMAIN", "wittyloong.com")),
 		Agents:    agents.NewStore(pool),
+		HR:        hr.New(pool),
 	}
 
 	addr := envOr("WITTYCHAT_ADDR", ":8080")

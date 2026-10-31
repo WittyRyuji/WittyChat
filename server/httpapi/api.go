@@ -14,6 +14,7 @@ import (
 	"wittychat/core/agents"
 	"wittychat/core/audit"
 	"wittychat/core/auth"
+	"wittychat/core/hr"
 	"wittychat/core/im"
 	"wittychat/core/mail"
 	"wittychat/core/objects"
@@ -43,6 +44,7 @@ type Deps struct {
 	Signer    *objects.Signer // short-lived download URLs / 签名下载URL
 	Mail      *mail.Store
 	Agents    *agents.Store
+	HR        *hr.Store
 }
 
 // New builds the root handler: API routes + HTML pages + healthz.
@@ -55,6 +57,7 @@ func New(d *Deps) http.Handler {
 	registerIM(api, d)
 	registerIM2(api, d)
 	registerPrefs(api, d)
+	registerHR(api, d)
 	registerProfile(api, mux, d)
 	registerPages(mux, d)
 	registerWS(mux, d)

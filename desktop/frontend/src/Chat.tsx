@@ -14,7 +14,8 @@ import {
 import { Contacts } from "./Contacts";
 import { JoinGroupDialog, MembersPanel, NewGroupDialog } from "./dialogs";
 import { EMOJI_GROUPS } from "./emoji";
-import { IconChat, IconContacts, IconGear, IconMail, IconSearch, IconZen } from "./icons";
+import { HR } from "./HR";
+import { IconChat, IconContacts, IconGear, IconHR, IconMail, IconSearch, IconZen } from "./icons";
 import { Mail } from "./Mail";
 import { Md } from "./md";
 import { Settings } from "./Settings";
@@ -203,7 +204,9 @@ export function Chat({
     }, 250);
     return () => clearTimeout(t);
   }, [searchQ]);
-  const [view, setView] = useState<"chat" | "contacts" | "mail" | "zen" | "settings">("chat");
+  const [view, setView] = useState<"chat" | "contacts" | "mail" | "zen" | "hr" | "settings">(
+    "chat"
+  );
   const [err, setErr] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const typingTimers = useRef<Record<string, number>>({});
@@ -621,6 +624,7 @@ export function Chat({
             <p className="empty">Zen 会话（P1）</p>
           </div>
         )}
+        {view === "hr" && <HR me={me} />}
         {view === "settings" && <Settings me={me} onLogout={onLogout} onMeUpdated={onMeUpdated} />}
         {modal === "newGroup" && (
           <NewGroupDialog me={me} onClose={() => setModal("")} onCreated={refreshDirectory} />
@@ -1109,7 +1113,7 @@ function Rail({
   logoUrl,
 }: {
   view: string;
-  setView: (v: "chat" | "contacts" | "mail" | "zen" | "settings") => void;
+  setView: (v: "chat" | "contacts" | "mail" | "zen" | "hr" | "settings") => void;
   logo: string;
   logoUrl?: string;
 }) {
@@ -1118,6 +1122,7 @@ function Rail({
     { key: "contacts", title: "通讯录", icon: <IconContacts /> },
     { key: "mail", title: "邮件", icon: <IconMail /> },
     { key: "zen", title: "Zen", icon: <IconZen /> },
+    { key: "hr", title: "人力", icon: <IconHR /> },
   ] as const;
   return (
     <nav className="rail">

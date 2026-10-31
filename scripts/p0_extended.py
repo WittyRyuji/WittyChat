@@ -496,5 +496,60 @@ check("prefs per-user isolation",
 # cleanup so reruns stay deterministic
 req("PATCH", "/api/v1/me/prefs", {"prefs": {"pref.mail.autoimg": None, "pref.mail.trusted": None}}, alice)
 
+# ---- HR: requests + approvals + attendance ----
+st, b = req("POST", "/api/v1/hr/requests",
+            {"kind": "leave", "payload": {"leave_type": "annual", "start_date": "2026-11-03",
+                                          "end_date": "2026-11-04", "days": 2, "reason": "p0x"}}, alice)
+leave_id = json.loads(b).get("id") if st == 200 else None
+check("hr leave create", st == 200 and json.loads(b).get("status") == "pending", str(st))
+st, b = req("POST", "/api/v1/hr/requests",
+            {"kind": "expense", "payload": {"category": "travel", "amount_cents": 12500}}, alice)
+exp_id = json.loads(b).get("id") if st == 200 else None
+check("hr expense create", st == 200 and exp_id, str(st))
+st, b = req("POST", "/api/v1/hr/requests",
+            {"kind": "leave", "payload": {"leave_type": "annual"}}, alice)
+check("hr bad payload rejected", st in (400, 422), str(st))
+st, b = req("GET", "/api/v1/hr/requests?scope=pending", None, alice)
+check("hr pending non-admin denied", st == 403, str(st))
+st, b = req("GET", "/api/v1/hr/requests?scope=pending", None, admin)
+pend = json.loads(b).get("requests", []) if st == 200 else []
+check("hr admin pending queue",
+      st == 200 and any(r["id"] == leave_id for r in pend) and any(r["id"] == exp_id for r in pend),
+      str(len(pend)))
+st, b = req("GET", "/api/v1/hr/requests?scope=mine", None, alice)
+mine = json.loads(b).get("requests", []) if st == 200 else []
+check("hr mine list", st == 200 and all(r["requester_name"] for r in mine), str(len(mine)))
+st, b = req("POST", f"/api/v1/hr/requests/{leave_id}/decide",
+            {"approve": True, "note": "ok"}, alice)
+check("hr decide non-admin denied", st == 403, str(st))
+st, b = req("POST", f"/api/v1/hr/requests/{leave_id}/decide",
+            {"approve": True, "note": "ok"}, admin)
+check("hr approve", st == 200 and json.loads(b).get("status") == "approved", str(st))
+st, b = req("POST", f"/api/v1/hr/requests/{leave_id}/decide", {"approve": False}, admin)
+check("hr re-decide conflict", st == 409, str(st))
+st, b = req("POST", f"/api/v1/hr/requests/{exp_id}/cancel", None, admin)
+check("hr cancel non-owner denied", st == 409, str(st))
+st, b = req("POST", f"/api/v1/hr/requests/{exp_id}/cancel", None, alice)
+check("hr owner cancel", st in (200, 204), str(st))
+st, b = req("POST", f"/api/v1/hr/requests/{exp_id}/decide", {"approve": True}, admin)
+check("hr cancelled not decidable", st == 409, str(st))
+
+st, b = req("POST", "/api/v1/hr/attendance/check-out", None, p0x)
+check("hr checkout without checkin", st == 409, str(st))
+st, b = req("POST", "/api/v1/hr/attendance/check-in", {"note": "p0x"}, p0x)
+check("hr check-in", st in (200, 204), str(st))
+st, b = req("POST", "/api/v1/hr/attendance/check-out", None, p0x)
+check("hr check-out", st in (200, 204), str(st))
+mon = time.strftime("%Y-%m")
+st, b = req("GET", f"/api/v1/hr/attendance/mine?month={mon}", None, p0x)
+msum = json.loads(b).get("summary", {}) if st == 200 else {}
+check("hr my month", st == 200 and msum.get("days") == 1 and msum.get("missing_checkout") == 0,
+      str(msum))
+st, b = req("GET", f"/api/v1/hr/attendance/summary?month={mon}", None, alice)
+check("hr summary non-admin denied", st == 403, str(st))
+st, b = req("GET", f"/api/v1/hr/attendance/summary?month={mon}", None, admin)
+rows = json.loads(b).get("rows", []) if st == 200 else []
+check("hr admin summary", st == 200 and any(r.get("days") == 1 for r in rows), str(len(rows)))
+
 print(f"\n{len(passed)} passed, {len(failed)} failed")
 sys.exit(1 if failed else 0)
