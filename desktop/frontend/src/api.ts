@@ -91,12 +91,16 @@ export function setToken(t: string) {
 // API 基址：浏览器开发环境走 vite 代理（""）；Wails 壳内资源也是 http(s)
 // 来源（wails.localhost），需显式识别壳环境后直连服务端；
 // localStorage "wittychat.server" 可覆盖指向远程/HTTPS 实例。
-const inWails = location.hostname === "wails.localhost" || location.protocol === "wails:";
+export const inWails = location.hostname === "wails.localhost" || location.protocol === "wails:";
 export const API_BASE =
   localStorage.getItem("wittychat.server") ??
   (inWails || !(location.protocol === "http:" || location.protocol === "https:")
     ? "http://localhost:8080"
     : "");
+// Absolute admin console URL — a bare "/admin/" resolves against the
+// wails.localhost shell origin instead of the backend.
+// 管理后台绝对地址——裸 "/admin/" 在壳内会解析到 wails.localhost 源。
+export const adminURL = `${API_BASE || location.origin}/admin/`;
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(API_BASE + path, {

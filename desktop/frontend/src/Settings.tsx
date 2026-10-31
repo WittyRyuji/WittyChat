@@ -5,7 +5,7 @@
 // 设定页：左列子导航 + 右侧全宽内容。个人偏好经服务端偏好 API 跨设备同步；
 // 工作区策略只读（管理员经 /admin/ 改）。
 import { useEffect, useRef, useState } from "react";
-import { api, api2, setToken, type UserPublic } from "./api";
+import { adminURL, api, api2, setToken, type UserPublic } from "./api";
 import { Avatar } from "./avatar";
 import { trustedSenders, untrustSender } from "./Mail";
 import { applyTheme, prefGet, prefSet } from "./prefs";
@@ -210,7 +210,7 @@ export function Settings({
               {me.is_admin && (
                 <div className="set-row">
                   <span className="lbl">管理后台</span>
-                  <a href="/admin/" target="_blank" rel="noreferrer">
+                  <a href={adminURL} target="_blank" rel="noreferrer">
                     打开 admin/
                   </a>
                 </div>
