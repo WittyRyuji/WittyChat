@@ -3,13 +3,61 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 
 	"github.com/wailsapp/wails/v3/pkg/w32"
 )
+
+// The rsrc-generated .syso embeds the icon as RT_GROUP_ICON id=1, but the
+// Wails window class registers LoadIcon(IDI_APPLICATION=32512) — a resource
+// id that doesn't exist → NULL class icon → blank taskbar/titlebar icon.
+// Fix it ourselves: send WM_SETICON with proper small+large HICONs built
+// from the embedded PNG frame. rsrc 把图标编为组 id=1，而 wails 窗口类
+// 加载 IDI_APPLICATION=32512 → 取不到 → 窗口无图标；这里显式 WM_SETICON。
+//
+//go:embed appicon.png
+var appIconPNG []byte
+
+// Two gotchas discovered the hard way:
+//  1. The interceptor also sees __wails_hidden_mainthread — a helper HWND
+//     that receives messages before the real window — so "run once" would
+//     spend the one shot on a window that never shows. Track per-hwnd.
+//  2. The hwnd must be marked BEFORE SendMessage: WM_SETICON re-enters this
+//     same wndProc synchronously — a sync.Once would deadlock the window
+//     thread during WM_NCCREATE and the window never appears.
+//
+// 两个坑：1) 拦截器还会看到先于真窗口收消息的隐藏辅助 HWND，once 会浪费在
+// 它身上，要按 hwnd 记；2) 必须先标记再发消息——WM_SETICON 同步重入同一
+// wndProc，sync.Once 会在建窗消息里自锁导致窗口永远建不出来。
+var iconHwnds sync.Map
+var iconSm, iconLg atomic.Uintptr
+
+func setWindowIcon(hwnd uintptr) {
+	if _, done := iconHwnds.LoadOrStore(hwnd, struct{}{}); done {
+		return
+	}
+	if iconSm.Load() == 0 {
+		if h, err := w32.CreateSmallHIconFromImage(appIconPNG); err == nil {
+			iconSm.Store(uintptr(h))
+		}
+	}
+	if iconLg.Load() == 0 {
+		if h, err := w32.CreateLargeHIconFromImage(appIconPNG); err == nil {
+			iconLg.Store(uintptr(h))
+		}
+	}
+	if h := iconSm.Load(); h != 0 {
+		w32.SendMessage(w32.HWND(hwnd), w32.WM_SETICON, w32.ICON_SMALL, h)
+	}
+	if h := iconLg.Load(); h != 0 {
+		w32.SendMessage(w32.HWND(hwnd), w32.WM_SETICON, w32.ICON_BIG, h)
+	}
+}
 
 // Wails calls the synchronous WebView2 COM method
 // NotifyParentWindowPositionChanged on every WM_MOVE/WM_MOVING — hundreds
@@ -35,6 +83,7 @@ func init() {
 }
 
 func wndProcThrottle(hwnd uintptr, msg uint32, _ uintptr, _ uintptr) (uintptr, bool) {
+	setWindowIcon(hwnd)
 	switch msg {
 	case w32.WM_ENTERSIZEMOVE:
 		inSizeMove.Store(true)

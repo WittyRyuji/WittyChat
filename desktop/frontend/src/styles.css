@@ -358,7 +358,9 @@ button {
   padding: 6px;
 }
 .conv {
-  display: block;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
   width: 100%;
   text-align: left;
   padding: 10px 12px;
@@ -367,6 +369,10 @@ button {
   background: transparent;
   color: var(--fg);
   position: relative;
+}
+.conv-col {
+  flex: 1;
+  min-width: 0;
 }
 .conv:hover {
   background: var(--bg3);
@@ -468,14 +474,26 @@ button {
   font-size: 12px;
 }
 .msg {
-  max-width: 70%;
+  max-width: 78%;
   min-width: 0;
   position: relative;
   padding-bottom: 4px;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.msg-col {
+  flex: 1;
+  min-width: 0;
+}
+.msg-av {
+  flex-shrink: 0;
+  margin-top: 1px;
 }
 .msg.mine {
   align-self: flex-end;
   text-align: right;
+  flex-direction: row-reverse;
 }
 
 /* read-receipt circle / 已读回执圈(飞书式):贴气泡左下角 */
