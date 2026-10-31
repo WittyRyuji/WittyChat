@@ -1607,6 +1607,8 @@ button.avatar .avatar-img {
 .settings-body {
   padding: 28px 36px;
   overflow-y: auto;
+  flex: 1;
+  min-height: 0;
 }
 .settings-body .set-card {
   max-width: 720px;
@@ -1670,7 +1672,12 @@ button.avatar .avatar-img {
 .hr-page {
   padding: 20px 28px;
   max-width: 860px;
+  width: 100%;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  box-sizing: border-box;
 }
 .hr-page h3 {
   margin: 18px 0 10px;
@@ -1686,6 +1693,14 @@ button.avatar .avatar-img {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  flex: 1;
+  min-height: 0;
+}
+/* reason field grows to fill the card — compose-style bottom reach.
+   事由字段撑满卡片剩余高度，撰写面板式到底。 */
+.hr-card > .hr-field {
+  flex: 1;
+  min-height: 0;
 }
 .hr-seg {
   display: flex;
@@ -1735,7 +1750,8 @@ button.avatar .avatar-img {
   resize: vertical;
 }
 .hr-field textarea {
-  height: 120px;
+  flex: 1;
+  min-height: 120px;
 }
 .hr-field textarea:focus,
 .hr-field input:focus,
