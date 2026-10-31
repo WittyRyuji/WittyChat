@@ -1,4 +1,4 @@
-import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   api2,
@@ -74,6 +74,13 @@ async function makeThumb(file: File): Promise<Blob | null> {
   } catch {
     return null;
   }
+}
+
+// Local-calendar YYYY-MM-DD for date separators — deliberately not
+// toISOString() (UTC would shift late-evening messages to the next day).
+function dayKey(iso: string): string {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 function fmtSize(n: number): string {
@@ -743,19 +750,31 @@ export function Chat({
               )}
               <div className="ops" ref={scrollRef} onScroll={onScroll}>
                 {st?.hasOlder && <div className="hint">上滑加载更早的消息</div>}
-                {st?.ops.map((o) => {
+                {st?.ops.map((o, i) => {
                   if (o.kind === "reaction") return null; // folded into its target bubble
+                  // Day separator: first op and whenever the local calendar
+                  // date changes between consecutive ops (any visible kind).
+                  const prev = i > 0 ? st.ops[i - 1] : null;
+                  const dayChanged = !prev || dayKey(prev.created_at) !== dayKey(o.created_at);
+                  const sep = dayChanged && (
+                    <div className="date-sep">
+                      <span>{dayKey(o.created_at)}</span>
+                    </div>
+                  );
                   if (o.kind !== "message") {
                     return (
-                      <div key={o.op_seq} className="sys">
-                        {o.kind === "member_add" && "加入了会话"}
-                        {o.kind === "member_remove" && "离开了会话"}
-                        {o.kind === "edit" && "编辑了消息"}
-                        {o.kind === "recall" && "撤回了一条消息"}
-                        {o.kind === "rename" && `群名改为「${o.payload?.title ?? ""}」`}
-                        {o.kind === "transfer" && "转让了群主"}
-                        {o.kind === "role_change" && `成员角色调整为 ${o.payload?.role ?? ""}`}
-                      </div>
+                      <Fragment key={o.op_seq}>
+                        {sep}
+                        <div className="sys">
+                          {o.kind === "member_add" && "加入了会话"}
+                          {o.kind === "member_remove" && "离开了会话"}
+                          {o.kind === "edit" && "编辑了消息"}
+                          {o.kind === "recall" && "撤回了一条消息"}
+                          {o.kind === "rename" && `群名改为「${o.payload?.title ?? ""}」`}
+                          {o.kind === "transfer" && "转让了群主"}
+                          {o.kind === "role_change" && `成员角色调整为 ${o.payload?.role ?? ""}`}
+                        </div>
+                      </Fragment>
                     );
                   }
                   const mine = o.actor_id === me.id;
@@ -768,144 +787,147 @@ export function Chat({
                   const isPlaceholder =
                     atts.length > 0 && (o.body === "[附件]" || o.body === "[图片]");
                   return (
-                    <div key={o.op_seq} className={`msg ${mine ? "mine" : ""}`}>
-                      <Avatar
-                        className="avatar sm msg-av"
-                        user={
-                          mine
-                            ? me
-                            : {
-                                id: o.actor_id ?? "",
-                                display_name: o.actor_name ?? "?",
-                                avatar_object_id: undefined,
-                              }
-                        }
-                      />
-                      <div className="msg-col">
-                        <div className="msg-meta">
-                          {o.actor_name || me.display_name} ·{" "}
-                          {new Date(o.created_at).toLocaleTimeString()}
-                          {o.edited && " · 已编辑"}
-                          {o.payload?.mentions_all === true && (
-                            <span className="at-all"> @所有人</span>
-                          )}
-                        </div>
-                        {q && (
-                          <div className="quote">
-                            {q.actor_name}: {q.recalled ? "已撤回" : q.body?.slice(0, 80)}
+                    <Fragment key={o.op_seq}>
+                      {sep}
+                      <div className={`msg ${mine ? "mine" : ""}`}>
+                        <Avatar
+                          className="avatar sm msg-av"
+                          user={
+                            mine
+                              ? me
+                              : {
+                                  id: o.actor_id ?? "",
+                                  display_name: o.actor_name ?? "?",
+                                  avatar_object_id: undefined,
+                                }
+                          }
+                        />
+                        <div className="msg-col">
+                          <div className="msg-meta">
+                            {o.actor_name || me.display_name} ·{" "}
+                            {new Date(o.created_at).toLocaleTimeString()}
+                            {o.edited && " · 已编辑"}
+                            {o.payload?.mentions_all === true && (
+                              <span className="at-all"> @所有人</span>
+                            )}
                           </div>
-                        )}
-                        <div className="msg-body-wrap">
-                          {(o.recalled || !isPlaceholder) && (
-                            <div className={`msg-body ${o.recalled ? "recalled" : ""}`}>
-                              {o.recalled ? "消息已撤回" : <Md text={o.body ?? ""} />}
+                          {q && (
+                            <div className="quote">
+                              {q.actor_name}: {q.recalled ? "已撤回" : q.body?.slice(0, 80)}
                             </div>
                           )}
-                          {!o.recalled && atts.length > 0 && (
-                            <div
-                              className={`atts${
-                                atts.length === 1 && isPlaceholder ? " stk-msg" : ""
-                              }`}
-                            >
-                              {atts.map((a) =>
-                                a.mime?.startsWith("image/") ? (
-                                  <button
-                                    type="button"
-                                    key={a.id}
-                                    className="att-img"
-                                    title={`${a.name} · 点击查看大图`}
-                                    onClick={() =>
-                                      setViewer({ url: api2.downloadURL(a.id), name: a.name })
-                                    }
-                                  >
-                                    <img
-                                      src={
-                                        a.mime === "image/gif"
-                                          ? api2.downloadURL(a.id)
-                                          : api2.thumbURL(a.id)
+                          <div className="msg-body-wrap">
+                            {(o.recalled || !isPlaceholder) && (
+                              <div className={`msg-body ${o.recalled ? "recalled" : ""}`}>
+                                {o.recalled ? "消息已撤回" : <Md text={o.body ?? ""} />}
+                              </div>
+                            )}
+                            {!o.recalled && atts.length > 0 && (
+                              <div
+                                className={`atts${
+                                  atts.length === 1 && isPlaceholder ? " stk-msg" : ""
+                                }`}
+                              >
+                                {atts.map((a) =>
+                                  a.mime?.startsWith("image/") ? (
+                                    <button
+                                      type="button"
+                                      key={a.id}
+                                      className="att-img"
+                                      title={`${a.name} · 点击查看大图`}
+                                      onClick={() =>
+                                        setViewer({ url: api2.downloadURL(a.id), name: a.name })
                                       }
-                                      alt={a.name}
-                                      loading="lazy"
-                                      onError={(e) => {
-                                        // thumb task may not have run yet — fall back to full image
-                                        const img = e.currentTarget;
-                                        if (!img.dataset.fbk) {
-                                          img.dataset.fbk = "1";
-                                          img.src = api2.downloadURL(a.id);
+                                    >
+                                      <img
+                                        src={
+                                          a.mime === "image/gif"
+                                            ? api2.downloadURL(a.id)
+                                            : api2.thumbURL(a.id)
                                         }
-                                      }}
-                                    />
-                                  </button>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    key={a.id}
-                                    className="att"
-                                    title="下载"
-                                    onClick={() => saveBlob(a.id, a.name)}
-                                  >
-                                    📎 {a.name}
-                                    <span className="att-size">{fmtSize(a.size)}</span>
-                                  </button>
-                                )
+                                        alt={a.name}
+                                        loading="lazy"
+                                        onError={(e) => {
+                                          // thumb task may not have run yet — fall back to full image
+                                          const img = e.currentTarget;
+                                          if (!img.dataset.fbk) {
+                                            img.dataset.fbk = "1";
+                                            img.src = api2.downloadURL(a.id);
+                                          }
+                                        }}
+                                      />
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      key={a.id}
+                                      className="att"
+                                      title="下载"
+                                      onClick={() => saveBlob(a.id, a.name)}
+                                    >
+                                      📎 {a.name}
+                                      <span className="att-size">{fmtSize(a.size)}</span>
+                                    </button>
+                                  )
+                                )}
+                              </div>
+                            )}
+                            {mine && !o.recalled && (
+                              <ReadBadge
+                                seq={o.op_seq}
+                                members={members[activeId] ?? []}
+                                meId={me.id}
+                                isDm={active.kind === "dm"}
+                              />
+                            )}
+                            {!o.recalled && (
+                              <>
+                                <div className="rx-zone">
+                                  {rxGroupsOf(o).map((r) => (
+                                    <button
+                                      type="button"
+                                      key={r.emoji}
+                                      className={`rx-pill${
+                                        r.users.some((u) => u.id === me.id) ? " mine" : ""
+                                      }`}
+                                      title={r.users.map((u) => u.name).join("、")}
+                                      onClick={() => reactEmoji(o, r.emoji)}
+                                    >
+                                      {r.emoji}
+                                      <span className="rx-n">{r.users.length}</span>
+                                    </button>
+                                  ))}
+                                </div>
+                                <button
+                                  type="button"
+                                  className="rx-add"
+                                  title="点赞"
+                                  onClick={() => reactEmoji(o, "👍")}
+                                >
+                                  👍
+                                </button>
+                              </>
+                            )}
+                          </div>
+                          {!o.recalled && (
+                            <div className="msg-tools">
+                              <button type="button" className="ghost" onClick={() => setQuote(o)}>
+                                引用
+                              </button>
+                              {mine && (
+                                <button
+                                  type="button"
+                                  className="ghost"
+                                  onClick={() => recall(o.op_seq)}
+                                >
+                                  撤回
+                                </button>
                               )}
                             </div>
                           )}
-                          {mine && !o.recalled && (
-                            <ReadBadge
-                              seq={o.op_seq}
-                              members={members[activeId] ?? []}
-                              meId={me.id}
-                              isDm={active.kind === "dm"}
-                            />
-                          )}
-                          {!o.recalled && (
-                            <>
-                              <div className="rx-zone">
-                                {rxGroupsOf(o).map((r) => (
-                                  <button
-                                    type="button"
-                                    key={r.emoji}
-                                    className={`rx-pill${
-                                      r.users.some((u) => u.id === me.id) ? " mine" : ""
-                                    }`}
-                                    title={r.users.map((u) => u.name).join("、")}
-                                    onClick={() => reactEmoji(o, r.emoji)}
-                                  >
-                                    {r.emoji}
-                                    <span className="rx-n">{r.users.length}</span>
-                                  </button>
-                                ))}
-                              </div>
-                              <button
-                                type="button"
-                                className="rx-add"
-                                title="点赞"
-                                onClick={() => reactEmoji(o, "👍")}
-                              >
-                                👍
-                              </button>
-                            </>
-                          )}
                         </div>
-                        {!o.recalled && (
-                          <div className="msg-tools">
-                            <button type="button" className="ghost" onClick={() => setQuote(o)}>
-                              引用
-                            </button>
-                            {mine && (
-                              <button
-                                type="button"
-                                className="ghost"
-                                onClick={() => recall(o.op_seq)}
-                              >
-                                撤回
-                              </button>
-                            )}
-                          </div>
-                        )}
                       </div>
-                    </div>
+                    </Fragment>
                   );
                 })}
                 {pendingHere.map((p) => (
