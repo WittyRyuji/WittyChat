@@ -82,11 +82,22 @@ func main() {
 	// 'Mac' options tailor the window when running on macOS.
 	// 'BackgroundColour' is the background colour of the window.
 	// 'URL' is the URL that will be loaded into the webview.
-	app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Title: "WittyChat",
-		// Window sized to the golden ratio (1000 / 618 ≈ 1.618).
-		Width:  1000,
-		Height: 618,
+	// Restore the last window placement (persisted by main_windows.go on
+	// drag/resize end and close; ignored when off the virtual screen).
+	// 恢复上次窗口位置和大小（拖动/调整结束与关闭时持久化）。
+	wx, wy, ww, wh := 0, 0, 1000, 618 // sized to the golden ratio (1000/618≈1.618)
+	pos := application.WindowCentered
+	if r, ok := savedWindowRect(); ok {
+		wx, wy, ww, wh = r.X, r.Y, r.W, r.H
+		pos = application.WindowXY
+	}
+	opts := application.WebviewWindowOptions{
+		Title:           "WittyChat",
+		Width:           ww,
+		Height:          wh,
+		X:               wx,
+		Y:               wy,
+		InitialPosition: pos,
 		Mac: application.MacWindow{
 			InvisibleTitleBarHeight: 50,
 			Backdrop:                application.MacBackdropTranslucent,
@@ -94,7 +105,8 @@ func main() {
 		},
 		BackgroundColour: application.NewRGB(6, 7, 15),
 		URL:              "/",
-	})
+	}
+	app.Window.NewWithOptions(opts)
 
 	// Create a goroutine that emits an event containing the current time every second.
 	// The frontend can listen to this event and update the UI accordingly.

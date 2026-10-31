@@ -9,7 +9,86 @@
   --dim: #8b8d98;
   --accent: #4f8ef7;
   --danger: #e5534b;
+  /* aliases used by newer components / 新组件别名 */
+  --tx2: var(--dim);
+  --bd: var(--line);
+  --ac: var(--accent);
   font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+/* Light theme / 亮色主题：settings → 通用 → 外观，pref.theme="light" */
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f2f3f5;
+  --bg2: #ffffff;
+  --bg3: #e9ebef;
+  --line: #d8dce2;
+  --fg: #1f2329;
+  --dim: #6b7280;
+  --accent: #2f6fe4;
+  --danger: #dc2626;
+}
+/* hardcoded dark accents → light counterparts / 硬编码深色的亮色对应 */
+[data-theme="light"] .msg.mine .msg-body {
+  background: #dbe9ff;
+}
+[data-theme="light"] .md pre {
+  background: #eef0f3;
+}
+[data-theme="light"] .md code {
+  background: rgba(0, 0, 0, 0.08);
+}
+[data-theme="light"] .md a {
+  color: var(--accent);
+}
+[data-theme="light"] .errbar {
+  background: #fdeaea;
+  color: #b91c1c;
+}
+[data-theme="light"] .read-badge .rb-tip {
+  background: var(--bg2);
+}
+[data-theme="light"] .read-badge.unread {
+  background: #c6ccd6;
+}
+[data-theme="light"] .mail-trustbar {
+  border-color: #d9770655;
+  background: #fef3e0;
+  color: #b45309;
+}
+[data-theme="light"] .ghost.danger {
+  color: var(--danger);
+}
+[data-theme="light"] .hr-kind {
+  background: #e3efff;
+  color: #1d4fa0;
+}
+[data-theme="light"] .hr-kind.k-expense {
+  background: #fdedd3;
+  color: #a16207;
+}
+[data-theme="light"] .hr-kind.k-contract {
+  background: #ddf0dd;
+  color: #27803a;
+}
+[data-theme="light"] .hr-status.s-pending {
+  background: #fdf0c2;
+  color: #a16207;
+}
+[data-theme="light"] .hr-status.s-approved {
+  background: #d9f2da;
+  color: #27803a;
+}
+[data-theme="light"] .hr-status.s-rejected {
+  background: #fbdede;
+  color: #c53030;
+}
+[data-theme="light"] .hr-status.s-cancelled {
+  background: #e5e7eb;
+  color: #6b7280;
+}
+[data-theme="light"] .hr-att-x:hover {
+  color: var(--danger);
 }
 * {
   box-sizing: border-box;
@@ -1804,4 +1883,13 @@ button.avatar .avatar-img {
 .hr-table th {
   color: var(--tx2, #888);
   font-weight: 500;
+}
+
+.set-select {
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
 }

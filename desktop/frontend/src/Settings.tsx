@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, api2, setToken, type UserPublic } from "./api";
 import { Avatar } from "./avatar";
 import { trustedSenders, untrustSender } from "./Mail";
-import { prefGet, prefSet } from "./prefs";
+import { applyTheme, prefGet, prefSet } from "./prefs";
 
 interface WsSettings {
   workspace: { name: string };
@@ -94,6 +94,7 @@ export function Settings({
   const [sendRead, setSendRead] = useLocalToggle("send_read", true);
   const [friendVerify, setFriendVerify] = useLocalToggle("friend_verify", true);
   const [mailAutoImg, setMailAutoImg] = useLocalToggle("mail.autoimg", true);
+  const [theme, setTheme] = useState(() => prefGet<string>("pref.theme", "dark"));
   const [trusted, setTrusted] = useState<string[]>(trustedSenders());
 
   useEffect(() => {
@@ -254,6 +255,26 @@ export function Settings({
 
         {tab === "general" && (
           <>
+            <section className="set-card">
+              <h4>外观</h4>
+              <div className="set-row">
+                <span className="lbl">主题</span>
+                <select
+                  className="set-select"
+                  value={theme}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setTheme(v);
+                    prefSet("pref.theme", v);
+                    applyTheme();
+                  }}
+                >
+                  <option value="dark">深色</option>
+                  <option value="light">浅色</option>
+                </select>
+                <i className="dim">跨设备同步</i>
+              </div>
+            </section>
             <section className="set-card">
               <h4>通知</h4>
               <Toggle on={notify} onChange={setNotify} label="桌面通知" hint="新消息与@提及" />

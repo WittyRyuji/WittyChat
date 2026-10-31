@@ -14,6 +14,7 @@ export async function loadPrefs(): Promise<void> {
   try {
     const res = await api.getPrefs();
     const server = res.prefs ?? {};
+    applyTheme(); // local mirror may already hold a theme — apply early
     const legacy: Record<string, unknown> = {};
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
@@ -33,6 +34,14 @@ export async function loadPrefs(): Promise<void> {
   } catch {
     // offline / server older than prefs API — mirror still works locally
   }
+  applyTheme();
+}
+
+// applyTheme reflects pref.theme onto <html data-theme>. Called at boot
+// (main.tsx) to avoid a dark flash, after loadPrefs, and on toggle.
+// 把 pref.theme 落到 <html data-theme>；启动/加载偏好/切换时调用。
+export function applyTheme(): void {
+  document.documentElement.dataset.theme = prefGet<string>("pref.theme", "dark");
 }
 
 export function prefGet<T>(key: string, fallback: T): T {
