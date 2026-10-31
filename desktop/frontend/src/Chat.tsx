@@ -11,7 +11,7 @@ import {
   type UserPublic,
   type WsFrame,
 } from "./api";
-import { Avatar } from "./avatar";
+import { Avatar, GroupAvatar } from "./avatar";
 import { Contacts } from "./Contacts";
 import { JoinGroupDialog, MembersPanel, NewGroupDialog } from "./dialogs";
 import { EMOJI_GROUPS } from "./emoji";
@@ -690,7 +690,7 @@ export function Chat({
                   className={`conv ${c.id === activeId ? "active" : ""}`}
                   onClick={() => setActiveId(c.id)}
                 >
-                  {c.kind === "dm" && c.peer_user_id && (
+                  {c.kind === "dm" && c.peer_user_id ? (
                     <Avatar
                       className="avatar sm conv-av"
                       user={{
@@ -699,6 +699,8 @@ export function Chat({
                         avatar_object_id: undefined,
                       }}
                     />
+                  ) : (
+                    <GroupAvatar className="avatar sm conv-av" id={c.id} title={convTitle(c)} />
                   )}
                   <span className="conv-col">
                     <span className="conv-title">
@@ -721,6 +723,9 @@ export function Chat({
           ) : (
             <>
               <header className="conv-head">
+                {active.kind === "group" && (
+                  <GroupAvatar className="avatar sm" id={active.id} title={convTitle(active)} />
+                )}
                 <b>{convTitle(active)}</b>
                 {typingHere.length > 0 && (
                   <span className="typing">{typingHere.join("、")} 正在输入…</span>

@@ -344,6 +344,21 @@ button {
 .member-ops {
   display: flex;
   gap: 4px;
+  flex-shrink: 0;
+}
+.grow-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.member-ops .ghost {
+  white-space: nowrap;
+}
+.modal-row > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .ghost.danger {
   color: #ff7b72;
@@ -1514,7 +1529,7 @@ button.avatar .avatar-img {
 .set-row a {
   color: var(--accent);
 }
-.ghost.danger {
+.set-card .ghost.danger {
   color: #e5534b;
   width: 100%;
 }

@@ -69,3 +69,37 @@ export function Avatar({
   }
   return <span className={className}>{inner}</span>;
 }
+
+// GroupAvatar: deterministic first-char tile for conversations — the
+// background is hashed from the conversation id so each group keeps one
+// color across sessions and devices ("random" but stable).
+//
+// 群头像：取群名首字，底色按会话 id 哈希固定在色板内，跨会话/设备不变。
+const GROUP_COLORS = [
+  "#d1615b",
+  "#d98e32",
+  "#3d9a50",
+  "#2f9e8f",
+  "#4a8ecd",
+  "#6a7fdb",
+  "#9a6fd0",
+  "#c05299",
+];
+
+export function GroupAvatar({
+  id,
+  title,
+  className = "avatar",
+}: {
+  id: string;
+  title: string;
+  className?: string;
+}) {
+  let h = 0;
+  for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return (
+    <span className={className} style={{ background: GROUP_COLORS[h % GROUP_COLORS.length] }}>
+      {(title || "群").slice(0, 1)}
+    </span>
+  );
+}

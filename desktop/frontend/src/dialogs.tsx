@@ -11,13 +11,14 @@ import {
   type PublicGroupInfo,
   type UserPublic,
 } from "./api";
+import { GroupAvatar } from "./avatar";
 
 export function Modal({
   title,
   onClose,
   children,
 }: {
-  title: string;
+  title: React.ReactNode;
   onClose: () => void;
   children: React.ReactNode;
 }) {
@@ -160,8 +161,9 @@ export function JoinGroupDialog({
       <div className="modal-list">
         {results.map((g) => (
           <div key={g.id} className="modal-row space-between">
-            <span>
-              {g.title} <span className="dim">{g.member_count}人</span>
+            <span className="grow-name">
+              <GroupAvatar className="avatar sm" id={g.id} title={g.title} /> {g.title}{" "}
+              <span className="dim">{g.member_count}人</span>
             </span>
             {g.joined ? (
               <span className="dim">已加入</span>
@@ -269,7 +271,15 @@ export function MembersPanel({
   };
 
   return (
-    <Modal title={`成员管理 · ${conv.title || "群聊"}`} onClose={onClose}>
+    <Modal
+      title={
+        <span className="grow-name">
+          <GroupAvatar className="avatar sm" id={conv.id} title={conv.title || "群"} /> 成员管理 ·{" "}
+          {conv.title || "群聊"}
+        </span>
+      }
+      onClose={onClose}
+    >
       {canManage && (
         <div className="modal-row space-between">
           {renaming ? (
