@@ -260,6 +260,7 @@ func (d *Deps) hrMonthSummary(ctx context.Context, in *struct {
 			UserID: s.UserID.String(), UserName: s.UserName,
 			Days: s.Days, TotalMinutes: s.TotalMinutes,
 			LateDays: s.LateDays, MissingCheckout: s.MissingCheckout,
+			LeaveDays: s.LeaveDays,
 		})
 	}
 	return &struct{ Body apitypes.HRSummaryList }{Body: out}, nil

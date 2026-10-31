@@ -1,12 +1,15 @@
 // HR page — internal lightweight HR: leave/contract/expense requests with
 // single-step admin approval, plus daily check-in/out and monthly
-// attendance calculation.
+// attendance+leave （假勤） aggregation for admins.
 //
-// 人力页：请假/合同/报销申请（管理员单级审批）+ 每日打卡签退 + 月度出勤计算。
-import { useCallback, useEffect, useState } from "react";
-import { type HRDay, type HRRequest, type HRSummary, hrApi, type UserPublic } from "./api";
+// 人力页：请假/合同/报销申请（管理员单级审批）+ 当日打卡签退 + 管理员
+// 全员月度假勤汇总。申请表单按消息撰写的体验排版：分段标签 + 标签行 +
+// 事由多行文本 + 附件 + 独立提交行。
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api2, type HRDay, type HRRequest, type HRSummary, hrApi, type UserPublic } from "./api";
 
 type Tab = "requests" | "approvals" | "attendance";
+type Kind = "leave" | "contract" | "expense";
 
 const KIND_LABEL: Record<string, string> = {
   leave: "请假",
@@ -20,18 +23,41 @@ const STATUS_LABEL: Record<string, string> = {
   cancelled: "已撤销",
 };
 
+interface Att {
+  id: string;
+  name: string;
+}
+
+function AttLinks({ ids }: { ids?: string[] }) {
+  if (!ids?.length) return null;
+  return (
+    <span className="hr-atts">
+      {ids.map((id) => (
+        <a key={id} href={api2.downloadURL(id)} target="_blank" rel="noreferrer" className="hr-att">
+          附件
+        </a>
+      ))}
+    </span>
+  );
+}
+
 function payloadSummary(r: HRRequest): string {
   const p = r.payload as Record<string, unknown>;
   switch (r.kind) {
     case "leave":
       return `${p.leave_type ?? ""} ${p.start_date ?? ""}~${p.end_date ?? ""} ${p.days ?? ""}天 ${p.reason ?? ""}`;
     case "contract":
-      return `${p.title ?? ""} · ${p.counterparty ?? ""}${p.amount_cents ? ` ¥${(Number(p.amount_cents) / 100).toFixed(2)}` : ""}`;
+      return `${p.title ?? ""} · ${p.counterparty ?? ""}${p.amount_cents ? ` ¥${(Number(p.amount_cents) / 100).toFixed(2)}` : ""} ${p.reason ?? ""}`;
     case "expense":
       return `${p.category ?? ""} ¥${((Number(p.amount_cents) || 0) / 100).toFixed(2)} ${p.memo ?? ""}`;
     default:
       return JSON.stringify(p);
   }
+}
+
+function payloadAtts(r: HRRequest): string[] {
+  const v = (r.payload as Record<string, unknown>).attachment_object_ids;
+  return Array.isArray(v) ? (v as string[]) : [];
 }
 
 function fmtHM(min: number): string {
@@ -85,13 +111,25 @@ export function HR({ me }: { me: UserPublic }) {
   );
 }
 
-// ---------- my requests + new request form ----------
+// ---------- my requests + compose-style form ----------
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="hr-field">
+      <span className="hr-lbl">{label}</span>
+      {children}
+    </div>
+  );
+}
 
 function MyRequests() {
   const [rows, setRows] = useState<HRRequest[]>([]);
-  const [kind, setKind] = useState<"leave" | "contract" | "expense">("leave");
+  const [kind, setKind] = useState<Kind>("leave");
   const [f, setF] = useState<Record<string, string>>({});
+  const [atts, setAtts] = useState<Att[]>([]);
   const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const reload = useCallback(() => {
     hrApi
@@ -105,6 +143,21 @@ function MyRequests() {
     (k: string) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
       setF((prev) => ({ ...prev, [k]: e.target.value }));
+
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setBusy(true);
+    try {
+      const o = await api2.uploadObject(file, "hr");
+      setAtts((p) => [...p, { id: o.id, name: o.name }]);
+    } catch {
+      setMsg("附件上传失败");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const submit = async () => {
     setMsg("");
@@ -126,102 +179,165 @@ function MyRequests() {
       });
     } else {
       Object.assign(payload, {
-        category: f.category || "other",
+        category: f.category || "travel",
         amount_cents: Math.round(Number(f.amount || 0) * 100),
-        currency: f.currency || "CNY",
+        currency: "CNY",
         invoice_date: f.invoice_date || undefined,
-        memo: f.memo,
+        memo: f.reason,
       });
     }
+    if (atts.length) payload.attachment_object_ids = atts.map((a) => a.id);
+    setBusy(true);
     try {
       await hrApi.create(kind, payload);
       setF({});
+      setAtts([]);
       setMsg("已提交");
       reload();
     } catch (e) {
-      setMsg(`提交失败: ${e instanceof Error ? e.message : e}`);
+      setMsg(`提交失败：${e instanceof Error ? e.message : e}`);
+    } finally {
+      setBusy(false);
     }
   };
 
+  const KINDS: [Kind, string][] = [
+    ["leave", "请假"],
+    ["contract", "合同申请"],
+    ["expense", "报销"],
+  ];
+
   return (
     <div className="hr-page">
-      <h3>新建申请</h3>
-      <div className="hr-form">
-        <select
-          value={kind}
-          onChange={(e) => {
-            setKind(e.target.value as typeof kind);
-            setF({});
-          }}
-        >
-          <option value="leave">请假</option>
-          <option value="contract">合同申请</option>
-          <option value="expense">报销</option>
-        </select>
+      <div className="hr-card">
+        <div className="hr-seg">
+          {KINDS.map(([k, name]) => (
+            <button
+              type="button"
+              key={k}
+              className={`hr-seg-item ${kind === k ? "active" : ""}`}
+              onClick={() => {
+                setKind(k);
+                setF({});
+                setMsg("");
+              }}
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+
         {kind === "leave" && (
-          <>
-            <select value={f.leave_type ?? "annual"} onChange={set("leave_type")}>
-              <option value="annual">年假</option>
-              <option value="sick">病假</option>
-              <option value="personal">事假</option>
-              <option value="other">其他</option>
-            </select>
-            <input type="date" value={f.start_date ?? ""} onChange={set("start_date")} />
-            <input type="date" value={f.end_date ?? ""} onChange={set("end_date")} />
-            <input
-              type="number"
-              min="0.5"
-              step="0.5"
-              placeholder="天数"
-              value={f.days ?? ""}
-              onChange={set("days")}
-            />
-            <input placeholder="事由" value={f.reason ?? ""} onChange={set("reason")} />
-          </>
+          <div className="hr-grid">
+            <Field label="类型">
+              <select value={f.leave_type ?? "annual"} onChange={set("leave_type")}>
+                <option value="annual">年假</option>
+                <option value="sick">病假</option>
+                <option value="personal">事假</option>
+                <option value="other">其他</option>
+              </select>
+            </Field>
+            <Field label="开始">
+              <input type="date" value={f.start_date ?? ""} onChange={set("start_date")} />
+            </Field>
+            <Field label="结束">
+              <input type="date" value={f.end_date ?? ""} onChange={set("end_date")} />
+            </Field>
+            <Field label="天数">
+              <input
+                type="number"
+                min="0.5"
+                step="0.5"
+                placeholder="1"
+                value={f.days ?? ""}
+                onChange={set("days")}
+              />
+            </Field>
+          </div>
         )}
         {kind === "contract" && (
-          <>
-            <input placeholder="合同标题" value={f.title ?? ""} onChange={set("title")} />
-            <input
-              placeholder="对方单位"
-              value={f.counterparty ?? ""}
-              onChange={set("counterparty")}
-            />
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              placeholder="金额（元，可空）"
-              value={f.amount ?? ""}
-              onChange={set("amount")}
-            />
-            <input placeholder="事由" value={f.reason ?? ""} onChange={set("reason")} />
-          </>
+          <div className="hr-grid">
+            <Field label="合同标题">
+              <input value={f.title ?? ""} onChange={set("title")} />
+            </Field>
+            <Field label="对方单位">
+              <input value={f.counterparty ?? ""} onChange={set("counterparty")} />
+            </Field>
+            <Field label="金额（元，可空）">
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={f.amount ?? ""}
+                onChange={set("amount")}
+              />
+            </Field>
+          </div>
         )}
         {kind === "expense" && (
-          <>
-            <select value={f.category ?? "travel"} onChange={set("category")}>
-              <option value="travel">差旅</option>
-              <option value="meal">餐饮</option>
-              <option value="office">办公</option>
-              <option value="other">其他</option>
-            </select>
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              placeholder="金额（元）"
-              value={f.amount ?? ""}
-              onChange={set("amount")}
-            />
-            <input type="date" value={f.invoice_date ?? ""} onChange={set("invoice_date")} />
-            <input placeholder="备注" value={f.memo ?? ""} onChange={set("memo")} />
-          </>
+          <div className="hr-grid">
+            <Field label="类别">
+              <select value={f.category ?? "travel"} onChange={set("category")}>
+                <option value="travel">差旅</option>
+                <option value="meal">餐饮</option>
+                <option value="office">办公</option>
+                <option value="other">其他</option>
+              </select>
+            </Field>
+            <Field label="金额（元）">
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={f.amount ?? ""}
+                onChange={set("amount")}
+              />
+            </Field>
+            <Field label="票据日期">
+              <input type="date" value={f.invoice_date ?? ""} onChange={set("invoice_date")} />
+            </Field>
+          </div>
         )}
-        <button type="button" className="primary" onClick={submit}>
-          提交
-        </button>
-        {msg && <span className="dim">{msg}</span>}
+
+        <Field label={kind === "expense" ? "备注" : "事由"}>
+          <textarea
+            rows={2}
+            placeholder={kind === "expense" ? "报销说明" : "申请事由，可附材料"}
+            value={f.reason ?? ""}
+            onChange={set("reason")}
+          />
+        </Field>
+
+        <div className="hr-attrow">
+          <button
+            type="button"
+            className="ghost"
+            disabled={busy}
+            onClick={() => fileRef.current?.click()}
+          >
+            ＋附件
+          </button>
+          <input ref={fileRef} type="file" hidden onChange={onFile} />
+          {atts.map((a) => (
+            <span key={a.id} className="hr-att-chip">
+              {a.name}
+              <button
+                type="button"
+                className="hr-att-x"
+                onClick={() => setAtts((p) => p.filter((x) => x.id !== a.id))}
+              >
+                ✕
+              </button>
+            </span>
+          ))}
+        </div>
+
+        <div className="hr-actions">
+          {msg && <span className="dim">{msg}</span>}
+          <button type="button" className="primary" disabled={busy} onClick={submit}>
+            提交申请
+          </button>
+        </div>
       </div>
 
       <h3>我的申请</h3>
@@ -230,7 +346,10 @@ function MyRequests() {
         {rows.map((r) => (
           <div key={r.id} className="hr-row">
             <span className={`hr-kind k-${r.kind}`}>{KIND_LABEL[r.kind]}</span>
-            <span className="hr-sum">{payloadSummary(r)}</span>
+            <span className="hr-sum">
+              {payloadSummary(r)}
+              <AttLinks ids={payloadAtts(r)} />
+            </span>
             <span className={`hr-status s-${r.status}`}>{STATUS_LABEL[r.status]}</span>
             <span className="dim">{new Date(r.created_at).toLocaleDateString("zh-CN")}</span>
             {r.status === "pending" && (
@@ -282,6 +401,7 @@ function Approvals() {
             <span className={`hr-kind k-${r.kind}`}>{KIND_LABEL[r.kind]}</span>
             <span className="hr-sum">
               <b>{r.requester_name}</b> {payloadSummary(r)}
+              <AttLinks ids={payloadAtts(r)} />
             </span>
             <input
               placeholder="批注"
@@ -301,7 +421,7 @@ function Approvals() {
   );
 }
 
-// ---------- attendance / 考勤 ----------
+// ---------- attendance / 考勤（当天打卡 + 本月记录；管理员假勤汇总） ----------
 
 function Attendance({ me }: { me: UserPublic }) {
   const [month, setMonth] = useState(curMonth());
@@ -312,22 +432,24 @@ function Attendance({ me }: { me: UserPublic }) {
 
   const reload = useCallback(() => {
     hrApi
-      .myMonth(month)
+      .myMonth(curMonth())
       .then((r) => {
         setDays(r.days);
         setSum(r.summary);
       })
       .catch(() => {});
-    if (me.is_admin) {
-      hrApi
-        .monthSummary(month)
-        .then((r) => setAll(r.rows))
-        .catch(() => setAll([]));
-    }
-  }, [month, me.is_admin]);
+  }, []);
   useEffect(reload, [reload]);
+  useEffect(() => {
+    if (!me.is_admin) return;
+    hrApi
+      .monthSummary(month)
+      .then((r) => setAll(r.rows))
+      .catch(() => setAll([]));
+  }, [month, me.is_admin]);
 
-  const today = days.find((d) => d.work_date === new Date().toISOString().slice(0, 10));
+  const today = new Date().toISOString().slice(0, 10);
+  const todayRow = days.find((d) => d.work_date === today);
 
   const clock = async (out: boolean) => {
     setMsg("");
@@ -342,26 +464,42 @@ function Attendance({ me }: { me: UserPublic }) {
 
   return (
     <div className="hr-page">
-      <h3>考勤</h3>
-      <div className="hr-clock">
-        <button type="button" className="primary" disabled={!!today} onClick={() => clock(false)}>
-          上班打卡{today ? ` ${fmtTime(today.check_in)}` : ""}
-        </button>
-        <button type="button" className="primary" disabled={!today} onClick={() => clock(true)}>
-          下班签退{today?.check_out ? ` ${fmtTime(today.check_out)}` : ""}
-        </button>
-        {msg && <span className="dim">{msg}</span>}
+      <div className="hr-card hr-clock-card">
+        <div className="hr-today">
+          <b>{today}</b>
+          <span className="dim">
+            {todayRow
+              ? `打卡 ${fmtTime(todayRow.check_in)}${todayRow.check_out ? ` · 签退 ${fmtTime(todayRow.check_out)}` : " · 未签退"}`
+              : "今日未打卡"}
+          </span>
+        </div>
+        <div className="hr-clock-btns">
+          <button
+            type="button"
+            className="primary"
+            disabled={!!todayRow}
+            onClick={() => clock(false)}
+          >
+            上班打卡
+          </button>
+          <button
+            type="button"
+            className="primary"
+            disabled={!todayRow || !!todayRow.check_out}
+            onClick={() => clock(true)}
+          >
+            下班签退
+          </button>
+          {msg && <span className="dim">{msg}</span>}
+        </div>
       </div>
 
-      <div className="hr-month">
-        <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} />
-        {sum && (
-          <span className="dim">
-            出勤 {sum.days} 天 · 工时 {fmtHM(sum.total_minutes)} · 迟到 {sum.late_days} 天
-            {sum.missing_checkout > 0 ? ` · ${sum.missing_checkout} 天未签退` : ""}
-          </span>
-        )}
-      </div>
+      {sum && (
+        <p className="dim hr-selfsum">
+          本月出勤 {sum.days} 天 · 工时 {fmtHM(sum.total_minutes)} · 迟到 {sum.late_days} 天
+          {sum.missing_checkout > 0 ? ` · ${sum.missing_checkout} 天未签退` : ""}
+        </p>
+      )}
 
       <table className="hr-table">
         <thead>
@@ -374,7 +512,7 @@ function Attendance({ me }: { me: UserPublic }) {
           </tr>
         </thead>
         <tbody>
-          {days.map((d) => (
+          {[...days].reverse().map((d) => (
             <tr key={d.work_date}>
               <td>{d.work_date}</td>
               <td>{fmtTime(d.check_in)}</td>
@@ -393,17 +531,21 @@ function Attendance({ me }: { me: UserPublic }) {
         </tbody>
       </table>
 
-      {me.is_admin && all.length > 0 && (
+      {me.is_admin && (
         <>
-          <h3>全员 {month} 出勤</h3>
+          <h3>全员假勤</h3>
+          <div className="hr-month">
+            <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} />
+          </div>
           <table className="hr-table">
             <thead>
               <tr>
                 <th>成员</th>
-                <th>天数</th>
+                <th>出勤(天)</th>
                 <th>总工时</th>
                 <th>迟到</th>
                 <th>未签退</th>
+                <th>请假(天)</th>
               </tr>
             </thead>
             <tbody>
@@ -414,6 +556,7 @@ function Attendance({ me }: { me: UserPublic }) {
                   <td>{fmtHM(s.total_minutes)}</td>
                   <td>{s.late_days}</td>
                   <td>{s.missing_checkout}</td>
+                  <td>{s.leave_days || 0}</td>
                 </tr>
               ))}
             </tbody>

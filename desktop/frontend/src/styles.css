@@ -1580,23 +1580,128 @@ button.avatar .avatar-img {
   font-size: 14px;
   color: var(--tx2, #aaa);
 }
-.hr-form {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-}
-.hr-form input,
-.hr-form select {
+/* compose-style request card / 撰写式申请卡片 */
+.hr-card {
   background: var(--bg2, #1e1e24);
+  border: 1px solid var(--bd, #2c2c34);
+  border-radius: 10px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.hr-seg {
+  display: flex;
+  gap: 4px;
+  background: var(--bg, #141418);
+  border-radius: 8px;
+  padding: 3px;
+  width: fit-content;
+}
+.hr-seg-item {
+  background: transparent;
+  border: none;
+  color: var(--tx2, #999);
+  padding: 5px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.hr-seg-item.active {
+  background: var(--bg2, #2c2c34);
+  color: inherit;
+}
+.hr-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px 14px;
+}
+.hr-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.hr-lbl {
+  font-size: 12px;
+  color: var(--tx2, #888);
+}
+.hr-field input,
+.hr-field select,
+.hr-field textarea {
+  background: var(--bg, #141418);
   border: 1px solid var(--bd, #333);
   color: inherit;
   border-radius: 6px;
-  padding: 6px 10px;
+  padding: 7px 10px;
   font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
 }
-.hr-form .primary {
-  margin-left: 4px;
+.hr-field textarea:focus,
+.hr-field input:focus,
+.hr-field select:focus {
+  border-color: var(--ac, #4a9eff);
+  outline: none;
+}
+.hr-attrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.hr-att-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg, #141418);
+  border: 1px solid var(--bd, #333);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+.hr-att-x {
+  background: none;
+  border: none;
+  color: var(--tx2, #888);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 2px;
+}
+.hr-att-x:hover {
+  color: #ff8080;
+}
+.hr-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+}
+.hr-atts {
+  margin-left: 6px;
+}
+.hr-att {
+  color: var(--ac, #4a9eff);
+  font-size: 12px;
+  margin-right: 6px;
+}
+.hr-clock-card {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.hr-today {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.hr-clock-btns {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.hr-selfsum {
+  margin: 14px 0 8px;
 }
 .hr-list {
   display: flex;

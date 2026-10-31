@@ -54,12 +54,13 @@ type HRDay struct {
 }
 
 type HRSummary struct {
-	UserID          string `json:"user_id"`
-	UserName        string `json:"user_name,omitempty"`
-	Days            int    `json:"days"`
-	TotalMinutes    int    `json:"total_minutes"`
-	LateDays        int    `json:"late_days"`
-	MissingCheckout int    `json:"missing_checkout"`
+	UserID          string  `json:"user_id"`
+	UserName        string  `json:"user_name,omitempty"`
+	Days            int     `json:"days"`
+	TotalMinutes    int     `json:"total_minutes"`
+	LateDays        int     `json:"late_days"`
+	MissingCheckout int     `json:"missing_checkout"`
+	LeaveDays       float64 `json:"leave_days"`
 }
 
 type HRMonthResponse struct {

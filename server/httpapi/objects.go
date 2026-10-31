@@ -147,8 +147,9 @@ func (d *Deps) downloadObject(w http.ResponseWriter, r *http.Request) {
 	}
 	obj, err := d.Objects.Get(r.Context(), objID, uid)
 	if err != nil {
-		if errors.Is(err, objects.ErrForbidden) && d.objectViaMail(r.Context(), objID, uid) {
-			// 持有引用该附件的邮件即可下载（收件人/发件人）
+		if errors.Is(err, objects.ErrForbidden) &&
+			(d.objectViaMail(r.Context(), objID, uid) || d.objectViaHR(r.Context(), objID, uid)) {
+			// 持有引用该附件的邮件/HR申请即可下载（收件人/发件人/申请人/审批管理员）
 			obj, err = d.Objects.Peek(r.Context(), objID)
 		}
 		if err != nil {
@@ -183,6 +184,20 @@ func (d *Deps) objectViaMail(ctx context.Context, objID, uid uuid.UUID) bool {
 		`SELECT EXISTS(SELECT 1 FROM mail_attachments a
 		 JOIN mail_messages m ON m.id = a.message_id
 		 WHERE a.object_id=$1 AND m.owner_user_id=$2)`, objID, uid).Scan(&ok)
+	return err == nil && ok
+}
+
+// objectViaHR: object is referenced by an hr_requests payload and the caller
+// is the requester or an admin (approver must read attached receipts).
+// objectViaHR：对象被某 HR 申请引用且请求人是申请人或管理员（审批人需看附件）。
+func (d *Deps) objectViaHR(ctx context.Context, objID, uid uuid.UUID) bool {
+	var ok bool
+	err := d.Pool.QueryRow(ctx,
+		`SELECT EXISTS(
+			SELECT 1 FROM hr_requests hr
+			JOIN users u ON u.id = $2
+			WHERE hr.payload->'attachment_object_ids' ? $1::text
+			  AND (hr.requester = $2 OR u.is_admin))`, objID.String(), uid).Scan(&ok)
 	return err == nil && ok
 }
 

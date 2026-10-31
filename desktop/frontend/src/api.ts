@@ -395,6 +395,7 @@ export interface HRSummary {
   total_minutes: number;
   late_days: number;
   missing_checkout: number;
+  leave_days: number;
 }
 
 export const hrApi = {

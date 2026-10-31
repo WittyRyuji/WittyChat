@@ -73,6 +73,7 @@ type Summary struct {
 	TotalMinutes    int       `json:"total_minutes"`
 	LateDays        int       `json:"late_days"`
 	MissingCheckout int       `json:"missing_checkout"`
+	LeaveDays       float64   `json:"leave_days"`
 }
 
 type Store struct{ pool *pgxpool.Pool }
@@ -267,13 +268,17 @@ func (s *Store) SummaryAll(ctx context.Context, month string, workStart time.Dur
 		return nil, fmt.Errorf("bad month %q", month)
 	}
 	end := start.AddDate(0, 1, 0)
+	// All active employees get a row — "全员假勤" means zero-record months too.
+	// 全员视图：在职员工都列行，全月无记录显示 0。
 	rows, err := s.pool.Query(ctx,
-		`SELECT a.user_id, u.display_name, count(*),
+		`SELECT u.id, u.display_name, count(a.id),
 			coalesce(sum(extract(epoch from (a.check_out - a.check_in))/60),0)::int,
-			count(*) FILTER (WHERE a.check_out IS NULL)
-		 FROM hr_attendance a JOIN users u ON u.id = a.user_id
-		 WHERE a.work_date >= $1 AND a.work_date < $2
-		 GROUP BY a.user_id, u.display_name ORDER BY u.display_name`,
+			count(a.id) FILTER (WHERE a.check_out IS NULL)
+		 FROM users u
+		 LEFT JOIN hr_attendance a ON a.user_id = u.id
+		   AND a.work_date >= $1 AND a.work_date < $2
+		 WHERE u.status = 'active'
+		 GROUP BY u.id, u.display_name ORDER BY u.display_name`,
 		start.Format("2006-01-02"), end.Format("2006-01-02"))
 	if err != nil {
 		return nil, err
@@ -299,6 +304,57 @@ func (s *Store) SummaryAll(ctx context.Context, month string, workStart time.Dur
 					out[i].LateDays++
 				}
 			}
+		}
+	}
+	// 假勤合并：本月已批准请假天数（与月份重叠段， capped by payload.days）
+	return s.fillLeaveDays(ctx, out, start, end)
+}
+
+// fillLeaveDays sums approved-leave days overlapping [start,end) per user.
+// Days come from payload.days when present, capped by the date-range overlap.
+// fillLeaveDays 汇总每人本月已批准请假天数：优先取 payload.days，封顶于与
+// 月份重叠的日期段。
+func (s *Store) fillLeaveDays(ctx context.Context, out []Summary, start, end time.Time) ([]Summary, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT hr.requester, u.display_name, coalesce(sum(
+			least(
+				coalesce(nullif(hr.payload->>'days','')::float8, 9999),
+				least((hr.payload->>'end_date')::date, $2::date - 1)
+					- greatest((hr.payload->>'start_date')::date, $1::date) + 1
+			)), 0)::float8
+		 FROM hr_requests hr JOIN users u ON u.id = hr.requester
+		 WHERE hr.kind='leave' AND hr.status='approved'
+		   AND (hr.payload->>'start_date')::date < $2::date
+		   AND (hr.payload->>'end_date')::date >= $1::date
+		 GROUP BY hr.requester, u.display_name`,
+		start.Format("2006-01-02"), end.Format("2006-01-02"))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	leave := map[uuid.UUID]float64{}
+	names := map[uuid.UUID]string{}
+	for rows.Next() {
+		var uid uuid.UUID
+		var name string
+		var n float64
+		if err := rows.Scan(&uid, &name, &n); err != nil {
+			return nil, err
+		}
+		leave[uid], names[uid] = n, name
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// users with only leave (no attendance rows) must appear too — merge.
+	seen := map[uuid.UUID]int{}
+	for i := range out {
+		seen[out[i].UserID] = i
+		out[i].LeaveDays = leave[out[i].UserID]
+	}
+	for uid, n := range leave {
+		if _, ok := seen[uid]; !ok && n > 0 {
+			out = append(out, Summary{UserID: uid, UserName: names[uid], LeaveDays: n})
 		}
 	}
 	return out, nil

@@ -550,6 +550,26 @@ check("hr summary non-admin denied", st == 403, str(st))
 st, b = req("GET", f"/api/v1/hr/attendance/summary?month={mon}", None, admin)
 rows = json.loads(b).get("rows", []) if st == 200 else []
 check("hr admin summary", st == 200 and any(r.get("days") == 1 for r in rows), str(len(rows)))
+check("hr summary all staff rows", st == 200 and len(rows) >= 3, str(len(rows)))
+check("hr summary leave_days field",
+      st == 200 and all("leave_days" in r for r in rows), str(st))
+
+# HR attachment ACL: requester + admin(approver) can read, stranger cannot.
+st, obj = upload_purpose(alice, "hr", "receipt.txt", "text/plain", b"receipt-bytes")
+hr_obj = obj.get("id") if st == 200 else None
+check("hr attachment upload", st == 200 and hr_obj, str(st))
+st, b = req("POST", "/api/v1/hr/requests",
+            {"kind": "expense", "payload": {"category": "travel", "amount_cents": 8800,
+                                            "attachment_object_ids": [hr_obj]}}, alice)
+hr_exp = json.loads(b).get("id") if st == 200 else None
+check("hr expense w/ attachment", st == 200 and hr_exp, str(st))
+st, b = req("GET", f"/api/v1/objects/{hr_obj}/download", None, admin)
+check("hr att readable by admin approver", st == 200 and b == b"receipt-bytes", str(st))
+st, b = req("GET", f"/api/v1/objects/{hr_obj}/download", None, p0x)
+check("hr att denied to stranger", st == 403, str(st))
+st, b = req("GET", f"/api/v1/objects/{hr_obj}/download", None, alice)
+check("hr att readable by requester", st == 200, str(st))
+req("POST", f"/api/v1/hr/requests/{hr_exp}/cancel", None, alice)
 
 print(f"\n{len(passed)} passed, {len(failed)} failed")
 sys.exit(1 if failed else 0)
