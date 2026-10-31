@@ -1,13 +1,14 @@
 // Settings page: left sub-nav column (账号/通用/助理/关于) + full-width
-// content. Local prefs persist in localStorage; workspace policy is
-// read-only display (admin edits via /admin/).
+// content. Personal prefs sync via the server-backed prefs API; workspace
+// policy is read-only display (admin edits via /admin/).
 //
-// 设定页：左列子导航 + 右侧全宽内容。个人偏好存 localStorage；
+// 设定页：左列子导航 + 右侧全宽内容。个人偏好经服务端偏好 API 跨设备同步；
 // 工作区策略只读（管理员经 /admin/ 改）。
 import { useEffect, useRef, useState } from "react";
 import { api, api2, setToken, type UserPublic } from "./api";
 import { Avatar } from "./avatar";
 import { trustedSenders, untrustSender } from "./Mail";
+import { prefGet, prefSet } from "./prefs";
 
 interface WsSettings {
   workspace: { name: string };
@@ -29,14 +30,16 @@ interface Assistant {
   status: string;
 }
 
-// localStorage-backed personal preference (placeholder until server prefs land)
+// Server-synced personal preference (prefs.ts mirrors to localStorage so
+// toggles stay synchronous; values follow the user across devices).
+// 服务端同步的个人偏好（prefs.ts 镜像到本地保持同步读取；跨设备跟随用户）。
 function useLocalToggle(key: string, def: boolean): [boolean, (v: boolean) => void] {
-  const [v, setV] = useState(() => (localStorage.getItem(`pref.${key}`) !== "0" ? def : false));
+  const [v, setV] = useState(() => prefGet<boolean>(`pref.${key}`, def));
   return [
     v,
     (nv) => {
       setV(nv);
-      localStorage.setItem(`pref.${key}`, nv ? "1" : "0");
+      prefSet(`pref.${key}`, nv);
     },
   ];
 }

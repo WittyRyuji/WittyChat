@@ -14,34 +14,38 @@ import {
   IconTrash,
 } from "./icons";
 import { Md } from "./md";
+import { prefGet, prefSet } from "./prefs";
 
 const TRUST_KEY = "pref.mail.trusted";
 const AUTOIMG_KEY = "pref.mail.autoimg";
 
+// Prefs are server-synced via prefs.ts mirror — same keys, same semantics,
+// but they now follow the user across devices.
+// 偏好经 prefs.ts 镜像到服务端——键名语义不变，但跨设备跟随用户。
+
 function readTrusted(): string[] {
-  try {
-    return JSON.parse(localStorage.getItem(TRUST_KEY) ?? "[]");
-  } catch {
-    return [];
-  }
+  return prefGet<string[]>(TRUST_KEY, []);
 }
 
 export function trustSender(addr: string) {
   const a = addr.toLowerCase();
   const list = readTrusted();
   if (!list.includes(a)) {
-    localStorage.setItem(TRUST_KEY, JSON.stringify([...list, a]));
+    prefSet(TRUST_KEY, [...list, a]);
   }
 }
 export function untrustSender(addr: string) {
   const a = addr.toLowerCase();
-  localStorage.setItem(TRUST_KEY, JSON.stringify(readTrusted().filter((x) => x !== a)));
+  prefSet(
+    TRUST_KEY,
+    readTrusted().filter((x) => x !== a)
+  );
 }
 export function trustedSenders(): string[] {
   return readTrusted();
 }
 export function autoLoadImages(): boolean {
-  return localStorage.getItem(AUTOIMG_KEY) !== "0";
+  return prefGet<boolean>(AUTOIMG_KEY, true);
 }
 
 function fmtDate(s: string): string {

@@ -10,8 +10,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"flag"
@@ -58,6 +60,8 @@ func main() {
 		cmdMigrate()
 	case "gencert":
 		cmdGenCert()
+	case "dkim":
+		cmdDKIM()
 	case "serve":
 		cmdServe()
 	default:
@@ -307,4 +311,51 @@ func cmdGenCert() {
 	}
 	fmt.Printf("self-signed cert written:\n  %s\n  %s\n\nserve with:\n  WITTYCHAT_TLS_CERT=%s WITTYCHAT_TLS_KEY=%s server.exe serve\n",
 		cp, kp, cp, kp)
+}
+
+// cmdDKIM generates an RSA signing key, stores it in workspace_settings, and
+// prints the DNS TXT record to publish. Private key never leaves the DB/host.
+// 生成 DKIM RSA 密钥存入 workspace_settings 并打印待发布的 DNS TXT 记录；
+// 私钥不出库不出机。
+func cmdDKIM() {
+	fs := flag.NewFlagSet("dkim", flag.ExitOnError)
+	selector := fs.String("selector", "s1", "DKIM selector")
+	domain := fs.String("domain", envOr("WITTYCHAT_MAIL_DOMAIN", ""), "mail domain (default: WITTYCHAT_MAIL_DOMAIN)")
+	bits := fs.Int("bits", 2048, "RSA key bits")
+	_ = fs.Parse(os.Args[1:])
+
+	pool := openDB()
+	defer pool.Close()
+	ctx := context.Background()
+	if *domain == "" {
+		log.Fatal("mail domain empty — pass -domain or set WITTYCHAT_MAIL_DOMAIN")
+	}
+
+	key, err := rsa.GenerateKey(rand.Reader, *bits)
+	if err != nil {
+		log.Fatalf("keygen: %v", err)
+	}
+	privPEM := string(pem.EncodeToMemory(&pem.Block{
+		Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key),
+	}))
+	// updated_by is FK to users; CLI runs before/alongside any admin user, so
+	// insert with NULL via direct SQL.
+	for _, kv := range [][2]string{
+		{settings.KeyMailDKIMKey, privPEM},
+		{settings.KeyMailDKIMSelector, *selector},
+	} {
+		_, err = pool.Exec(ctx,
+			`INSERT INTO workspace_settings (key, value, updated_at)
+			 VALUES ($1, to_jsonb($2::text), now())
+			 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+			kv[0], kv[1])
+		if err != nil {
+			log.Fatalf("store %s: %v", kv[0], err)
+		}
+	}
+
+	pubDER := x509.MarshalPKCS1PublicKey(&key.PublicKey)
+	p := base64.StdEncoding.EncodeToString(pubDER)
+	fmt.Printf("DKIM key stored (selector %s, domain %s).\n\nPublish this DNS TXT record:\n\n  %s._domainkey.%s  TXT  \"v=DKIM1; k=rsa; p=%s\"\n\nAlso ensure SPF includes your outbound IP, e.g.:\n  %s  TXT  \"v=spf1 mx ~all\"\n",
+		*selector, *domain, *selector, *domain, p, *domain)
 }

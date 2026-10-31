@@ -54,6 +54,7 @@ func New(d *Deps) http.Handler {
 	registerAdmin(api, d)
 	registerIM(api, d)
 	registerIM2(api, d)
+	registerPrefs(api, d)
 	registerProfile(api, mux, d)
 	registerPages(mux, d)
 	registerWS(mux, d)

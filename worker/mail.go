@@ -12,6 +12,7 @@ import (
 	"io"
 	"time"
 	"wittychat/core/mail"
+	"wittychat/core/settings"
 
 	"github.com/google/uuid"
 )
@@ -36,6 +37,20 @@ func (w *worker) mailSend(ctx context.Context, msgID uuid.UUID, rcpt string) err
 		return err
 	}
 	raw := mail.BuildRFC822(from, to, cc, subject, body, rfcID, inReplyTo)
+	// DKIM-sign when a key is configured — unsigned mail lands in spam at
+	// real providers. A configured-but-broken key fails loudly so the task
+	// retry surfaces the config error instead of silently sending unsigned.
+	// 配置了密钥就签 DKIM：真邮局对未签名件基本判垃圾。密钥配置错误时
+	// 让任务报错重试，暴露配置问题，而不是静默发未签名件。
+	st := settings.New(w.pool)
+	if keyPEM := st.Str(ctx, settings.KeyMailDKIMKey, ""); keyPEM != "" {
+		sel := st.Str(ctx, settings.KeyMailDKIMSelector, "s1")
+		signed, err := mail.SignDKIM(raw, w.mailStore().LocalDomain, sel, []byte(keyPEM))
+		if err != nil {
+			return fmt.Errorf("dkim sign: %w", err)
+		}
+		raw = signed
+	}
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	if err := mail.SendMX(ctx, from, []string{rcpt}, raw); err != nil {

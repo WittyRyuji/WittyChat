@@ -3,7 +3,10 @@ package apitypes
 // IM domain API types — the client contract for conversations + op stream.
 // IM 域 API 类型：会话与 op 流的客户端契约。
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Conversation kinds / 会话类型
 const (
@@ -145,4 +148,16 @@ type MarkReadRequest struct {
 
 type AddMembersRequest struct {
 	UserIDs []string `json:"user_ids" required:"true" minItems:"1" maxItems:"200"`
+}
+
+// ---------- user prefs / 用户偏好 ----------
+
+// PrefsResponse — full per-user pref map (jsonb values pass through).
+type PrefsResponse struct {
+	Prefs map[string]json.RawMessage `json:"prefs"`
+}
+
+// PrefsMergeRequest — upsert keys; a null value deletes the key.
+type PrefsMergeRequest struct {
+	Prefs map[string]json.RawMessage `json:"prefs" required:"true"`
 }

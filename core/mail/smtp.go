@@ -102,6 +102,7 @@ func sendToDomain(ctx context.Context, domain, from string, rcpts []string, raw 
 func BuildRFC822(from string, to, cc []string, subject, body, msgID string, inReplyTo string) []byte {
 	var b strings.Builder
 	fmt.Fprintf(&b, "From: %s\r\nTo: %s\r\n", from, strings.Join(to, ", "))
+	fmt.Fprintf(&b, "Date: %s\r\n", time.Now().UTC().Format(time.RFC1123Z))
 	if len(cc) > 0 {
 		fmt.Fprintf(&b, "Cc: %s\r\n", strings.Join(cc, ", "))
 	}

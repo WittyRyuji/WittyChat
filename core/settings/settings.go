@@ -22,6 +22,8 @@ const (
 	KeyStorageQuota      = "storage.quota_bytes"     // int bytes, 0 = unlimited
 	KeyStorageUploadMax  = "storage.upload_max_mb"   // int MB per file, default 5
 	KeyMailOutbound      = "mail.outbound_enabled"   // bool, default true
+	KeyMailDKIMKey       = "mail.dkim_key"           // string PEM, RSA private key
+	KeyMailDKIMSelector  = "mail.dkim_selector"      // string, default "s1"
 	KeySecurityMinPass   = "security.min_password"   // int chars, default 12
 	KeySecurityLockN     = "security.lock_threshold" // int fails, default 5
 	KeySecurityLockMin   = "security.lock_minutes"   // int minutes, default 15
@@ -100,6 +102,49 @@ func (s *Store) Set(ctx context.Context, key string, value any, updatedBy uuid.U
 		 VALUES ($1,$2,$3)
 		 ON CONFLICT (key) DO UPDATE SET value=$2, updated_by=$3, updated_at=now()`,
 		key, raw, updatedBy)
+	return err
+}
+
+// ---------- per-user prefs (user_prefs) / 用户级偏好 ----------
+
+// UAll returns every pref of one user.
+func (s *Store) UAll(ctx context.Context, userID uuid.UUID) (map[string]json.RawMessage, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT key, value FROM user_prefs WHERE user_id=$1 ORDER BY key`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]json.RawMessage{}
+	for rows.Next() {
+		var k string
+		var v json.RawMessage
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
+}
+
+// USet upserts one pref key for a user.
+func (s *Store) USet(ctx context.Context, userID uuid.UUID, key string, value any) error {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx,
+		`INSERT INTO user_prefs (user_id, key, value)
+		 VALUES ($1,$2,$3)
+		 ON CONFLICT (user_id, key) DO UPDATE SET value=$3, updated_at=now()`,
+		userID, key, raw)
+	return err
+}
+
+// UDelete removes one pref key (no-op when absent).
+func (s *Store) UDelete(ctx context.Context, userID uuid.UUID, key string) error {
+	_, err := s.pool.Exec(ctx,
+		`DELETE FROM user_prefs WHERE user_id=$1 AND key=$2`, userID, key)
 	return err
 }
 

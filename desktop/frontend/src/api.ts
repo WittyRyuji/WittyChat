@@ -129,6 +129,9 @@ export const api = {
       { email, password, device_name: "web", device_kind: "web" }
     ),
   me: () => req<{ user: UserPublic }>("GET", "/api/v1/auth/me"),
+  getPrefs: () => req<{ prefs: Record<string, unknown> }>("GET", "/api/v1/me/prefs"),
+  mergePrefs: (patch: Record<string, unknown>) =>
+    req<{ prefs: Record<string, unknown> }>("PATCH", "/api/v1/me/prefs", { prefs: patch }),
   updateMe: (body: { display_name?: string; avatar_object_id?: string }) =>
     req<{ user: UserPublic }>("PATCH", "/api/v1/users/me", body),
   logout: () => req("POST", "/api/v1/auth/logout"),

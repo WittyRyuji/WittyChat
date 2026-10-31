@@ -8,6 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.6
 	github.com/coder/websocket v1.8.14
 	github.com/danielgtaylor/huma/v2 v2.40.0
+	github.com/emersion/go-msgauth v0.7.0
 	github.com/golang-migrate/migrate/v4 v4.20.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.11.0

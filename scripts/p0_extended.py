@@ -473,5 +473,28 @@ check("logo 404 after clear", st == 404, str(st))
 req("PUT", "/api/v1/admin/settings",
     {"settings": {"workspace.logo_object_id": logo_id}}, admin)
 
+# ---- user prefs (per-user, cross-device) ----
+st, b = req("GET", "/api/v1/me/prefs", None, alice)
+check("prefs get empty", st == 200 and isinstance(json.loads(b).get("prefs"), dict), str(st))
+st, b = req("GET", "/api/v1/me/prefs", None, None)
+check("prefs require auth", st == 401, str(st))
+st, b = req("PATCH", "/api/v1/me/prefs",
+            {"prefs": {"pref.mail.autoimg": False, "pref.theme": "dark",
+                       "pref.mail.trusted": ["a@x.com", "b@y.org"]}}, alice)
+p = json.loads(b).get("prefs", {}) if st == 200 else {}
+check("prefs merge", st == 200 and p.get("pref.theme") == "dark"
+      and p.get("pref.mail.autoimg") is False
+      and p.get("pref.mail.trusted") == ["a@x.com", "b@y.org"], str(st))
+st, b = req("GET", "/api/v1/me/prefs", None, alice)
+check("prefs persist", st == 200 and json.loads(b)["prefs"].get("pref.theme") == "dark", str(st))
+st, b = req("PATCH", "/api/v1/me/prefs", {"prefs": {"pref.theme": None}}, alice)
+check("prefs null deletes key",
+      st == 200 and "pref.theme" not in json.loads(b)["prefs"], str(st))
+st, b = req("GET", "/api/v1/me/prefs", None, p0x)
+check("prefs per-user isolation",
+      st == 200 and "pref.mail.autoimg" not in json.loads(b)["prefs"], str(st))
+# cleanup so reruns stay deterministic
+req("PATCH", "/api/v1/me/prefs", {"prefs": {"pref.mail.autoimg": None, "pref.mail.trusted": None}}, alice)
+
 print(f"\n{len(passed)} passed, {len(failed)} failed")
 sys.exit(1 if failed else 0)
