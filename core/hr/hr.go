@@ -119,9 +119,10 @@ func (s *Store) Get(ctx context.Context, id uuid.UUID) (*Request, error) {
 	return &r, err
 }
 
-// List: scope=mine (own) / pending (queue) / all. Caller enforces admin for
-// pending+all.
-func (s *Store) List(ctx context.Context, scope string, userID uuid.UUID, limit int) ([]Request, error) {
+// List: scope=mine (own) / pending (queue) / all / history (decided — own
+// for members, everyone for admins).
+// history = 已办结申请：普通成员只看自己的，管理员看全员。
+func (s *Store) List(ctx context.Context, scope string, userID uuid.UUID, isAdmin bool, limit int) ([]Request, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
@@ -132,6 +133,12 @@ func (s *Store) List(ctx context.Context, scope string, userID uuid.UUID, limit 
 		where, args = ` WHERE r.requester=$1`, []any{userID}
 	case "pending":
 		where, args = ` WHERE r.status='pending'`, nil
+	case "history":
+		if isAdmin {
+			where, args = ` WHERE r.status != 'pending'`, nil
+		} else {
+			where, args = ` WHERE r.status != 'pending' AND r.requester=$1`, []any{userID}
+		}
 	default: // all
 		where, args = ``, nil
 	}

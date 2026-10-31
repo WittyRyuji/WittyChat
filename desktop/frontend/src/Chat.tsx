@@ -1121,8 +1121,8 @@ function Rail({
     { key: "chat", title: "消息", icon: <IconChat /> },
     { key: "contacts", title: "通讯录", icon: <IconContacts /> },
     { key: "mail", title: "邮件", icon: <IconMail /> },
-    { key: "zen", title: "Zen", icon: <IconZen /> },
     { key: "hr", title: "人力", icon: <IconHR /> },
+    { key: "zen", title: "Zen", icon: <IconZen /> },
   ] as const;
   return (
     <nav className="rail">

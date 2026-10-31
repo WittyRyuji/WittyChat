@@ -571,5 +571,14 @@ st, b = req("GET", f"/api/v1/objects/{hr_obj}/download", None, alice)
 check("hr att readable by requester", st == 200, str(st))
 req("POST", f"/api/v1/hr/requests/{hr_exp}/cancel", None, alice)
 
+st, b = req("GET", "/api/v1/hr/requests?scope=history", None, alice)
+hist = json.loads(b).get("requests", []) if st == 200 else []
+check("hr history member own only",
+      st == 200 and all(r["requester_email"].endswith("alice@wittyloong.com") for r in hist)
+      and all(r["status"] != "pending" for r in hist), str(len(hist)))
+st, b = req("GET", "/api/v1/hr/requests?scope=history", None, admin)
+check("hr history admin all",
+      st == 200 and all(r["status"] != "pending" for r in json.loads(b)["requests"]), str(st))
+
 print(f"\n{len(passed)} passed, {len(failed)} failed")
 sys.exit(1 if failed else 0)

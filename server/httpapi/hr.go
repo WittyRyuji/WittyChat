@@ -110,7 +110,7 @@ func (d *Deps) hrCreate(ctx context.Context, in *struct {
 
 func (d *Deps) hrList(ctx context.Context, in *struct {
 	Headers
-	Scope string `query:"scope" default:"mine" enum:"mine,pending,all"`
+	Scope string `query:"scope" default:"mine" enum:"mine,pending,all,history"`
 	Limit int    `query:"limit" default:"100"`
 },
 ) (*struct{ Body apitypes.HRRequestList }, error) {
@@ -118,10 +118,10 @@ func (d *Deps) hrList(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, err
 	}
-	if in.Scope != "mine" && !u.IsAdmin {
+	if (in.Scope == "pending" || in.Scope == "all") && !u.IsAdmin {
 		return nil, huma.Error403Forbidden("pending/all scopes are admin-only / 队列视图仅管理员")
 	}
-	rows, err := d.HR.List(ctx, in.Scope, u.ID, in.Limit)
+	rows, err := d.HR.List(ctx, in.Scope, u.ID, u.IsAdmin, in.Limit)
 	if err != nil {
 		return nil, err
 	}

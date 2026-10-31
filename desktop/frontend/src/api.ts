@@ -401,7 +401,7 @@ export interface HRSummary {
 export const hrApi = {
   create: (kind: string, payload: Record<string, unknown>) =>
     req<HRRequest>("POST", "/api/v1/hr/requests", { kind, payload }),
-  list: (scope: "mine" | "pending" | "all") =>
+  list: (scope: "mine" | "pending" | "all" | "history") =>
     req<{ requests: HRRequest[] }>("GET", `/api/v1/hr/requests?scope=${scope}`),
   decide: (id: string, approve: boolean, note?: string) =>
     req<HRRequest>("POST", `/api/v1/hr/requests/${id}/decide`, { approve, note }),

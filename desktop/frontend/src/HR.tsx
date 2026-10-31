@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api2, type HRDay, type HRRequest, type HRSummary, hrApi, type UserPublic } from "./api";
 
-type Tab = "requests" | "approvals" | "attendance";
+type Tab = "requests" | "approvals" | "attendance" | "history";
 type Kind = "leave" | "contract" | "expense";
 
 const KIND_LABEL: Record<string, string> = {
@@ -86,9 +86,10 @@ export function HR({ me }: { me: UserPublic }) {
         <div className="conv-list">
           {(
             [
-              ["requests", "我的申请"],
+              ["requests", "申请"],
               ...(me.is_admin ? ([["approvals", "审批"]] as const) : []),
               ["attendance", "考勤"],
+              ["history", "历史"],
             ] as [Tab, string][]
           ).map(([k, name]) => (
             <button
@@ -106,6 +107,7 @@ export function HR({ me }: { me: UserPublic }) {
         {tab === "requests" && <MyRequests />}
         {tab === "approvals" && me.is_admin && <Approvals />}
         {tab === "attendance" && <Attendance me={me} />}
+        {tab === "history" && <History />}
       </section>
     </div>
   );
@@ -340,30 +342,34 @@ function MyRequests() {
         </div>
       </div>
 
-      <h3>我的申请</h3>
+      <h3>进行中</h3>
       <div className="hr-list">
-        {rows.length === 0 && <p className="dim">暂无申请</p>}
-        {rows.map((r) => (
-          <div key={r.id} className="hr-row">
-            <span className={`hr-kind k-${r.kind}`}>{KIND_LABEL[r.kind]}</span>
-            <span className="hr-sum">
-              {payloadSummary(r)}
-              <AttLinks ids={payloadAtts(r)} />
-            </span>
-            <span className={`hr-status s-${r.status}`}>{STATUS_LABEL[r.status]}</span>
-            <span className="dim">{new Date(r.created_at).toLocaleDateString("zh-CN")}</span>
-            {r.status === "pending" && (
-              <button
-                type="button"
-                className="ghost"
-                onClick={() => hrApi.cancel(r.id).then(reload)}
-              >
-                撤销
-              </button>
-            )}
-            {r.decision_note && <span className="dim">批注:{r.decision_note}</span>}
-          </div>
-        ))}
+        {rows.filter((r) => r.status === "pending").length === 0 && (
+          <p className="dim">暂无进行中的申请</p>
+        )}
+        {rows
+          .filter((r) => r.status === "pending")
+          .map((r) => (
+            <div key={r.id} className="hr-row">
+              <span className={`hr-kind k-${r.kind}`}>{KIND_LABEL[r.kind]}</span>
+              <span className="hr-sum">
+                {payloadSummary(r)}
+                <AttLinks ids={payloadAtts(r)} />
+              </span>
+              <span className={`hr-status s-${r.status}`}>{STATUS_LABEL[r.status]}</span>
+              <span className="dim">{new Date(r.created_at).toLocaleDateString("zh-CN")}</span>
+              {r.status === "pending" && (
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => hrApi.cancel(r.id).then(reload)}
+                >
+                  撤销
+                </button>
+              )}
+              {r.decision_note && <span className="dim">批注:{r.decision_note}</span>}
+            </div>
+          ))}
       </div>
     </div>
   );
@@ -563,6 +569,41 @@ function Attendance({ me }: { me: UserPublic }) {
           </table>
         </>
       )}
+    </div>
+  );
+}
+
+// ---------- history / 已办结（成员看自己的，管理员看全员） ----------
+
+function History() {
+  const [rows, setRows] = useState<HRRequest[]>([]);
+  useEffect(() => {
+    hrApi
+      .list("history")
+      .then((r) => setRows(r.requests))
+      .catch(() => {});
+  }, []);
+
+  return (
+    <div className="hr-page">
+      <h3>已办结</h3>
+      <div className="hr-list">
+        {rows.length === 0 && <p className="dim">暂无历史申请</p>}
+        {rows.map((r) => (
+          <div key={r.id} className="hr-row">
+            <span className={`hr-kind k-${r.kind}`}>{KIND_LABEL[r.kind]}</span>
+            <span className="hr-sum">
+              {r.requester_name && <b>{r.requester_name} </b>}
+              {payloadSummary(r)}
+              <AttLinks ids={payloadAtts(r)} />
+            </span>
+            <span className={`hr-status s-${r.status}`}>{STATUS_LABEL[r.status]}</span>
+            {r.decider_name && <span className="dim">{r.decider_name} 审批</span>}
+            {r.decision_note && <span className="dim">批注:{r.decision_note}</span>}
+            <span className="dim">{new Date(r.created_at).toLocaleDateString("zh-CN")}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
