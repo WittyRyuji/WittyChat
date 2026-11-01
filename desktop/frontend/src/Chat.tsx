@@ -4,6 +4,7 @@ import {
   api2,
   type ConversationInfo,
   connectWS,
+  isOfficeFile,
   type MemberInfo,
   type MessageSearchHit,
   newClientMsgId,
@@ -215,6 +216,10 @@ export function Chat({
   const [view, setView] = useState<"chat" | "contacts" | "mail" | "zen" | "hr" | "settings">(
     "chat"
   );
+  const [officeOn, setOfficeOn] = useState(false);
+  useEffect(() => {
+    api2.officeEnabled().then(setOfficeOn);
+  }, []);
   const [err, setErr] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const typingTimers = useRef<Record<string, number>>({});
@@ -858,16 +863,27 @@ export function Chat({
                                       />
                                     </button>
                                   ) : (
-                                    <button
-                                      type="button"
-                                      key={a.id}
-                                      className="att"
-                                      title="下载"
-                                      onClick={() => saveBlob(a.id, a.name)}
-                                    >
-                                      📎 {a.name}
-                                      <span className="att-size">{fmtSize(a.size)}</span>
-                                    </button>
+                                    <span key={a.id} className="att-file">
+                                      <button
+                                        type="button"
+                                        className="att"
+                                        title="下载"
+                                        onClick={() => saveBlob(a.id, a.name)}
+                                      >
+                                        📎 {a.name}
+                                        <span className="att-size">{fmtSize(a.size)}</span>
+                                      </button>
+                                      {officeOn && isOfficeFile(a.name) && (
+                                        <a
+                                          className="att-edit"
+                                          href={api2.officeEditURL(a.id)}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                        >
+                                          在线编辑
+                                        </a>
+                                      )}
+                                    </span>
                                   )
                                 )}
                               </div>

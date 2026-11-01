@@ -34,6 +34,29 @@ services:
     volumes:
       - maddydata:/data
 
+  # OnlyOffice Document Server — online editing for office attachments.
+  # JWT_SECRET must match the server's WITTYCHAT_ONLYOFFICE_JWT_SECRET.
+  # host.docker.internal lets the container reach the Go server on the host.
+  # OnlyOffice 文档服务：办公附件在线编辑。JWT_SECRET 与服务端
+  # WITTYCHAT_ONLYOFFICE_JWT_SECRET 保持一致；host.docker.internal
+  # 供容器反向访问宿主机上的 Go 服务（拉文件、保存回调）。
+  onlyoffice:
+    image: onlyoffice/documentserver:9.4.0.1
+    environment:
+      JWT_ENABLED: "true"
+      JWT_SECRET: ${ONLYOFFICE_JWT_SECRET:-wittychat-office-dev}
+      JWT_HEADER: Authorization
+    ports:
+      - "8180:80"
+    volumes:
+      - oodata:/var/www/onlyoffice/Data
+      - oologs:/var/log/onlyoffice
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
 volumes:
   pgdata:
   maddydata:
+  oodata:
+  oologs:

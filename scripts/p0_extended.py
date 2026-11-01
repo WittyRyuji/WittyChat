@@ -577,5 +577,47 @@ st, b = req("GET", "/api/v1/hr/requests?scope=history", None, admin)
 check("hr history admin all",
       st == 200 and all(r["status"] != "pending" for r in json.loads(b)["requests"]), str(st))
 
+# --- OnlyOffice: signed edit/file URLs, JWT-guarded callback, ACL ---
+# Only present when WITTYCHAT_ONLYOFFICE_URL is configured on the server.
+_noredir = urllib.request.build_opener(
+    type("NoRedirect", (urllib.request.HTTPRedirectHandler,),
+         {"redirect_request": lambda *a: None})())
+def req_noredir(path, token=None):
+    r = urllib.request.Request(BASE + path)
+    if token:
+        r.add_header("Authorization", f"Bearer {token}")
+    try:
+        resp = _noredir.open(r, timeout=10)
+        return resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+st, obj = upload_purpose(alice, "attachment", "note.docx",
+                         "application/octet-stream", b"pk-docx")
+oo_obj = obj.get("id") if st == 200 else None
+probe, _ = req_noredir(f"/office/open?obj={oo_obj}&token={alice}")
+if probe == 404:
+    print("SKIP office checks (WITTYCHAT_ONLYOFFICE_URL not set)")
+else:
+    check("office open 302->edit", probe == 302, str(probe))
+    st, b = req("GET", f"/api/v1/objects/{oo_obj}/office-url", None, alice)
+    edit_url = json.loads(b).get("url", "") if st == 200 else ""
+    check("office-url api", st == 200 and "/office/edit?" in edit_url, str(st))
+    st, b = req_noredir(edit_url.replace(BASE, "", 1))
+    check("office edit page", st == 200 and b"DocEditor" in b and b"callbackUrl" in b, str(st))
+    st, _ = req_noredir(f"/office/open?obj={oo_obj}&token={p0x}")
+    check("office open denied to stranger", st in (401, 403), str(st))
+    st, _ = req("GET", "/office/edit?obj=bad&u=bad&exp=1&sig=x")
+    check("office edit bad params", st in (400, 403), str(st))
+    st, _ = req("GET", f"/api/v1/office/file?obj={oo_obj}&exp=1&sig=bad")
+    check("office file bad sig", st in (400, 403), str(st))
+    st, _ = req("POST", f"/api/v1/office/callback?obj={oo_obj}", raw=b"{}")
+    check("office callback needs JWT", st == 401, str(st))
+    st, obj = upload_purpose(alice, "attachment", "photo.png", "image/png",
+                             b"\x89PNG\r\n\x1a\n")
+    png_obj = obj.get("id") if st == 200 else None
+    st, _ = req_noredir(f"/office/open?obj={png_obj}&token={alice}")
+    check("office open non-doc 400", st == 400, str(st))
+
 print(f"\n{len(passed)} passed, {len(failed)} failed")
 sys.exit(1 if failed else 0)

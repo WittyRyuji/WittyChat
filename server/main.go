@@ -86,6 +86,30 @@ func publicURL() string {
 	return envOr("WITTYCHAT_PUBLIC_URL", "http://localhost:8080")
 }
 
+// officeConfig wires the OnlyOffice integration from env. Disabled unless
+// WITTYCHAT_ONLYOFFICE_URL is set — the docs container is a separate
+// docker service (deploy/docker-compose*.yml).
+//
+//	WITTYCHAT_ONLYOFFICE_URL            browser-facing docs base (api.js)
+//	WITTYCHAT_ONLYOFFICE_JWT_SECRET     shared HS256 secret (recommended)
+//	WITTYCHAT_ONLYOFFICE_CALLBACK_BASE  how the container reaches US
+//	                                    (Docker Desktop: host.docker.internal)
+//	WITTYCHAT_ONLYOFFICE_INTERNAL_URL   where WE fetch saved output
+//	                                    (default = DOCS_URL; compose: http://onlyoffice)
+func officeConfig() *httpapi.OfficeConfig {
+	docs := envOr("WITTYCHAT_ONLYOFFICE_URL", "")
+	if docs == "" {
+		return nil
+	}
+	fetch := envOr("WITTYCHAT_ONLYOFFICE_INTERNAL_URL", docs)
+	return &httpapi.OfficeConfig{
+		DocsURL:      docs,
+		JWTSecret:    []byte(os.Getenv("WITTYCHAT_ONLYOFFICE_JWT_SECRET")),
+		CallbackBase: envOr("WITTYCHAT_ONLYOFFICE_CALLBACK_BASE", "http://host.docker.internal:8080"),
+		FetchBase:    fetch,
+	}
+}
+
 func openDB() *pgxpool.Pool {
 	pool, err := db.Open(context.Background(), dbURL())
 	if err != nil {
@@ -138,6 +162,7 @@ func cmdServe() {
 		Mail:      mail.NewStore(pool, envOr("WITTYCHAT_MAIL_DOMAIN", "wittyloong.com")),
 		Agents:    agents.NewStore(pool),
 		HR:        hr.New(pool),
+		Office:    officeConfig(),
 	}
 
 	addr := envOr("WITTYCHAT_ADDR", ":8080")

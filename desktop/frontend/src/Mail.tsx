@@ -3,7 +3,7 @@
 //
 // 邮件视图：文件夹 | 列表 | 阅读 + 写信弹窗。
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, api2, type MailFolder, type MailMessage, mailApi } from "./api";
+import { api, api2, isOfficeFile, type MailFolder, type MailMessage, mailApi } from "./api";
 import {
   IconArchive,
   IconDraft,
@@ -90,6 +90,10 @@ export function Mail() {
   const [contacts, setContacts] = useState<Set<string>>(new Set());
   const [trusted, setTrusted] = useState<string[]>(readTrusted());
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
+  const [officeOn, setOfficeOn] = useState(false);
+  useEffect(() => {
+    api2.officeEnabled().then(setOfficeOn);
+  }, []);
 
   const refreshFolders = useCallback(() => {
     mailApi
@@ -323,6 +327,16 @@ export function Mail() {
                     >
                       📎 {a.name}
                     </a>
+                    {officeOn && isOfficeFile(a.name) && (
+                      <a
+                        className="att-edit"
+                        href={api2.officeEditURL(a.object_id)}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        在线编辑
+                      </a>
+                    )}
                   </span>
                 ))}
               </div>

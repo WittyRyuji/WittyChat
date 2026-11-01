@@ -955,6 +955,20 @@ button {
 .att-size {
   color: var(--dim);
 }
+.att-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.att-edit {
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.att-edit:hover {
+  text-decoration: underline;
+}
 .file-chips {
   display: flex;
   flex-wrap: wrap;

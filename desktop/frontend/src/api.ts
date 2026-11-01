@@ -223,8 +223,11 @@ export const api = {
         read_receipts: boolean;
         at_all: string;
       };
+      office?: { enabled: boolean };
     }>("GET", "/api/v1/settings"),
 };
+
+let officeOn: Promise<boolean> | null = null;
 
 export const api2 = {
   upload: async (convId: string, file: File) => {
@@ -273,7 +276,60 @@ export const api2 = {
     if (!res.ok) throw new Error("download failed");
     return res.blob();
   },
+  // OnlyOffice edit entry — /office/open validates the session and 302s
+  // to the signed editor page; the shell's link interceptor opens it in
+  // the system browser. 在线编辑入口（服务端校验后跳签名编辑页）。
+  officeEditURL: (objId: string) => `${API_BASE}/office/open?obj=${objId}&token=${getToken()}`,
+  officeEnabled: () =>
+    (officeOn ??= api
+      .settings()
+      .then((d) => !!d.office?.enabled)
+      .catch(() => false)),
 };
+
+// Office extensions the "在线编辑" affordance appears for — mirrors
+// officeType in server/httpapi/office.go (common editable set).
+// 前端镜像的可编辑扩展名集合（与服务端 officeType 对齐的常用子集）。
+export const OFFICE_EXTS = new Set([
+  "doc",
+  "docx",
+  "docm",
+  "dot",
+  "dotx",
+  "dotm",
+  "odt",
+  "ott",
+  "rtf",
+  "txt",
+  "xls",
+  "xlsx",
+  "xlsm",
+  "xlsb",
+  "xlt",
+  "xltx",
+  "xltm",
+  "ods",
+  "ots",
+  "csv",
+  "ppt",
+  "pptx",
+  "pptm",
+  "pps",
+  "ppsx",
+  "ppsm",
+  "pot",
+  "potx",
+  "potm",
+  "odp",
+  "otp",
+  "pdf",
+  "epub",
+]);
+
+export function isOfficeFile(name: string): boolean {
+  const i = name.lastIndexOf(".");
+  return i >= 0 && OFFICE_EXTS.has(name.slice(i + 1).toLowerCase());
+}
 
 // ---- mail ----
 export interface MailFolder {

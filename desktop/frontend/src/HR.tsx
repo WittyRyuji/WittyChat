@@ -6,7 +6,15 @@
 // 全员月度假勤汇总。申请表单按消息撰写的体验排版：分段标签 + 标签行 +
 // 事由多行文本 + 附件 + 独立提交行。
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api2, type HRDay, type HRRequest, type HRSummary, hrApi, type UserPublic } from "./api";
+import {
+  api2,
+  type HRDay,
+  type HRRequest,
+  type HRSummary,
+  hrApi,
+  isOfficeFile,
+  type UserPublic,
+} from "./api";
 
 type Tab = "requests" | "approvals" | "attendance" | "history";
 type Kind = "leave" | "contract" | "expense";
@@ -28,15 +36,34 @@ interface Att {
   name: string;
 }
 
-function AttLinks({ ids }: { ids?: string[] }) {
+function AttLinks({ ids, names }: { ids?: string[]; names?: Record<string, string> }) {
+  const [officeOn, setOfficeOn] = useState(false);
+  useEffect(() => {
+    api2.officeEnabled().then(setOfficeOn);
+  }, []);
   if (!ids?.length) return null;
   return (
     <span className="hr-atts">
-      {ids.map((id) => (
-        <a key={id} href={api2.downloadURL(id)} target="_blank" rel="noreferrer" className="hr-att">
-          附件
-        </a>
-      ))}
+      {ids.map((id) => {
+        const name = names?.[id] ?? "附件";
+        return (
+          <span key={id} className="att-file">
+            <a href={api2.downloadURL(id)} target="_blank" rel="noreferrer" className="hr-att">
+              {name}
+            </a>
+            {officeOn && isOfficeFile(name) && (
+              <a
+                className="att-edit"
+                href={api2.officeEditURL(id)}
+                target="_blank"
+                rel="noreferrer"
+              >
+                在线编辑
+              </a>
+            )}
+          </span>
+        );
+      })}
     </span>
   );
 }
@@ -58,6 +85,14 @@ function payloadSummary(r: HRRequest): string {
 function payloadAtts(r: HRRequest): string[] {
   const v = (r.payload as Record<string, unknown>).attachment_object_ids;
   return Array.isArray(v) ? (v as string[]) : [];
+}
+
+// Filenames live alongside the id list so links can show real names and
+// the office-edit affordance can match extensions. 附件文件名随 id 一起
+// 存 payload，链接显示真名、可编辑类型才有「在线编辑」。
+function payloadAttNames(r: HRRequest): Record<string, string> {
+  const v = (r.payload as Record<string, unknown>).attachment_names;
+  return v && typeof v === "object" ? (v as Record<string, string>) : {};
 }
 
 function fmtHM(min: number): string {
@@ -193,7 +228,10 @@ function MyRequests() {
         memo: f.reason,
       });
     }
-    if (atts.length) payload.attachment_object_ids = atts.map((a) => a.id);
+    if (atts.length) {
+      payload.attachment_object_ids = atts.map((a) => a.id);
+      payload.attachment_names = Object.fromEntries(atts.map((a) => [a.id, a.name]));
+    }
     setBusy(true);
     try {
       await hrApi.create(kind, payload);
@@ -381,7 +419,7 @@ function Approvals() {
             <span className={`hr-kind k-${r.kind}`}>{KIND_LABEL[r.kind]}</span>
             <span className="hr-sum">
               <b>{r.requester_name}</b> {payloadSummary(r)}
-              <AttLinks ids={payloadAtts(r)} />
+              <AttLinks ids={payloadAtts(r)} names={payloadAttNames(r)} />
             </span>
             <input
               placeholder="批注"
@@ -569,7 +607,7 @@ function History() {
             <span className="hr-sum">
               {r.requester_name && <b>{r.requester_name} </b>}
               {payloadSummary(r)}
-              <AttLinks ids={payloadAtts(r)} />
+              <AttLinks ids={payloadAtts(r)} names={payloadAttNames(r)} />
             </span>
             <span className={`hr-status s-${r.status}`}>{STATUS_LABEL[r.status]}</span>
             {r.decider_name && <span className="dim">{r.decider_name} 审批</span>}

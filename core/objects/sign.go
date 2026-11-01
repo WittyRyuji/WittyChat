@@ -46,6 +46,28 @@ func (s *Signer) Verify(id uuid.UUID, expStr, sig string) bool {
 	return hmac.Equal([]byte(want), []byte(sig))
 }
 
+// SignSubject mints exp/sig params over an arbitrary subject string —
+// same HMAC model as Params but the caller composes what's being granted
+// (e.g. "office-edit|obj|uid"). 任意主体的 exp/sig 签名，粒度由调用方定。
+func (s *Signer) SignSubject(subject string, ttl time.Duration) (exp int64, sig string) {
+	exp = time.Now().Add(ttl).Unix()
+	mac := hmac.New(sha256.New, s.key)
+	_, _ = fmt.Fprintf(mac, "%s|%d", subject, exp)
+	return exp, base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// VerifySubject checks exp/sig against the subject string.
+func (s *Signer) VerifySubject(subject, expStr, sig string) bool {
+	exp, err := strconv.ParseInt(expStr, 10, 64)
+	if err != nil || time.Now().Unix() > exp {
+		return false
+	}
+	mac := hmac.New(sha256.New, s.key)
+	_, _ = fmt.Fprintf(mac, "%s|%d", subject, exp)
+	want := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(want), []byte(sig))
+}
+
 // HexSHA formats a sha256 sum for logs/debug.
 func HexSHA(sha [32]byte) string { return hex.EncodeToString(sha[:]) }
 

@@ -184,6 +184,75 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 	return obj, false, nil
 }
 
+// ReplaceBytes streams new content into the store and re-points an
+// existing object at it — the in-place "save" path for office editing.
+// The new file lands under the object's own date partition at its new
+// sha; the old sha file is left for GC (it may still serve deduped rows).
+// The sha256 unique index means a pathological collision (edited bytes
+// identical to another live object) is reported rather than absorbed.
+// Stale thumbnails are dropped so views don't show pre-edit previews.
+//
+// ReplaceBytes 流式写入新内容并把既有对象重新指过去——在线编辑的
+// 原位保存路径。新文件按新 sha 落在对象自己的日期分区下；旧 sha 文件
+// 留给 GC（可能仍服务去重行）。sha256 唯一索引下的病态冲突（编辑结果
+// 与另一存活对象逐字节相同）上报而非吞掉。旧缩略图清除，避免残留旧预览。
+func (s *Store) ReplaceBytes(ctx context.Context, id uuid.UUID, r io.Reader, mime string, maxBytes int64) (*Object, error) {
+	o, err := s.Peek(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	tmp, err := os.CreateTemp(filepath.Join(s.dataDir, "tmp"), "edit-*")
+	if err != nil {
+		return nil, err
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	h := sha256.New()
+	n, err := io.Copy(tmp, io.TeeReader(io.LimitReader(r, maxBytes+1), h))
+	if err != nil {
+		_ = tmp.Close()
+		return nil, err
+	}
+	_ = tmp.Close()
+	if n > maxBytes {
+		return nil, ErrTooLarge
+	}
+	if n == 0 {
+		return nil, errors.New("empty body")
+	}
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	dst := s.path(o.ID, sum)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(tmpPath, dst); err != nil {
+		return nil, err
+	}
+	rel, _ := filepath.Rel(s.dataDir, dst)
+	if mime == "" {
+		mime = o.Mime
+	}
+	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`UPDATE objects SET sha256=$2, size_bytes=$3, mime=$4 WHERE id=$1 AND status<>'deleted'`,
+			id, sum[:], n, mime); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx,
+			`UPDATE object_segments SET size_bytes=$2, storage_key=$3 WHERE object_id=$1 AND seg_index=0`,
+			id, n, rel)
+		return err
+	})
+	if err != nil {
+		_ = os.Remove(dst)
+		return nil, err
+	}
+	_ = os.Remove(s.ThumbPath(id)) // stale preview must not survive the edit / 旧缩略图不留
+	o.SHA256, o.Size, o.Mime = sum, n, mime
+	return o, nil
+}
+
 // Get returns metadata if the user may access the object:
 // owner, or member of the object's conversation.
 // Get 返回元数据，前提是有权访问：上传者本人或对象所属会话的成员。

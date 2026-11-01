@@ -285,6 +285,9 @@ func (d *Deps) effectiveSettings(ctx context.Context, in *struct{ Headers }) (*s
 			"read_receipts":      d.Settings.Bool(ctx, settings.KeyIMReadReceipts, true),
 			"at_all":             d.Settings.Str(ctx, settings.KeyIMAtAll, "all"),
 		},
+		"office": map[string]any{
+			"enabled": d.officeEnabled(),
+		},
 	}}, nil
 }
 

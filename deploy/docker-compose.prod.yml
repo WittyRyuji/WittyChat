@@ -40,6 +40,15 @@ services:
       WITTYCHAT_S3_REGION: ${S3_REGION:-us-east-1}
       WITTYCHAT_S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
       WITTYCHAT_S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      WITTYCHAT_ONLYOFFICE_URL: ${ONLYOFFICE_URL:-}
+      WITTYCHAT_ONLYOFFICE_JWT_SECRET: ${ONLYOFFICE_JWT_SECRET:-}
+      # In-network addressing: the docs container reaches this server by
+      # service name; we fetch saved output from the docs container the
+      # same way. ONLYOFFICE_URL stays the browser-facing address.
+      # 同网段寻址：文档容器按服务名回连本服务，我们也按服务名取回成稿；
+      # ONLYOFFICE_URL 保持浏览器可达地址。
+      WITTYCHAT_ONLYOFFICE_CALLBACK_BASE: http://server:8080
+      WITTYCHAT_ONLYOFFICE_INTERNAL_URL: http://onlyoffice
     volumes:
       - objdata:/data
     depends_on:
@@ -79,6 +88,24 @@ services:
       - maddydata:/data
     restart: unless-stopped
 
+  # OnlyOffice Document Server — office attachment editing. Browsers need
+  # to reach it, so publish a port and point ONLYOFFICE_URL at the public
+  # address (own vhost/TLS recommended for production).
+  # OnlyOffice 文档服务：办公附件在线编辑。浏览器需要直连，故发布端口；
+  # ONLYOFFICE_URL 指向公网可达地址（生产建议独立 vhost+TLS）。
+  onlyoffice:
+    image: onlyoffice/documentserver:9.4.0.1
+    environment:
+      JWT_ENABLED: "true"
+      JWT_SECRET: ${ONLYOFFICE_JWT_SECRET:?set ONLYOFFICE_JWT_SECRET}
+      JWT_HEADER: Authorization
+    ports:
+      - "8180:80"
+    volumes:
+      - oodata:/var/www/onlyoffice/Data
+      - oologs:/var/log/onlyoffice
+    restart: unless-stopped
+
   nginx:
     image: nginx:1.27-alpine
     ports:
@@ -104,4 +131,6 @@ volumes:
   pgdata:
   objdata:
   maddydata:
+  oodata:
+  oologs:
   # miniodata:

@@ -45,6 +45,7 @@ type Deps struct {
 	Mail      *mail.Store
 	Agents    *agents.Store
 	HR        *hr.Store
+	Office    *OfficeConfig // nil → OnlyOffice routes off / 未配置则不挂编辑路由
 }
 
 // New builds the root handler: API routes + HTML pages + healthz.
@@ -62,6 +63,7 @@ func New(d *Deps) http.Handler {
 	registerPages(mux, d)
 	registerWS(mux, d)
 	registerObjects(mux, d)
+	registerOffice(mux, d)
 	registerMail(mux, d)
 	registerAgents(mux, d)
 	mux.HandleFunc("GET /api/v1/admin/audit/export", d.adminAuditExport)
