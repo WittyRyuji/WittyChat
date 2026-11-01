@@ -189,7 +189,7 @@ func cmdServe() {
 		Mail:      mail.NewStore(pool, envOr("WITTYCHAT_MAIL_DOMAIN", "wittyloong.com")),
 		Agents:    agents.NewStore(pool),
 		HR:        hr.New(pool),
-		Docs:      docs.New(pool, imStore.IsMember),
+		Docs:      docs.New(pool, imStore.IsMember, imStore.MemberRole),
 		Office:    officeConfig(),
 	}
 

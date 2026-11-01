@@ -23,11 +23,14 @@ func registerDocs(mux *http.ServeMux, d *Deps) {
 	mux.HandleFunc("GET /api/v1/docs", d.listDocs)
 	mux.HandleFunc("GET /api/v1/docs/{id}", d.getDoc)
 	mux.HandleFunc("POST /api/v1/docs/{id}/rename", d.renameDoc)
+	mux.HandleFunc("DELETE /api/v1/docs/{id}", d.deleteDoc)
+	mux.HandleFunc("GET /api/v1/conversations/{id}/docs", d.convDocs)
 	mux.HandleFunc("GET /ws/doc/{id}", d.docWS)
 }
 
 type createDocReq struct {
 	Title  string     `json:"title"`
+	Kind   string     `json:"kind"`
 	ConvID *uuid.UUID `json:"conv_id"`
 }
 
@@ -42,7 +45,11 @@ func (d *Deps) createDoc(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
-	doc, err := d.Docs.Create(r.Context(), uid, in.Title, in.ConvID)
+	kind := in.Kind
+	if kind == "" {
+		kind = "doc"
+	}
+	doc, err := d.Docs.Create(r.Context(), uid, in.Title, kind, in.ConvID)
 	if err != nil {
 		http.Error(w, "cannot create / 无权在会话中建文档", http.StatusForbidden)
 		return
@@ -65,6 +72,50 @@ func (d *Deps) listDocs(w http.ResponseWriter, r *http.Request) {
 		list[i].Editors = d.docEditors(list[i].ID)
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"docs": list})
+}
+
+// convDocs — Feishu-style group docs panel: all docs bound to a conv.
+// 群文档面板：列出绑定该会话的全部文档（成员可见）。
+func (d *Deps) convDocs(w http.ResponseWriter, r *http.Request) {
+	uid, err := d.bearerUser(r)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	convID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil || !d.IM.IsMember(r.Context(), convID, uid) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	list, err := d.Docs.ListByConv(r.Context(), convID)
+	if err != nil {
+		http.Error(w, "failed", http.StatusInternalServerError)
+		return
+	}
+	for i := range list {
+		list[i].Editors = d.docEditors(list[i].ID)
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"docs": list})
+}
+
+// deleteDoc — owner, or owner/admin of the bound conv.
+// 删除：文档属主，或绑定会话的群主/管理员。
+func (d *Deps) deleteDoc(w http.ResponseWriter, r *http.Request) {
+	uid, err := d.bearerUser(r)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	docID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil || !d.Docs.CanManage(r.Context(), docID, uid) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if err := d.Docs.Delete(r.Context(), docID); err != nil {
+		http.Error(w, "failed", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // docMeta — JSON view for getDoc. 元信息 + 实时在线人数。

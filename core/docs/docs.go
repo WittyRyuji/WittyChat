@@ -22,6 +22,7 @@ var ErrNotFound = errors.New("docs: not found")
 type Doc struct {
 	ID        uuid.UUID  `json:"id"`
 	Title     string     `json:"title"`
+	Kind      string     `json:"kind"` // doc | sheet | slide
 	Owner     uuid.UUID  `json:"owner"`
 	ConvID    *uuid.UUID `json:"conv_id"`
 	CreatedAt time.Time  `json:"created_at"`
@@ -32,29 +33,87 @@ type Doc struct {
 type Store struct {
 	pool         *pgxpool.Pool
 	isConvMember func(ctx context.Context, convID, uid uuid.UUID) bool
+	convRole     func(ctx context.Context, convID, uid uuid.UUID) (string, error)
 }
 
-// New wires the store. isConvMember is supplied by httpapi (im store) so
-// conv-bound doc ACL stays consistent with conversation membership.
-// isConvMember 由 httpapi 注入（im store），保证绑定文档的权限与会话
-// 成员一致。
-func New(pool *pgxpool.Pool, isConvMember func(ctx context.Context, convID, uid uuid.UUID) bool) *Store {
-	return &Store{pool: pool, isConvMember: isConvMember}
+// New wires the store. isConvMember/convRole are supplied by httpapi
+// (im store) so conv-bound doc ACL stays consistent with membership.
+// isConvMember/convRole 由 httpapi 注入（im store），保证绑定文档的
+// 权限与会话成员一致。
+func New(pool *pgxpool.Pool,
+	isConvMember func(ctx context.Context, convID, uid uuid.UUID) bool,
+	convRole func(ctx context.Context, convID, uid uuid.UUID) (string, error)) *Store {
+	return &Store{pool: pool, isConvMember: isConvMember, convRole: convRole}
+}
+
+// ValidKind guards create/update kind values. 合法文档类型。
+func ValidKind(k string) bool {
+	return k == "doc" || k == "sheet" || k == "slide"
 }
 
 // Create makes a doc owned by uid, optionally bound to a conv.
-func (s *Store) Create(ctx context.Context, uid uuid.UUID, title string, convID *uuid.UUID) (*Doc, error) {
+func (s *Store) Create(ctx context.Context, uid uuid.UUID, title, kind string, convID *uuid.UUID) (*Doc, error) {
+	if !ValidKind(kind) {
+		return nil, errors.New("docs: bad kind")
+	}
 	if convID != nil && !s.isConvMember(ctx, *convID, uid) {
 		return nil, ErrNotFound
 	}
-	d := &Doc{ID: uuid.New(), Title: title, Owner: uid, ConvID: convID}
+	d := &Doc{ID: uuid.New(), Title: title, Kind: kind, Owner: uid, ConvID: convID}
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO docs (id, title, owner, conv_id) VALUES ($1,$2,$3,$4)`,
-		d.ID, title, uid, convID)
+		`INSERT INTO docs (id, title, kind, owner, conv_id) VALUES ($1,$2,$3,$4,$5)`,
+		d.ID, title, kind, uid, convID)
 	if err != nil {
 		return nil, err
 	}
 	return d, nil
+}
+
+// CanManage: owner always; conv-bound docs also by conv owner/admin
+// (delete/rename rights match group management). 管理权=属主，或绑定
+// 会话的群主/管理员。
+func (s *Store) CanManage(ctx context.Context, docID, uid uuid.UUID) bool {
+	var owner uuid.UUID
+	var convID *uuid.UUID
+	err := s.pool.QueryRow(ctx, `SELECT owner, conv_id FROM docs WHERE id=$1`, docID).
+		Scan(&owner, &convID)
+	if err != nil {
+		return false
+	}
+	if owner == uid {
+		return true
+	}
+	if convID == nil {
+		return false
+	}
+	role, err := s.convRole(ctx, *convID, uid)
+	return err == nil && (role == "owner" || role == "admin")
+}
+
+// Delete removes the doc (updates cascade via FK).
+func (s *Store) Delete(ctx context.Context, docID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM docs WHERE id=$1`, docID)
+	return err
+}
+
+// ListByConv lists all docs bound to a conversation (群文档面板).
+func (s *Store) ListByConv(ctx context.Context, convID uuid.UUID) ([]Doc, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, title, kind, owner, conv_id, created_at, updated_at
+		FROM docs WHERE conv_id=$1 ORDER BY updated_at DESC`, convID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Doc{}
+	for rows.Next() {
+		var d Doc
+		if err := rows.Scan(&d.ID, &d.Title, &d.Kind, &d.Owner, &d.ConvID, &d.CreatedAt, &d.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }
 
 // CanAccess: owner, or member of the bound conv. 访问=属主或绑定会话成员。
@@ -75,8 +134,8 @@ func (s *Store) CanAccess(ctx context.Context, docID, uid uuid.UUID) bool {
 func (s *Store) Get(ctx context.Context, docID uuid.UUID) (*Doc, error) {
 	var d Doc
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, title, owner, conv_id, created_at, updated_at FROM docs WHERE id=$1`, docID).
-		Scan(&d.ID, &d.Title, &d.Owner, &d.ConvID, &d.CreatedAt, &d.UpdatedAt)
+		`SELECT id, title, kind, owner, conv_id, created_at, updated_at FROM docs WHERE id=$1`, docID).
+		Scan(&d.ID, &d.Title, &d.Kind, &d.Owner, &d.ConvID, &d.CreatedAt, &d.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -89,7 +148,7 @@ func (s *Store) Get(ctx context.Context, docID uuid.UUID) (*Doc, error) {
 // List returns docs the user can access: own + docs bound to their convs.
 func (s *Store) List(ctx context.Context, uid uuid.UUID) ([]Doc, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT d.id, d.title, d.owner, d.conv_id, d.created_at, d.updated_at
+		SELECT d.id, d.title, d.kind, d.owner, d.conv_id, d.created_at, d.updated_at
 		FROM docs d
 		WHERE d.owner = $1
 		   OR (d.conv_id IS NOT NULL AND EXISTS (
@@ -103,7 +162,7 @@ func (s *Store) List(ctx context.Context, uid uuid.UUID) ([]Doc, error) {
 	out := []Doc{}
 	for rows.Next() {
 		var d Doc
-		if err := rows.Scan(&d.ID, &d.Title, &d.Owner, &d.ConvID, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.Title, &d.Kind, &d.Owner, &d.ConvID, &d.CreatedAt, &d.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, d)

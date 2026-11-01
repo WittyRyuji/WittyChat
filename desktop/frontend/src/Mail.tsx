@@ -86,6 +86,10 @@ export function Mail() {
     { mode: "new" } | { mode: "reply" | "fwd"; msg: MailMessage } | null
   >(null);
   const [menu, setMenu] = useState<{ x: number; y: number; m: MailMessage } | null>(null);
+  // Folder context menu (mark-all-read) + multi-select for bulk actions.
+  // 文件夹右键（全部已读）+ Ctrl+A 多选批量操作。
+  const [fmenu, setFmenu] = useState<{ x: number; y: number; f: MailFolder } | null>(null);
+  const [sel, setSel] = useState<Set<string>>(new Set());
   const [err, setErr] = useState("");
   const [contacts, setContacts] = useState<Set<string>>(new Set());
   const [trusted, setTrusted] = useState<string[]>(readTrusted());
@@ -137,6 +141,45 @@ export function Mail() {
       loadMsgs();
       refreshFolders();
     });
+  };
+
+  // Ctrl+A selects all messages in the list (skip when typing in an
+  // input/textarea/contenteditable). Escape or any click clears.
+  // Ctrl+A 全选列表邮件（输入框内不劫持），Esc/点击清除。
+  const isEditable = (t: EventTarget | null) =>
+    t instanceof HTMLElement &&
+    (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: stable callbacks enough
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (sel.size > 0 && e.key === "Escape") setSel(new Set());
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a" && !isEditable(e.target)) {
+        e.preventDefault();
+        setSel(new Set(msgs.map((m) => m.id)));
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [msgs, sel.size]);
+
+  const bulk = async (action: "read" | "trash" | "del") => {
+    const ids = [...sel];
+    setSel(new Set());
+    if (action === "read") {
+      await Promise.all(ids.map((id) => mailApi.flags(id, true)));
+    } else if (action === "trash") {
+      const fid = folderId("trash");
+      if (!fid) return;
+      await Promise.all(ids.map((id) => mailApi.move(id, fid)));
+      if (open && sel.has(open.id)) setOpen(null);
+    } else {
+      if (!window.confirm(`彻底删除 ${ids.length} 封邮件？不可恢复。`)) return;
+      await Promise.all(ids.map((id) => mailApi.del(id)));
+      setOpen(null);
+    }
+    loadMsgs();
+    refreshFolders();
   };
 
   const folderId = (kind: string) => folders.find((f) => f.kind === kind)?.id;
@@ -195,6 +238,10 @@ export function Mail() {
                 setActiveFolder(f.id);
                 setOpen(null);
               }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setFmenu({ x: e.clientX, y: e.clientY, f });
+              }}
             >
               {folderIcon(f.kind)}
               {f.unread > 0 && <span className="dot">{f.unread}</span>}
@@ -202,13 +249,45 @@ export function Mail() {
           ))}
         </div>
 
+        {sel.size > 0 && (
+          <div className="bulkbar">
+            <span>已选 {sel.size} 封</span>
+            <button type="button" className="ghost sm" onClick={() => bulk("read")}>
+              标为已读
+            </button>
+            {activeKind === "trash" ? (
+              <button type="button" className="ghost sm" onClick={() => bulk("del")}>
+                彻底删除
+              </button>
+            ) : (
+              <button type="button" className="ghost sm" onClick={() => bulk("trash")}>
+                删除
+              </button>
+            )}
+            <button type="button" className="ghost sm" onClick={() => setSel(new Set())}>
+              取消
+            </button>
+          </div>
+        )}
         <div className="conv-list mail-list">
           {msgs.map((m) => (
             <button
               type="button"
               key={m.id}
-              className={`mail-item ${m.is_read ? "" : "unread"} ${open?.id === m.id ? "active" : ""}`}
-              onClick={() => openMsg(m)}
+              className={`mail-item ${m.is_read ? "" : "unread"} ${open?.id === m.id ? "active" : ""} ${sel.has(m.id) ? "sel" : ""}`}
+              onClick={(e) => {
+                if (e.ctrlKey || e.metaKey) {
+                  setSel((s) => {
+                    const n = new Set(s);
+                    if (n.has(m.id)) n.delete(m.id);
+                    else n.add(m.id);
+                    return n;
+                  });
+                  return;
+                }
+                setSel(new Set());
+                openMsg(m);
+              }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setMenu({ x: e.clientX, y: e.clientY, m });
@@ -344,6 +423,35 @@ export function Mail() {
           </div>
         )}
       </section>
+
+      {fmenu && (
+        /* biome-ignore lint/a11y/noStaticElementInteractions: click-away dismiss layer / 点空白处关菜单 */
+        <div
+          className="ctxmask"
+          role="presentation"
+          onClick={() => setFmenu(null)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setFmenu(null);
+          }}
+        >
+          <div className="ctxmenu" style={{ left: fmenu.x, top: fmenu.y }}>
+            <button
+              type="button"
+              onClick={() => {
+                const f = fmenu.f;
+                setFmenu(null);
+                mailApi.readAll(f.id).then(() => {
+                  loadMsgs();
+                  refreshFolders();
+                });
+              }}
+            >
+              全部标为已读{fmenu.f.unread > 0 ? `（${fmenu.f.unread}）` : ""}
+            </button>
+          </div>
+        </div>
+      )}
 
       {menu && (
         /* biome-ignore lint/a11y/noStaticElementInteractions: click-away dismiss layer / 点空白处关菜单 */

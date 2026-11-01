@@ -1,4 +1,5 @@
 import { type FormEvent, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { DocInfo } from "./api";
 import {
   api,
   api2,
@@ -15,7 +16,7 @@ import {
 } from "./api";
 import { Avatar, GroupAvatar } from "./avatar";
 import { Contacts } from "./Contacts";
-import { Docs } from "./Docs";
+import { Docs, KIND_ICON, KIND_LABEL } from "./Docs";
 import { JoinGroupDialog, MembersPanel, NewGroupDialog } from "./dialogs";
 import { EMOJI_GROUPS } from "./emoji";
 import { HR } from "./HR";
@@ -227,8 +228,14 @@ export function Chat({
   const [view, setView] = useState<
     "chat" | "contacts" | "mail" | "docs" | "zen" | "hr" | "settings"
   >("chat");
-  // Doc to open when entering the docs view (set by conv "＋文档" / doc link clicks).
+  // Doc to open when entering the docs view (set by conv "文档" panel /
+  // doc link clicks). 进入文档页时要打开的目标文档。
   const [docsFocus, setDocsFocus] = useState("");
+  const [docsPanel, setDocsPanel] = useState(false); // 群文档侧栏
+  const [convDocs, setConvDocs] = useState<DocInfo[] | null>(null);
+  const [plusMenu, setPlusMenu] = useState(false); // 输入框 ＋ 菜单
+  const [docPick, setDocPick] = useState<DocInfo[] | null>(null); // 发送文档选择器
+  const plusRef = useRef<HTMLDivElement>(null);
   const [officeOn, setOfficeOn] = useState(false);
   useEffect(() => {
     api2.officeEnabled().then(setOfficeOn);
@@ -430,12 +437,25 @@ export function Chat({
     setQuote(null);
     setText("");
     setFiles([]);
+    setDocsPanel(false);
+    setConvDocs(null);
+    setPlusMenu(false);
     needInitScroll.current = true; // 进会话跳到底
     if (!states[activeId]?.loaded) fetchDelta(activeId);
     loadMembers(activeId);
     const c = convs.find((x) => x.id === activeId);
     if (c && c.last_op_seq > 0) api.markRead(activeId, c.last_op_seq).catch(() => {});
   }, [activeId]);
+
+  // Click-outside closes the composer + menu. 外点关闭 ＋ 菜单。
+  useEffect(() => {
+    if (!plusMenu) return;
+    const close = (e: MouseEvent) => {
+      if (!plusRef.current?.contains(e.target as Node)) setPlusMenu(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [plusMenu]);
 
   // Conv switch → jump to latest; new ops while near bottom → keep pinned.
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll triggers
@@ -510,20 +530,56 @@ export function Chat({
     }
   };
 
-  // Feishu-style conv doc: create a doc bound to this conv, drop a
-  // clickable link message, then open the editor in the docs view.
-  // 飞书式会话文档：建绑定文档→发可点击的文档链接消息→跳到文档页编辑。
-  const createConvDoc = async () => {
+  // Feishu-style group docs: create a doc bound to this conv → it shows
+  // up in the group's docs panel (no more auto link-spam in the feed).
+  // Sending a doc link to the feed stays an explicit composer action.
+  // 飞书式群文档：建绑定文档→出现在群文档面板（不再自动刷屏发链接）。
+  // 发文档链接进消息流改为输入框 ＋ 菜单里的显式动作。
+  const openDoc = (id: string) => {
+    setDocsFocus(id);
+    setDocsPanel(false);
+    setView("docs");
+  };
+
+  const loadConvDocs = () => {
     if (!activeId) return;
+    docsApi
+      .convDocs(activeId)
+      .then((r) => setConvDocs(r.docs))
+      .catch(() => setConvDocs([]));
+  };
+
+  const toggleDocsPanel = () => {
+    setDocsPanel((v) => {
+      if (!v) loadConvDocs();
+      return !v;
+    });
+  };
+
+  const createConvDoc = async (kind: "doc" | "sheet" | "slide") => {
+    if (!activeId) return;
+    setPlusMenu(false);
     try {
-      const d = await docsApi.create("未命名文档", activeId);
+      const d = await docsApi.create(`未命名${KIND_LABEL[kind]}`, kind, activeId);
+      setConvDocs((l) => (l ? [d, ...l] : l));
+      openDoc(d.id);
+    } catch {
+      setErr("新建失败");
+    }
+  };
+
+  // Post a doc link message into the feed (explicit share action).
+  // 把文档链接显式发到消息流（点链接应用内打开）。
+  const sendDocLink = async (d: DocInfo) => {
+    if (!activeId) return;
+    setDocPick(null);
+    setPlusMenu(false);
+    try {
       const op = await api.send(
         activeId,
         newClientMsgId(),
-        `📄 [${d.title}](#doc/${d.id})`
+        `${KIND_ICON[d.kind] ?? "📄"} [${d.title}](#doc/${d.id})`
       );
-      // Same merge as send(): the link must be visible on return without
-      // waiting for the next ops delta. 与 send 一致把 op 合入本地状态。
       setStates((prev) => {
         const c = prev[activeId] ?? { ops: [], watermark: 0, hasOlder: true, loaded: true };
         if (c.ops.some((o) => o.op_seq === op.op_seq)) return prev;
@@ -537,10 +593,18 @@ export function Chat({
         };
       });
       refreshDirectory();
-      setDocsFocus(d.id);
-      setView("docs");
     } catch {
-      setErr("新建文档失败");
+      setErr("发送失败");
+    }
+  };
+
+  const delConvDoc = async (d: DocInfo) => {
+    if (!window.confirm(`删除「${d.title || "未命名"}」？`)) return;
+    try {
+      await docsApi.del(d.id);
+      setConvDocs((l) => l?.filter((x) => x.id !== d.id) ?? l);
+    } catch {
+      setErr("删除失败：只有属主或群主可删");
     }
   };
 
@@ -806,11 +870,11 @@ export function Chat({
                 )}
                 <button
                   type="button"
-                  className="ghost right"
-                  title="新建协同文档（全员可编辑）"
-                  onClick={createConvDoc}
+                  className={`ghost right${docsPanel ? " on" : ""}`}
+                  title="群文档 / 共享文件"
+                  onClick={toggleDocsPanel}
                 >
-                  ＋文档
+                  📑 文档
                 </button>
                 {active.kind === "group" && (
                   <button type="button" className="ghost" onClick={() => setModal("members")}>
@@ -1069,14 +1133,51 @@ export function Chat({
                     e.target.value = "";
                   }}
                 />
-                <button
-                  type="button"
-                  className="attach-btn"
-                  title="发送附件"
-                  onClick={() => fileInput.current?.click()}
-                >
-                  +
-                </button>
+                <div className="rel" ref={plusRef}>
+                  <button
+                    type="button"
+                    className={`attach-btn${plusMenu ? " on" : ""}`}
+                    title="更多：附件 / 文档"
+                    onClick={() => setPlusMenu((v) => !v)}
+                  >
+                    +
+                  </button>
+                  {plusMenu && (
+                    <div className="plus-menu">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPlusMenu(false);
+                          fileInput.current?.click();
+                        }}
+                      >
+                        📎 上传附件
+                      </button>
+                      <button type="button" onClick={() => createConvDoc("doc")}>
+                        📄 新建文档
+                      </button>
+                      <button type="button" onClick={() => createConvDoc("sheet")}>
+                        📊 新建表格
+                      </button>
+                      <button type="button" onClick={() => createConvDoc("slide")}>
+                        🖼 新建演示
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPlusMenu(false);
+                          setDocPick([]);
+                          docsApi
+                            .list()
+                            .then((r) => setDocPick(r.docs))
+                            .catch(() => setDocPick([]));
+                        }}
+                      >
+                        🔗 发送已有文档…
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <span className="emoji-anchor">
                   <button
                     type="button"
@@ -1196,6 +1297,66 @@ export function Chat({
                   发送
                 </button>
               </form>
+              {/* Feishu-style group docs drawer — shared docs bound to this
+                  conv. 群文档侧栏：本群共享的文档/表格/演示。 */}
+              {docsPanel && (
+                <aside className="docs-panel">
+                  <div className="dp-head">
+                    <b>群文档</b>
+                    <button
+                      type="button"
+                      className="ghost sm"
+                      onClick={() => loadConvDocs()}
+                      title="刷新"
+                    >
+                      ⟳
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost sm"
+                      onClick={() => setDocsPanel(false)}
+                      title="关闭"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="dp-new">
+                    <button type="button" onClick={() => createConvDoc("doc")}>
+                      📄 文档
+                    </button>
+                    <button type="button" onClick={() => createConvDoc("sheet")}>
+                      📊 表格
+                    </button>
+                    <button type="button" onClick={() => createConvDoc("slide")}>
+                      🖼 演示
+                    </button>
+                  </div>
+                  {convDocs === null ? (
+                    <div className="empty">加载中…</div>
+                  ) : convDocs.length === 0 ? (
+                    <div className="empty">还没有共享文档，点上方新建</div>
+                  ) : (
+                    convDocs.map((d) => (
+                      <div key={d.id} className="dp-row">
+                        <button type="button" className="dp-main" onClick={() => openDoc(d.id)}>
+                          <i className="doc-kind-ic">{KIND_ICON[d.kind] ?? "📄"}</i>
+                          <span className="dp-title">{d.title || "未命名"}</span>
+                          {d.editors > 0 && <i className="doc-live">{d.editors}</i>}
+                          <time>{d.updated_at?.slice(0, 10)}</time>
+                        </button>
+                        <button
+                          type="button"
+                          className="dp-del"
+                          title="删除"
+                          onClick={() => delConvDoc(d)}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </aside>
+              )}
             </>
           )}
         </section>
@@ -1225,6 +1386,36 @@ export function Chat({
               refreshDirectory();
             }}
           />
+        )}
+        {docPick && (
+          // biome-ignore lint/a11y/useKeyWithClickEvents lint/a11y/noStaticElementInteractions: modal dismiss layer / 点遮罩关闭
+          <div className="modal-mask" onClick={() => setDocPick(null)}>
+            {/* biome-ignore lint/a11y/useKeyWithClickEvents lint/a11y/noStaticElementInteractions: stop click-through / 阻止冒泡 */}
+            <div className="modal doc-pick" onClick={(e) => e.stopPropagation()}>
+              <h3>发送文档到会话</h3>
+              {docPick.length === 0 ? (
+                <div className="empty">没有可发送的文档</div>
+              ) : (
+                <div className="doc-pick-list">
+                  {docPick.map((d) => (
+                    <button
+                      type="button"
+                      key={d.id}
+                      className="dp-row"
+                      onClick={() => sendDocLink(d)}
+                    >
+                      <i className="doc-kind-ic">{KIND_ICON[d.kind] ?? "📄"}</i>
+                      <span className="dp-title">{d.title || "未命名"}</span>
+                      <time>{d.updated_at?.slice(0, 10)}</time>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <button type="button" className="ghost" onClick={() => setDocPick(null)}>
+                取消
+              </button>
+            </div>
+          </div>
         )}
         {viewer && (
           <div

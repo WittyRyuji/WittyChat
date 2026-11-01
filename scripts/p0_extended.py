@@ -327,6 +327,15 @@ mm = json.loads(b)
 check("flags persisted", mm.get("is_starred") is True and mm.get("is_read") is False,
       f"star={mm.get('is_starred')} read={mm.get('is_read')}")
 
+# bulk mark-all-read on the inbox folder (right-click "全部已读" backend)
+st, b = req("POST", f"/api/v1/mail/folders/{f_p['inbox']['id']}/read-all", None, p0x)
+check("mail folder read-all", st == 200, str(st))
+st, b = req("GET", f"/api/v1/mail/messages/{mid}", None, p0x)
+check("mail read-all applied", json.loads(b).get("is_read") is True, str(st))
+# outsider cannot mark another user's folder
+st, b = req("POST", f"/api/v1/mail/folders/{f_p['inbox']['id']}/read-all", None, alice)
+check("mail read-all denied to stranger", st in (403, 404), str(st))
+
 # move: inbox -> spam -> inbox -> trash -> purge
 for kind, expect in [("spam", True), ("inbox", True), ("trash", True)]:
     st, b = req("POST", f"/api/v1/mail/messages/{mid}/move",
@@ -640,6 +649,36 @@ st, b = req("GET", f"/api/v1/docs/{cdoc_id}", None, p0x)
 check("conv doc member access", st == 200, str(st))
 st, b = req("GET", f"/api/v1/docs/{cdoc_id}", None, admin)
 check("conv doc denied to outsider", st == 403, str(st))
+
+# ---- doc kinds: sheet/slide accepted, bad kind rejected ----
+st, b = req("POST", "/api/v1/docs", {"title": "p0x-sheet", "kind": "sheet"}, alice)
+sheet_id = json.loads(b).get("id")
+check("doc create sheet kind", st == 200 and json.loads(b).get("kind") == "sheet", str(st))
+st, b = req("POST", "/api/v1/docs", {"title": "p0x-slide", "kind": "slide"}, alice)
+slide_id = json.loads(b).get("id")
+check("doc create slide kind", st == 200 and json.loads(b).get("kind") == "slide", str(st))
+st, b = req("POST", "/api/v1/docs", {"title": "p0x-badkind", "kind": "pdf"}, alice)
+check("doc bad kind rejected", st in (400, 403, 422), str(st))
+
+# ---- conv docs panel listing: member sees bound docs, outsider 403 ----
+st, b = req("GET", f"/api/v1/conversations/{conv}/docs", None, p0x)
+check("conv docs list member", st == 200
+      and any(d.get("id") == cdoc_id for d in json.loads(b).get("docs", [])), str(st))
+st, b = req("GET", f"/api/v1/conversations/{conv}/docs", None, admin)
+check("conv docs denied to outsider", st == 403, str(st))
+
+# ---- doc delete: member-without-admin 403, owner 204, gone after ----
+st, b = req("POST", "/api/v1/docs", {"title": "p0x-deldoc", "conv_id": conv}, alice)
+del_id = json.loads(b).get("id")
+st, b = req("DELETE", f"/api/v1/docs/{del_id}", None, p0x)
+check("doc delete member denied", st == 403, str(st))
+st, b = req("DELETE", f"/api/v1/docs/{del_id}", None, alice)
+check("doc delete owner", st == 204, str(st))
+st, b = req("GET", f"/api/v1/docs/{del_id}", None, alice)
+check("doc gone after delete", st in (403, 404), str(st))
+for _id, _nm in [(sheet_id, "sheet"), (slide_id, "slide")]:
+    st, _b = req("DELETE", f"/api/v1/docs/{_id}", None, alice)
+    check(f"doc delete {_nm}", st == 204, str(st))
 
 # doc WS relay: handshake frames + update persist + late-join replay
 try:

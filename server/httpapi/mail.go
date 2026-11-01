@@ -22,6 +22,7 @@ func registerMail(mux *http.ServeMux, d *Deps) {
 	mux.HandleFunc("GET /api/v1/mail/messages/{id}", d.mailGet)
 	mux.HandleFunc("POST /api/v1/mail/send", d.mailSend)
 	mux.HandleFunc("POST /api/v1/mail/messages/{id}/flags", d.mailFlags)
+	mux.HandleFunc("POST /api/v1/mail/folders/{id}/read-all", d.mailReadAll)
 	mux.HandleFunc("POST /api/v1/mail/messages/{id}/move", d.mailMove)
 	mux.HandleFunc("DELETE /api/v1/mail/messages/{id}", d.mailDelete)
 	mux.HandleFunc("GET /api/v1/mail/addresses", d.mailAddresses)
@@ -173,6 +174,44 @@ func (d *Deps) mailFlags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// mailReadAll — POST /api/v1/mail/folders/{id}/read-all: mark every
+// unread message in the folder read in one shot (context-menu action).
+func (d *Deps) mailReadAll(w http.ResponseWriter, r *http.Request) {
+	uid, ok := d.mailUser(w, r)
+	if !ok {
+		return
+	}
+	fid, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "bad folder", http.StatusBadRequest)
+		return
+	}
+	// Folder must belong to the user — the UPDATE is owner-scoped anyway,
+	// but a wrong id should 404 rather than silently touch nothing.
+	folders, err := d.Mail.Folders(r.Context(), uid)
+	if err != nil {
+		http.Error(w, "failed", http.StatusInternalServerError)
+		return
+	}
+	owns := false
+	for _, f := range folders {
+		if f.ID == fid {
+			owns = true
+			break
+		}
+	}
+	if !owns {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	n, err := d.Mail.MarkAllRead(r.Context(), uid, fid)
+	if err != nil {
+		http.Error(w, "failed", http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"marked": n})
 }
 
 func (d *Deps) mailMove(w http.ResponseWriter, r *http.Request) {

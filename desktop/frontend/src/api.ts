@@ -390,6 +390,8 @@ export const mailApi = {
       ...(read !== undefined ? { read } : {}),
       ...(starred !== undefined ? { starred } : {}),
     }),
+  readAll: (folderId: string) =>
+    req<{ marked: number }>("POST", `/api/v1/mail/folders/${folderId}/read-all`),
   move: (id: string, folder: string) => req("POST", `/api/v1/mail/messages/${id}/move`, { folder }),
   del: (id: string) => req("DELETE", `/api/v1/mail/messages/${id}`),
   upload: async (file: File) => {
@@ -435,6 +437,7 @@ export function newClientMsgId(): string {
 export interface DocInfo {
   id: string;
   title: string;
+  kind: "doc" | "sheet" | "slide";
   owner: string;
   conv_id?: string | null;
   created_at: string;
@@ -444,10 +447,17 @@ export interface DocInfo {
 
 export const docsApi = {
   list: () => req<{ docs: DocInfo[] }>("GET", "/api/v1/docs"),
-  create: (title: string, convId?: string) =>
-    req<DocInfo>("POST", "/api/v1/docs", { title, ...(convId ? { conv_id: convId } : {}) }),
+  create: (title: string, kind: "doc" | "sheet" | "slide" = "doc", convId?: string) =>
+    req<DocInfo>("POST", "/api/v1/docs", {
+      title,
+      kind,
+      ...(convId ? { conv_id: convId } : {}),
+    }),
   get: (id: string) => req<DocInfo>("GET", `/api/v1/docs/${id}`),
   rename: (id: string, title: string) => req("POST", `/api/v1/docs/${id}/rename`, { title }),
+  del: (id: string) => req("DELETE", `/api/v1/docs/${id}`),
+  convDocs: (convId: string) =>
+    req<{ docs: DocInfo[] }>("GET", `/api/v1/conversations/${convId}/docs`),
 };
 
 // docWsBase is the y-websocket serverUrl: the provider appends

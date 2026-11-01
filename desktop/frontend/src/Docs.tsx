@@ -1,20 +1,17 @@
-// Native collaborative docs (Feishu-style): left list + TipTap editor
-// synced over /ws/doc/{id} via Yjs. Awareness drives presence chips and
-// peer carets; the Go relay persists every update for late joiners.
+// Native collaborative docs hub (Feishu-style): left list + kind-aware
+// editor (rich text / sheet / slide), all synced over /ws/doc/{id} via
+// Yjs. Awareness drives presence chips; the Go relay persists updates.
 //
-// 原生协同文档（飞书式）：左列表 + TipTap 编辑器，经 /ws/doc/{id} 走
-// Yjs 同步；awareness 驱动在线徽章与对端光标；Go 中继逐条落库供回放。
-import Collaboration from "@tiptap/extension-collaboration";
-import CollaborationCursor from "@tiptap/extension-collaboration-cursor";
-import { EditorContent, useEditor } from "@tiptap/react";
-import StarterKit from "@tiptap/starter-kit";
-import { useEffect, useMemo, useState } from "react";
-import { WebsocketProvider } from "y-websocket";
-import * as Y from "yjs";
-import { type DocInfo, docsApi, docWsBase, getToken, type UserPublic } from "./api";
+// 原生协同文档（飞书式）：左列表 + 按类型分发编辑器（富文本/表格/演示），
+// 统一走 /ws/doc/{id} Yjs 同步；awareness 驱动在线徽章；中继逐条落库。
+import { useEffect, useMemo, useRef, useState } from "react";
+import { type DocInfo, docsApi, type UserPublic } from "./api";
+import DocTextEditor from "./DocTextEditor";
+import SheetEditor from "./SheetEditor";
+import SlideEditor from "./SlideEditor";
+import { useDocConn } from "./useDocConn";
 
-// Peer caret color — stable per user id, shared palette with group avatars.
-// 对端光标颜色：按用户 id 定 hash 取色，同人同色。
+// Peer color — stable per user id. 对端颜色按用户 id 哈希取色，同人同色。
 const CURSOR_COLORS = [
   "#7c5cfc",
   "#1f9cf0",
@@ -32,10 +29,16 @@ export function cursorColor(id: string): string {
   return CURSOR_COLORS[h % CURSOR_COLORS.length];
 }
 
-interface PeerUser {
-  name?: string;
-  color?: string;
-}
+export const KIND_LABEL: Record<string, string> = {
+  doc: "文档",
+  sheet: "表格",
+  slide: "演示",
+};
+export const KIND_ICON: Record<string, string> = {
+  doc: "📄",
+  sheet: "📊",
+  slide: "🖼",
+};
 
 export function Docs({
   me,
@@ -48,7 +51,10 @@ export function Docs({
 }) {
   const [docs, setDocs] = useState<DocInfo[] | null>(null);
   const [activeId, setActiveId] = useState(focusId ?? "");
+  const [kindFilter, setKindFilter] = useState("");
   const [err, setErr] = useState("");
+  const [createMenu, setCreateMenu] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   const refresh = () =>
     docsApi
@@ -68,16 +74,42 @@ export function Docs({
     }
   }, [focusId, onFocused]);
 
-  const active = docs?.find((d) => d.id === activeId);
+  // click-outside closes the create menu
+  useEffect(() => {
+    if (!createMenu) return;
+    const close = (e: MouseEvent) => {
+      if (!menuRef.current?.contains(e.target as Node)) setCreateMenu(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [createMenu]);
 
-  const createDoc = () => {
+  const active = docs?.find((d) => d.id === activeId);
+  const shown = useMemo(
+    () => (docs ?? []).filter((d) => !kindFilter || d.kind === kindFilter),
+    [docs, kindFilter]
+  );
+
+  const createDoc = (kind: "doc" | "sheet" | "slide") => {
+    setCreateMenu(false);
     docsApi
-      .create("未命名文档")
+      .create(`未命名${KIND_LABEL[kind]}`, kind)
       .then((d) => {
         setDocs((l) => (l ? [d, ...l] : [d]));
         setActiveId(d.id);
       })
-      .catch(() => setErr("新建文档失败"));
+      .catch(() => setErr("新建失败"));
+  };
+
+  const delDoc = (d: DocInfo) => {
+    if (!window.confirm(`删除「${d.title || "未命名"}」？删除后不可恢复。`)) return;
+    docsApi
+      .del(d.id)
+      .then(() => {
+        setDocs((l) => l?.filter((x) => x.id !== d.id) ?? l);
+        if (activeId === d.id) setActiveId("");
+      })
+      .catch(() => setErr("删除失败：只有属主或群主可删"));
   };
 
   return (
@@ -85,9 +117,36 @@ export function Docs({
       <aside className="doc-list">
         <div className="doc-list-head">
           <b>文档</b>
-          <button type="button" className="ghost sm" onClick={createDoc}>
-            ＋新建
-          </button>
+          <div className="rel" ref={menuRef}>
+            <button type="button" className="ghost sm" onClick={() => setCreateMenu((v) => !v)}>
+              ＋新建 ▾
+            </button>
+            {createMenu && (
+              <div className="menu">
+                <button type="button" onClick={() => createDoc("doc")}>
+                  📄 文档
+                </button>
+                <button type="button" onClick={() => createDoc("sheet")}>
+                  📊 表格
+                </button>
+                <button type="button" onClick={() => createDoc("slide")}>
+                  🖼 演示
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="doc-kind-tabs">
+          {(["", "doc", "sheet", "slide"] as const).map((k) => (
+            <button
+              type="button"
+              key={k || "all"}
+              className={`kind-tab${kindFilter === k ? " active" : ""}`}
+              onClick={() => setKindFilter(k)}
+            >
+              {k === "" ? "全部" : KIND_LABEL[k]}
+            </button>
+          ))}
         </div>
         {err && (
           <button type="button" className="errbar" onClick={() => setErr("")}>
@@ -96,116 +155,76 @@ export function Docs({
         )}
         {docs === null ? (
           <div className="empty">加载中…</div>
-        ) : docs.length === 0 ? (
+        ) : shown.length === 0 ? (
           <div className="empty">还没有文档，点「＋新建」开始</div>
         ) : (
-          docs.map((d) => (
-            <button
-              type="button"
-              key={d.id}
-              className={`doc-row ${d.id === activeId ? "active" : ""}`}
-              onClick={() => setActiveId(d.id)}
-            >
-              <span className="doc-row-title">{d.title || "未命名文档"}</span>
-              <span className="doc-row-meta">
-                {d.conv_id && <i className="doc-tag">群文档</i>}
-                {d.editors > 0 && <i className="doc-live">{d.editors} 人在线</i>}
-                <time>{d.updated_at?.slice(0, 10)}</time>
-              </span>
-            </button>
+          shown.map((d) => (
+            <div key={d.id} className={`doc-row ${d.id === activeId ? "active" : ""}`}>
+              <button type="button" className="doc-row-main" onClick={() => setActiveId(d.id)}>
+                <span className="doc-row-title">
+                  <i className="doc-kind-ic">{KIND_ICON[d.kind] ?? "📄"}</i>
+                  {d.title || "未命名"}
+                </span>
+                <span className="doc-row-meta">
+                  {d.conv_id && <i className="doc-tag">群</i>}
+                  {d.editors > 0 && <i className="doc-live">{d.editors} 人在线</i>}
+                  <time>{d.updated_at?.slice(0, 10)}</time>
+                </span>
+              </button>
+              <button type="button" className="doc-row-del" title="删除" onClick={() => delDoc(d)}>
+                ✕
+              </button>
+            </div>
           ))
         )}
       </aside>
       {active ? (
-        <DocEditor
+        <DocEditorPane
           key={active.id}
           me={me}
           doc={active}
           onRenamed={(t) =>
             setDocs((l) => l?.map((x) => (x.id === active.id ? { ...x, title: t } : x)) ?? l)
           }
+          onDeleted={() => {
+            setDocs((l) => l?.filter((x) => x.id !== active.id) ?? l);
+            setActiveId("");
+          }}
         />
       ) : (
         <div className="pane">
-          <div className="empty">从左侧选择一篇文档，或新建一篇与成员实时协作</div>
+          <div className="empty">从左侧选择一个文件，或新建文档 / 表格 / 演示与成员实时协作</div>
         </div>
       )}
     </div>
   );
 }
 
-function DocEditor({
+function DocEditorPane({
   me,
   doc,
   onRenamed,
+  onDeleted,
 }: {
   me: UserPublic;
   doc: DocInfo;
   onRenamed: (title: string) => void;
+  onDeleted: () => void;
 }) {
   const [title, setTitle] = useState(doc.title);
-  const [peers, setPeers] = useState<PeerUser[]>([]);
-  const [connected, setConnected] = useState(false);
-
-  // One Y.Doc + one provider per mounted editor (parent keys by doc.id).
-  const [{ ydoc, provider }] = useState(() => {
-    const y = new Y.Doc();
-    const p = new WebsocketProvider(docWsBase(), doc.id, y, {
-      params: { token: getToken() },
-    });
-    return { ydoc: y, provider: p };
-  });
-
-  useEffect(
-    () => () => {
-      provider.destroy();
-      ydoc.destroy();
-    },
-    [provider, ydoc]
-  );
-
-  useEffect(() => {
-    const onSync = (s: boolean) => setConnected(s);
-    const onStatus = ({ status }: { status: string }) => setConnected(status === "connected");
-    provider.on("sync", onSync);
-    provider.on("status", onStatus);
-    return () => {
-      provider.off("sync", onSync);
-      provider.off("status", onStatus);
-    };
-  }, [provider]);
-
-  useEffect(() => {
-    const aw = provider.awareness;
-    const onChange = () => {
-      const states = [...aw.getStates().values()] as { user?: PeerUser }[];
-      setPeers(states.map((s) => s.user ?? {}).filter((u) => u.name));
-    };
-    aw.on("change", onChange);
-    onChange();
-    return () => aw.off("change", onChange);
-  }, [provider]);
-
+  const { ydoc, provider, peers, connected } = useDocConn(doc.id);
   const user = useMemo(
-    () => ({ name: me.display_name || me.email, color: cursorColor(me.id) }),
+    () => ({ name: me.display_name || me.email || me.id, color: cursorColor(me.id) }),
     [me]
   );
 
-  const editor = useEditor(
-    {
-      extensions: [
-        StarterKit.configure({ history: false }),
-        Collaboration.configure({ document: ydoc }),
-        CollaborationCursor.configure({ provider, user }),
-      ],
-    },
-    []
-  );
-
-  useEffect(() => () => editor?.destroy(), [editor]);
+  // publish our cursor identity into awareness (editors refine with cell/slide)
+  useEffect(() => {
+    provider.awareness.setLocalStateField("user", user);
+  }, [provider, user]);
 
   const commitTitle = () => {
-    const t = title.trim() || "未命名文档";
+    const t = title.trim() || "未命名";
     setTitle(t);
     if (t !== doc.title) {
       docsApi
@@ -215,16 +234,25 @@ function DocEditor({
     }
   };
 
+  const del = () => {
+    if (!window.confirm(`删除「${title || "未命名"}」？删除后不可恢复。`)) return;
+    docsApi
+      .del(doc.id)
+      .then(onDeleted)
+      .catch(() => {});
+  };
+
   return (
     <div className="doc-editor-pane">
       <header className="doc-editor-head">
+        <i className="doc-kind-ic">{KIND_ICON[doc.kind] ?? "📄"}</i>
         <input
           className="doc-title"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           onBlur={commitTitle}
           onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
-          placeholder="未命名文档"
+          placeholder="未命名"
         />
         <span className={`doc-conn ${connected ? "on" : ""}`}>
           {connected ? "已连接" : "连接中…"}
@@ -238,77 +266,16 @@ function DocEditor({
             ))}
           </span>
         )}
+        <button type="button" className="ghost danger sm" title="删除" onClick={del}>
+          删除
+        </button>
       </header>
-      <Toolbar editor={editor} />
-      <div className="doc-editor-scroll">
-        <EditorContent editor={editor} className="doc-editor" />
-      </div>
-    </div>
-  );
-}
-
-// Minimal formatting toolbar — 常用排版按钮。
-function Toolbar({ editor }: { editor: ReturnType<typeof useEditor> }) {
-  if (!editor) return null;
-  const btn = (label: string, active: boolean, onClick: () => void, title?: string) => (
-    <button
-      type="button"
-      title={title ?? label}
-      className={`doc-tb ${active ? "on" : ""}`}
-      onMouseDown={(e) => {
-        e.preventDefault(); // keep editor selection
-        onClick();
-      }}
-    >
-      {label}
-    </button>
-  );
-  return (
-    <div className="doc-toolbar">
-      {btn("B", editor.isActive("bold"), () => editor.chain().focus().toggleBold().run(), "加粗")}
-      {btn(
-        "I",
-        editor.isActive("italic"),
-        () => editor.chain().focus().toggleItalic().run(),
-        "斜体"
-      )}
-      {btn(
-        "S",
-        editor.isActive("strike"),
-        () => editor.chain().focus().toggleStrike().run(),
-        "删除线"
-      )}
-      <span className="doc-tb-sep" />
-      {btn("H1", editor.isActive("heading", { level: 1 }), () =>
-        editor.chain().focus().toggleHeading({ level: 1 }).run()
-      )}
-      {btn("H2", editor.isActive("heading", { level: 2 }), () =>
-        editor.chain().focus().toggleHeading({ level: 2 }).run()
-      )}
-      <span className="doc-tb-sep" />
-      {btn(
-        "•",
-        editor.isActive("bulletList"),
-        () => editor.chain().focus().toggleBulletList().run(),
-        "无序列表"
-      )}
-      {btn(
-        "1.",
-        editor.isActive("orderedList"),
-        () => editor.chain().focus().toggleOrderedList().run(),
-        "有序列表"
-      )}
-      {btn(
-        "❝",
-        editor.isActive("blockquote"),
-        () => editor.chain().focus().toggleBlockquote().run(),
-        "引用"
-      )}
-      {btn(
-        "</>",
-        editor.isActive("codeBlock"),
-        () => editor.chain().focus().toggleCodeBlock().run(),
-        "代码块"
+      {doc.kind === "sheet" ? (
+        <SheetEditor ydoc={ydoc} provider={provider} me={me} />
+      ) : doc.kind === "slide" ? (
+        <SlideEditor ydoc={ydoc} provider={provider} me={me} />
+      ) : (
+        <DocTextEditor ydoc={ydoc} provider={provider} me={me} />
       )}
     </div>
   );

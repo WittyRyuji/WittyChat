@@ -303,6 +303,19 @@ func (s *Store) SetFlags(ctx context.Context, user, id uuid.UUID, read, starred 
 	return nil
 }
 
+// MarkAllRead marks every unread message in one of the user's folders.
+// 把某文件夹内未读邮件一次全部置为已读。
+func (s *Store) MarkAllRead(ctx context.Context, user, folder uuid.UUID) (int64, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE mail_messages SET is_read=true
+		 WHERE owner_user_id=$1 AND folder_id=$2 AND NOT is_read`,
+		user, folder)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (s *Store) Move(ctx context.Context, user, id, folder uuid.UUID) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE mail_messages SET folder_id=$1 WHERE id=$2 AND owner_user_id=$3`,
