@@ -4,6 +4,7 @@ import {
   api2,
   type ConversationInfo,
   connectWS,
+  docsApi,
   isOfficeFile,
   type MemberInfo,
   type MessageSearchHit,
@@ -14,10 +15,20 @@ import {
 } from "./api";
 import { Avatar, GroupAvatar } from "./avatar";
 import { Contacts } from "./Contacts";
+import { Docs } from "./Docs";
 import { JoinGroupDialog, MembersPanel, NewGroupDialog } from "./dialogs";
 import { EMOJI_GROUPS } from "./emoji";
 import { HR } from "./HR";
-import { IconChat, IconContacts, IconGear, IconHR, IconMail, IconSearch, IconZen } from "./icons";
+import {
+  IconChat,
+  IconContacts,
+  IconDoc,
+  IconGear,
+  IconHR,
+  IconMail,
+  IconSearch,
+  IconZen,
+} from "./icons";
 import { Mail } from "./Mail";
 import { Md } from "./md";
 import { Settings } from "./Settings";
@@ -213,9 +224,11 @@ export function Chat({
     }, 250);
     return () => clearTimeout(t);
   }, [searchQ]);
-  const [view, setView] = useState<"chat" | "contacts" | "mail" | "zen" | "hr" | "settings">(
-    "chat"
-  );
+  const [view, setView] = useState<
+    "chat" | "contacts" | "mail" | "docs" | "zen" | "hr" | "settings"
+  >("chat");
+  // Doc to open when entering the docs view (set by conv "＋文档" / doc link clicks).
+  const [docsFocus, setDocsFocus] = useState("");
   const [officeOn, setOfficeOn] = useState(false);
   useEffect(() => {
     api2.officeEnabled().then(setOfficeOn);
@@ -497,6 +510,54 @@ export function Chat({
     }
   };
 
+  // Feishu-style conv doc: create a doc bound to this conv, drop a
+  // clickable link message, then open the editor in the docs view.
+  // 飞书式会话文档：建绑定文档→发可点击的文档链接消息→跳到文档页编辑。
+  const createConvDoc = async () => {
+    if (!activeId) return;
+    try {
+      const d = await docsApi.create("未命名文档", activeId);
+      const op = await api.send(
+        activeId,
+        newClientMsgId(),
+        `📄 [${d.title}](#doc/${d.id})`
+      );
+      // Same merge as send(): the link must be visible on return without
+      // waiting for the next ops delta. 与 send 一致把 op 合入本地状态。
+      setStates((prev) => {
+        const c = prev[activeId] ?? { ops: [], watermark: 0, hasOlder: true, loaded: true };
+        if (c.ops.some((o) => o.op_seq === op.op_seq)) return prev;
+        return {
+          ...prev,
+          [activeId]: {
+            ...c,
+            ops: [...c.ops, op].sort((a, b) => a.op_seq - b.op_seq),
+            watermark: Math.max(c.watermark, op.op_seq),
+          },
+        };
+      });
+      refreshDirectory();
+      setDocsFocus(d.id);
+      setView("docs");
+    } catch {
+      setErr("新建文档失败");
+    }
+  };
+
+  // In-message doc links render as <a href="#doc/{id}"> — intercept and
+  // open in-app instead of navigating the WebView.
+  // 消息内文档链接是 #doc/{id}——拦截后在应用内打开，不做 WebView 导航。
+  const onOpsClick = (e: React.MouseEvent) => {
+    const a = (e.target as HTMLElement).closest?.("a[href^='#doc/']");
+    if (!a) return;
+    e.preventDefault();
+    const id = (a.getAttribute("href") ?? "").slice(5);
+    if (id) {
+      setDocsFocus(id);
+      setView("docs");
+    }
+  };
+
   const recall = async (seq: number) => {
     try {
       await api.recall(activeId, seq);
@@ -623,6 +684,7 @@ export function Chat({
       <div className="app">
         <Rail view={view} setView={setView} logo={wsName} logoUrl={wsLogo} />
         {view === "mail" && <Mail />}
+        {view === "docs" && <Docs me={me} focusId={docsFocus} onFocused={() => setDocsFocus("")} />}
         {view === "contacts" && (
           <Contacts
             me={me}
@@ -742,8 +804,16 @@ export function Chat({
                 {typingHere.length > 0 && (
                   <span className="typing">{typingHere.join("、")} 正在输入…</span>
                 )}
+                <button
+                  type="button"
+                  className="ghost right"
+                  title="新建协同文档（全员可编辑）"
+                  onClick={createConvDoc}
+                >
+                  ＋文档
+                </button>
                 {active.kind === "group" && (
-                  <button type="button" className="ghost right" onClick={() => setModal("members")}>
+                  <button type="button" className="ghost" onClick={() => setModal("members")}>
                     成员
                   </button>
                 )}
@@ -753,7 +823,8 @@ export function Chat({
                   {err} ✕
                 </button>
               )}
-              <div className="ops" ref={scrollRef} onScroll={onScroll}>
+              {/* biome-ignore lint/a11y/noStaticElementInteractions lint/a11y/useKeyWithClickEvents: delegated #doc/ link interception inside rendered messages / 委托拦截消息内文档链接 */}
+              <div className="ops" ref={scrollRef} onScroll={onScroll} onClick={onOpsClick}>
                 {st?.hasOlder && <div className="hint">上滑加载更早的消息</div>}
                 {st?.ops.map((o, i) => {
                   if (o.kind === "reaction") return null; // folded into its target bubble
@@ -1188,7 +1259,7 @@ function Rail({
   logoUrl,
 }: {
   view: string;
-  setView: (v: "chat" | "contacts" | "mail" | "zen" | "hr" | "settings") => void;
+  setView: (v: "chat" | "contacts" | "mail" | "docs" | "zen" | "hr" | "settings") => void;
   logo: string;
   logoUrl?: string;
 }) {
@@ -1196,6 +1267,7 @@ function Rail({
     { key: "chat", title: "消息", icon: <IconChat /> },
     { key: "contacts", title: "通讯录", icon: <IconContacts /> },
     { key: "mail", title: "邮件", icon: <IconMail /> },
+    { key: "docs", title: "文档", icon: <IconDoc /> },
     { key: "hr", title: "人力", icon: <IconHR /> },
     { key: "zen", title: "Zen", icon: <IconZen /> },
   ] as const;

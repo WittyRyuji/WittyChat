@@ -619,5 +619,73 @@ else:
     st, _ = req_noredir(f"/office/open?obj={png_obj}&token={alice}")
     check("office open non-doc 400", st == 400, str(st))
 
+# ================= collaborative docs / 协同文档 =================
+st, b = req("POST", "/api/v1/docs", {"title": "p0x-doc"}, alice)
+check("doc create", st == 200 and json.loads(b).get("id"), str(st))
+doc_id = json.loads(b).get("id") if st == 200 else None
+st, b = req("GET", "/api/v1/docs", None, alice)
+check("doc list", st == 200 and any(d.get("id") == doc_id for d in json.loads(b).get("docs", [])))
+st, b = req("POST", f"/api/v1/docs/{doc_id}/rename", {"title": "p0x-doc-2"}, alice)
+check("doc rename", st == 204, str(st))
+st, b = req("GET", f"/api/v1/docs/{doc_id}", None, p0x)
+check("doc standalone denied to stranger", st == 403, str(st))
+st, b = req("GET", f"/api/v1/docs/{doc_id}", None, alice)
+check("doc get owner", st == 200 and json.loads(b).get("title") == "p0x-doc-2", str(st))
+
+# conv-bound doc: visible to conv members (p0x), denied to outsiders (admin)
+st, b = req("POST", "/api/v1/docs", {"title": "p0x-convdoc", "conv_id": conv}, alice)
+check("conv doc create", st == 200, str(st))
+cdoc_id = json.loads(b).get("id") if st == 200 else None
+st, b = req("GET", f"/api/v1/docs/{cdoc_id}", None, p0x)
+check("conv doc member access", st == 200, str(st))
+st, b = req("GET", f"/api/v1/docs/{cdoc_id}", None, admin)
+check("conv doc denied to outsider", st == 403, str(st))
+
+# doc WS relay: handshake frames + update persist + late-join replay
+try:
+    import websocket as _wsm
+    def _vu(n):
+        out = bytearray()
+        while n >= 0x80:
+            out.append((n & 0x7F) | 0x80); n >>= 7
+        out.append(n); return bytes(out)
+    def _vb(d):
+        return _vu(len(d)) + d
+    wsa = _wsm.create_connection(
+        f"ws://localhost:8080/ws/doc/{cdoc_id}?token={alice}", timeout=5)
+    f1 = wsa.recv()
+    check("doc ws handshake frame", isinstance(f1, (bytes, str)) and len(f1) > 0, type(f1).__name__)
+    # sync update frame: msgType=0, sub=2, payload=fake update blob
+    wsa.send(_vu(0) + _vu(2) + _vb(b"p0x-fake-upd"), _wsm.ABNF.OPCODE_BINARY)
+    wsa.close()
+    time.sleep(0.3)
+    wsb = _wsm.create_connection(
+        f"ws://localhost:8080/ws/doc/{cdoc_id}?token={p0x}", timeout=5)
+    wsb.settimeout(2)
+    got = b""
+    for _ in range(10):
+        try:
+            got += wsb.recv()
+        except Exception:
+            break
+        if b"p0x-fake-upd" in got:
+            break
+    check("doc ws update persisted+replayed", b"p0x-fake-upd" in got, str(len(got)))
+    wsb.close()
+    try:
+        _wsm.create_connection(
+            f"ws://localhost:8080/ws/doc/{cdoc_id}?token={admin}", timeout=5)
+        check("doc ws denied to outsider", False, "connected")
+    except Exception as e:
+        check("doc ws denied to outsider", "403" in str(e) or "forbidden" in str(e).lower(), str(e)[:60])
+    try:
+        _wsm.create_connection(
+            f"ws://localhost:8080/ws/doc/{cdoc_id}?token=bad", timeout=5)
+        check("doc ws bad token", False, "connected")
+    except Exception as e:
+        check("doc ws bad token", "401" in str(e) or "unauthorized" in str(e).lower(), str(e)[:60])
+except ImportError:
+    print("SKIP doc ws checks (websocket-client not installed)")
+
 print(f"\n{len(passed)} passed, {len(failed)} failed")
 sys.exit(1 if failed else 0)

@@ -47,6 +47,14 @@ export const IconZen = ({ size }: P) => (
   </svg>
 );
 
+export const IconDoc = ({ size }: P) => (
+  <svg {...base(size)} aria-hidden="true">
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+    <path d="M14 2v6h6" />
+    <path d="M8 13h8M8 17h5" />
+  </svg>
+);
+
 export const IconHR = ({ size }: P) => (
   <svg {...base(size)} aria-hidden="true">
     <rect x="8" y="2" width="8" height="4" rx="1" />

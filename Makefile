@@ -29,6 +29,12 @@ migrate-down: ## Roll back one migration / 回退一步
 dev-up: ## Start dev dependencies (Postgres) / 启动开发依赖
 	docker compose -f deploy/docker-compose.dev.yml up -d
 
+serve: ## Run server with dev defaults (auto-detects OnlyOffice on :8180)
+	./server.exe serve
+
+worker-run:
+	./worker.exe
+
 dev-down:
 	docker compose -f deploy/docker-compose.dev.yml down
 

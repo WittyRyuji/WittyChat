@@ -18,6 +18,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net"
@@ -32,6 +33,7 @@ import (
 	"wittychat/core/audit"
 	"wittychat/core/auth"
 	"wittychat/core/db"
+	"wittychat/core/docs"
 	"wittychat/core/hr"
 	"wittychat/core/im"
 	"wittychat/core/mail"
@@ -88,7 +90,11 @@ func publicURL() string {
 
 // officeConfig wires the OnlyOffice integration from env. Disabled unless
 // WITTYCHAT_ONLYOFFICE_URL is set — the docs container is a separate
-// docker service (deploy/docker-compose*.yml).
+// docker service (deploy/docker-compose*.yml). When unset, we probe the
+// standard local dev address (localhost:8180 healthcheck) so `docker
+// compose up onlyoffice` + `server serve` just works without env fiddling.
+// 未配置 URL 时探测本地开发地址（healthcheck 必须返回 true，不误伤其它
+// 8180 服务）；探测到则按 dev 默认 JWT 密钥启用，compose dev 默认值一致。
 //
 //	WITTYCHAT_ONLYOFFICE_URL            browser-facing docs base (api.js)
 //	WITTYCHAT_ONLYOFFICE_JWT_SECRET     shared HS256 secret (recommended)
@@ -98,16 +104,37 @@ func publicURL() string {
 //	                                    (default = DOCS_URL; compose: http://onlyoffice)
 func officeConfig() *httpapi.OfficeConfig {
 	docs := envOr("WITTYCHAT_ONLYOFFICE_URL", "")
+	secret := os.Getenv("WITTYCHAT_ONLYOFFICE_JWT_SECRET")
 	if docs == "" {
-		return nil
+		if !probeDocsServer("http://localhost:8180") {
+			return nil
+		}
+		docs = "http://localhost:8180"
+		if secret == "" {
+			secret = "wittychat-office-dev" // compose dev default
+		}
+		log.Printf("onlyoffice: auto-detected docs server at %s", docs)
 	}
 	fetch := envOr("WITTYCHAT_ONLYOFFICE_INTERNAL_URL", docs)
 	return &httpapi.OfficeConfig{
 		DocsURL:      docs,
-		JWTSecret:    []byte(os.Getenv("WITTYCHAT_ONLYOFFICE_JWT_SECRET")),
+		JWTSecret:    []byte(secret),
 		CallbackBase: envOr("WITTYCHAT_ONLYOFFICE_CALLBACK_BASE", "http://host.docker.internal:8080"),
 		FetchBase:    fetch,
 	}
+}
+
+// probeDocsServer hits /healthcheck — the docs server answers "true".
+// 探活：OnlyOffice /healthcheck 返回 "true"，其它服务不会误配。
+func probeDocsServer(base string) bool {
+	cli := &http.Client{Timeout: 2 * time.Second}
+	res, err := cli.Get(base + "/healthcheck")
+	if err != nil {
+		return false
+	}
+	defer func() { _ = res.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 64))
+	return res.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "true"
 }
 
 func openDB() *pgxpool.Pool {
@@ -162,6 +189,7 @@ func cmdServe() {
 		Mail:      mail.NewStore(pool, envOr("WITTYCHAT_MAIL_DOMAIN", "wittyloong.com")),
 		Agents:    agents.NewStore(pool),
 		HR:        hr.New(pool),
+		Docs:      docs.New(pool, imStore.IsMember),
 		Office:    officeConfig(),
 	}
 

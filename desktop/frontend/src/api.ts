@@ -427,6 +427,38 @@ export function newClientMsgId(): string {
   return crypto.randomUUID();
 }
 
+// ---- Docs / 协同文档 ----
+// In-app native documents (Feishu-style). REST below manages metadata;
+// realtime editing rides GET /ws/doc/{id} speaking the y-websocket
+// protocol — see docWsBase(). 原生协同文档：REST 管元数据，实时编辑走
+// y-websocket 协议的 /ws/doc/{id}。
+export interface DocInfo {
+  id: string;
+  title: string;
+  owner: string;
+  conv_id?: string | null;
+  created_at: string;
+  updated_at: string;
+  editors: number; // live editor count, relay-provided
+}
+
+export const docsApi = {
+  list: () => req<{ docs: DocInfo[] }>("GET", "/api/v1/docs"),
+  create: (title: string, convId?: string) =>
+    req<DocInfo>("POST", "/api/v1/docs", { title, ...(convId ? { conv_id: convId } : {}) }),
+  get: (id: string) => req<DocInfo>("GET", `/api/v1/docs/${id}`),
+  rename: (id: string, title: string) => req("POST", `/api/v1/docs/${id}/rename`, { title }),
+};
+
+// docWsBase is the y-websocket serverUrl: the provider appends
+// "/{roomname}" — our room name is the doc id → /ws/doc/{id}?token=.
+// docWsBase 即 y-websocket 的 serverUrl：provider 拼 "/{room}"（doc id）。
+export function docWsBase(): string {
+  const proto = location.protocol === "https:" || API_BASE.startsWith("https") ? "wss" : "ws";
+  const host = API_BASE ? new URL(API_BASE).host : location.host;
+  return `${proto}://${host}/ws/doc`;
+}
+
 // ---- HR / 人力 ----
 export interface HRRequest {
   id: string;
