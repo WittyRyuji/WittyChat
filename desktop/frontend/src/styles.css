@@ -2143,6 +2143,7 @@ button.avatar .avatar-img {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  background: var(--bg);
 }
 .doc-editor {
   flex: 1;
@@ -2156,6 +2157,8 @@ button.avatar .avatar-img {
   width: 100%;
   padding: 28px 32px 80px;
   box-sizing: border-box;
+  background: var(--bg2);
+  min-height: 100%;
 }
 .doc-editor-loading {
   padding: 40px;
@@ -2579,4 +2582,78 @@ button.avatar .avatar-img {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
- 
+  white-space: nowrap;
+}
+.dp-main time,
+.dp-row time {
+  font-size: 11px;
+  color: var(--dim);
+  flex-shrink: 0;
+}
+.dp-del {
+  border: none;
+  background: none;
+  color: var(--dim);
+  font-size: 11px;
+  padding: 0 10px;
+  cursor: pointer;
+  opacity: 0;
+}
+.dp-row:hover .dp-del {
+  opacity: 1;
+}
+.dp-del:hover {
+  color: #d83931;
+}
+.dp-resize {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  cursor: col-resize;
+  z-index: 5;
+}
+.dp-resize:hover {
+  background: var(--accent);
+  opacity: 0.3;
+}
+.plus-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px;
+  min-width: 150px;
+  box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+}
+.attach-btn.on {
+  background: var(--bg3);
+  color: var(--accent);
+}
+.ghost.on {
+  background: var(--bg3);
+  color: var(--accent);
+}
+.doc-pick {
+  min-width: 360px;
+}
+.doc-pick-list {
+  max-height: 300px;
+  overflow-y: auto;
+  margin-bottom: 10px;
+}
+.doc-pick .dp-row {
+  border: none;
+  background: none;
+  width: 100%;
+  cursor: pointer;
+}
+.doc-pick .dp-row:hover {
+  background: var(--bg3);
+} 

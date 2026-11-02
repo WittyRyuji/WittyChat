@@ -233,6 +233,10 @@ export function Chat({
   const [docsFocus, setDocsFocus] = useState("");
   const [docsPanel, setDocsPanel] = useState(false); // 群文档侧栏
   const [convDocs, setConvDocs] = useState<DocInfo[] | null>(null);
+  const [panelW, setPanelW] = useState(() => {
+    const v = parseInt(localStorage.getItem("docsPanelW") ?? "", 10);
+    return v >= 200 && v <= 520 ? v : 260;
+  });
   const [plusMenu, setPlusMenu] = useState(false); // 输入框 ＋ 菜单
   const [docPick, setDocPick] = useState<DocInfo[] | null>(null); // 发送文档选择器
   const plusRef = useRef<HTMLDivElement>(null);
@@ -1300,7 +1304,30 @@ export function Chat({
               {/* Feishu-style group docs drawer — shared docs bound to this
                   conv. 群文档侧栏：本群共享的文档/表格/演示。 */}
               {docsPanel && (
-                <aside className="docs-panel">
+                <aside className="docs-panel" style={{ width: panelW }}>
+                  {/* drag-resize handle on the left edge / 左缘拖拽调宽 */}
+                  <div
+                    className="dp-resize"
+                    role="separator"
+                    aria-orientation="vertical"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      const startX = e.clientX;
+                      const startW = panelW;
+                      const move = (ev: MouseEvent) => {
+                        const w = Math.max(200, Math.min(520, startW + (startX - ev.clientX)));
+                        setPanelW(w);
+                      };
+                      const up = (ev: MouseEvent) => {
+                        document.removeEventListener("mousemove", move);
+                        document.removeEventListener("mouseup", up);
+                        const w = Math.max(200, Math.min(520, startW + (startX - ev.clientX)));
+                        localStorage.setItem("docsPanelW", String(w));
+                      };
+                      document.addEventListener("mousemove", move);
+                      document.addEventListener("mouseup", up);
+                    }}
+                  />
                   <div className="dp-head">
                     <b>群文档</b>
                     <button
