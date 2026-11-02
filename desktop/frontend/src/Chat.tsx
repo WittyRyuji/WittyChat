@@ -1155,16 +1155,7 @@ export function Chat({
                           fileInput.current?.click();
                         }}
                       >
-                        📎 上传附件
-                      </button>
-                      <button type="button" onClick={() => createConvDoc("doc")}>
-                        📄 新建文档
-                      </button>
-                      <button type="button" onClick={() => createConvDoc("sheet")}>
-                        📊 新建表格
-                      </button>
-                      <button type="button" onClick={() => createConvDoc("slide")}>
-                        🖼 新建演示
+                        上传附件
                       </button>
                       <button
                         type="button"
@@ -1177,7 +1168,7 @@ export function Chat({
                             .catch(() => setDocPick([]));
                         }}
                       >
-                        🔗 发送已有文档…
+                        发送文档
                       </button>
                     </div>
                   )}
