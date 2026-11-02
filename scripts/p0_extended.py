@@ -275,6 +275,22 @@ check("client thumb upload (owner)", st in (200, 201, 204), str(st))
 st, b = req("POST", f"/api/v1/objects/{img1}/thumb", token=p0x,
             raw=mp, ctype=f"multipart/form-data; boundary={bd}")
 check("thumb upload non-owner denied", st == 403, str(st))
+
+# sticker flow: object uploaded WITHOUT conv binding, then sent as an
+# attachment into the conv — members read it via attachment_refs, not
+# object-level conv_id (this was the broken-GIF-on-recipient bug).
+st, sobj = upload_purpose(alice, "sticker", "st.gif", "image/gif",
+                         b"GIF89a" + uuid.uuid4().bytes[:16])
+check("sticker upload (no conv)", st == 200 and sobj.get("id"), str(st))
+soid = sobj["id"]
+st, b = req("GET", f"/api/v1/objects/{soid}/download?token={p0x}", None)
+check("sticker denied before send", st == 403, str(st))
+st, b = send_msg(alice, conv, "", [soid])
+check("sticker send as attachment", st == 201, str(st))
+st, b = req("GET", f"/api/v1/objects/{soid}/download?token={p0x}", None)
+check("sticker member download via refs", st == 200 and b.startswith(b"GIF89a"), str(st))
+st, b = req("GET", f"/api/v1/objects/{soid}/download?token={admin}", None)
+check("sticker still denied to outsider", st == 403, str(st))
 st, b = req("GET", f"/api/v1/objects/{img1}/thumb?token={p0x}", None)
 check("peer reads thumb", st == 200 and b[:2] == b"\xff\xd8", str(st))
 st, b = req("GET", f"/api/v1/objects/{img1}/thumb", None, admin)

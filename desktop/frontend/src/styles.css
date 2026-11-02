@@ -2657,3 +2657,8 @@ button.avatar .avatar-img {
 .doc-pick .dp-row:hover {
   background: var(--bg3);
 } 
+
+/* conv-head docs button: text-only, bold / 文档按钮：无图标加粗 */
+.ghost.docbtn {
+  font-weight: 600;
+}

@@ -874,11 +874,11 @@ export function Chat({
                 )}
                 <button
                   type="button"
-                  className={`ghost right${docsPanel ? " on" : ""}`}
+                  className={`ghost right docbtn${docsPanel ? " on" : ""}`}
                   title="群文档 / 共享文件"
                   onClick={toggleDocsPanel}
                 >
-                  📑 文档
+                  文档
                 </button>
                 {active.kind === "group" && (
                   <button type="button" className="ghost" onClick={() => setModal("members")}>

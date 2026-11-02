@@ -149,8 +149,10 @@ func (d *Deps) downloadObject(w http.ResponseWriter, r *http.Request) {
 	obj, err := d.Objects.Get(r.Context(), objID, uid)
 	if err != nil {
 		if errors.Is(err, objects.ErrForbidden) &&
-			(d.objectViaMail(r.Context(), objID, uid) || d.objectViaHR(r.Context(), objID, uid)) {
-			// 持有引用该附件的邮件/HR申请即可下载（收件人/发件人/申请人/审批管理员）
+			(d.objectViaMail(r.Context(), objID, uid) ||
+				d.objectViaHR(r.Context(), objID, uid) ||
+				d.objectViaAttachmentRef(r.Context(), objID, uid)) {
+			// 邮件/HR/会话引用任一命中即可下载（收件人、审批人、会话成员）
 			obj, err = d.Objects.Peek(r.Context(), objID)
 		}
 		if err != nil {
@@ -188,6 +190,21 @@ func (d *Deps) objectViaMail(ctx context.Context, objID, uid uuid.UUID) bool {
 	return err == nil && ok
 }
 
+// objectViaAttachmentRef: object is referenced by an op in a conv the user
+// belongs to (stickers + reshared attachments carry no object-level conv_id).
+// objectViaAttachmentRef：对象被用户所在会话的某条消息引用（sticker/转发
+// 附件对象本身不绑 conv）。
+func (d *Deps) objectViaAttachmentRef(ctx context.Context, objID, uid uuid.UUID) bool {
+	var ok bool
+	err := d.Pool.QueryRow(ctx,
+		`SELECT EXISTS(
+			SELECT 1 FROM attachment_refs r
+			JOIN conv_members m ON m.conv_id = r.conv_id AND m.user_id = $2
+			 AND m.left_at IS NULL
+			WHERE r.object_id = $1)`, objID, uid).Scan(&ok)
+	return err == nil && ok
+}
+
 // objectViaHR: object is referenced by an hr_requests payload and the caller
 // is the requester or an admin (approver must read attached receipts).
 // objectViaHR：对象被某 HR 申请引用且请求人是申请人或管理员（审批人需看附件）。
@@ -215,7 +232,9 @@ func (d *Deps) thumbObject(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := d.Objects.Get(r.Context(), objID, uid); err != nil {
 		if errors.Is(err, objects.ErrForbidden) {
-			if !d.objectViaMail(r.Context(), objID, uid) {
+			if !d.objectViaMail(r.Context(), objID, uid) &&
+				!d.objectViaHR(r.Context(), objID, uid) &&
+				!d.objectViaAttachmentRef(r.Context(), objID, uid) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
