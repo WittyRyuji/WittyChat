@@ -112,13 +112,44 @@ export function Mail() {
       .catch((e) => setErr(String(e)));
   }, [activeFolder]);
 
+  const [hasMore, setHasMore] = useState(false);
+  const moreRef = useRef(false); // pagination in-flight guard / 翻页请求去重
+
   const loadMsgs = useCallback(() => {
     if (!activeFolder) return;
     mailApi
-      .messages(activeFolder)
-      .then(setMsgs)
-      .catch(() => setMsgs([]));
+      .messages(activeFolder, 0)
+      .then((ms) => {
+        setMsgs(ms);
+        setHasMore(ms.length === 50); // backend page size / 后端每页 50
+      })
+      .catch(() => {
+        setMsgs([]);
+        setHasMore(false);
+      });
   }, [activeFolder]);
+
+  // Infinite scroll: fetch the next offset page when the list nears its
+  // bottom (unread badge can exceed one page — 未读数可能超过单页 50)。
+  const loadMore = useCallback(() => {
+    if (!activeFolder || moreRef.current) return;
+    moreRef.current = true;
+    mailApi
+      .messages(activeFolder, msgs.length)
+      .then((ms) => {
+        setMsgs((prev) => [...prev, ...ms.filter((m) => !prev.some((p) => p.id === m.id))]);
+        setHasMore(ms.length === 50);
+      })
+      .catch(() => {})
+      .finally(() => {
+        moreRef.current = false;
+      });
+  }, [activeFolder, msgs.length]);
+
+  const onListScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    if (hasMore && el.scrollTop + el.clientHeight >= el.scrollHeight - 80) loadMore();
+  };
 
   // Mount-only: seed folders + pick inbox. activeFolder lives in the callback
   // for the "folders empty → default inbox" path, refire would loop.
@@ -269,7 +300,7 @@ export function Mail() {
             </button>
           </div>
         )}
-        <div className="conv-list mail-list">
+        <div className="conv-list mail-list" onScroll={onListScroll}>
           {msgs.map((m) => (
             <button
               type="button"
@@ -307,6 +338,7 @@ export function Mail() {
             </button>
           ))}
           {msgs.length === 0 && <p className="empty">此文件夹为空</p>}
+          {hasMore && <div className="hint">下拉加载更多…</div>}
         </div>
       </aside>
 

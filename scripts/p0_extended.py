@@ -307,6 +307,19 @@ inbox = mail_list(p0x, f_p["inbox"]["id"])
 hit = [m for m in inbox if m["subject"] == "P0X-Lifecycle"]
 check("mail in recipient inbox", len(hit) == 1)
 mid = hit[0]["id"]
+
+# sent copy must not inflate sender's unread badge (direction='in' only)
+f_a2 = folders(alice)
+sent_unread = f_a2.get("sent", {}).get("unread", 0)
+check("sent folder unread stays 0", sent_unread == 0, f"unread={sent_unread}")
+
+# offset pagination: page 2 shifts the window (regardless of page contents)
+st, b1 = req("GET", f"/api/v1/mail/messages?folder={f_p['inbox']['id']}&offset=0", None, p0x)
+st2, b2 = req("GET", f"/api/v1/mail/messages?folder={f_p['inbox']['id']}&offset=1", None, p0x)
+p1 = json.loads(b1); p2 = json.loads(b2)
+check("mail offset pagination", st == 200 and st2 == 200 and
+      (len(p1) < 2 or p1[1]["id"] == p2[0]["id"]),
+      f"p1={len(p1)} p2={len(p2)}")
 st, b = req("GET", f"/api/v1/mail/messages/{mid}", None, p0x)
 mm = json.loads(b)
 check("mail body + attachment meta",

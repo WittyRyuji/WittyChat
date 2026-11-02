@@ -105,7 +105,8 @@ func (s *Store) Folders(ctx context.Context, user uuid.UUID) ([]Folder, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT f.id,f.kind,f.name,f.position,
 		        (SELECT count(*) FROM mail_messages m
-		          WHERE m.folder_id=f.id AND NOT m.is_read) AS unread
+		          WHERE m.folder_id=f.id AND NOT m.is_read
+		            AND m.direction='in') AS unread
 		 FROM mail_folders f WHERE f.user_id=$1 ORDER BY f.position,f.name`, user)
 	if err != nil {
 		return nil, err
@@ -388,10 +389,12 @@ func (s *Store) Deliver(ctx context.Context, toUser uuid.UUID, folder string,
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO mail_messages
 			 (id,owner_user_id,folder_id,direction,rfc_msgid,thread_id,in_reply_to,
-			  from_addr,to_addrs,cc_addrs,subject,text_body,preview,search_text,sent_at)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+			  from_addr,to_addrs,cc_addrs,subject,text_body,preview,search_text,is_read,sent_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 			id, toUser, fid, or(dir(folder)), nilable(rfcID), thread, nilable(inReplyTo),
-			fromAddr, to, cc, subject, body, preview(body), search, time.Now()); err != nil {
+			fromAddr, to, cc, subject, body, preview(body), search,
+			folder == "sent", // own sent copy never shows as unread / 发件箱副本默认已读
+			time.Now()); err != nil {
 			return err
 		}
 		for _, oid := range attachIDs {
