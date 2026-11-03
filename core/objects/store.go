@@ -186,17 +186,18 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 
 // ReplaceBytes streams new content into the store and re-points an
 // existing object at it — the in-place "save" path for office editing.
-// The new file lands under the object's own date partition at its new
-// sha; the old sha file is left for GC (it may still serve deduped rows).
-// The sha256 unique index means a pathological collision (edited bytes
-// identical to another live object) is reported rather than absorbed.
-// Stale thumbnails are dropped so views don't show pre-edit previews.
+// The new file lands locally under the object's own date partition at its
+// new sha (location flips to local even if the object had been migrated
+// to S3). The prior bytes are never deleted: their location/key is
+// recorded in object_versions for audit and restore. The sha256 unique
+// index means a pathological collision (edited bytes identical to another
+// live object) is reported rather than absorbed. Stale thumbnails go.
 //
 // ReplaceBytes 流式写入新内容并把既有对象重新指过去——在线编辑的
-// 原位保存路径。新文件按新 sha 落在对象自己的日期分区下；旧 sha 文件
-// 留给 GC（可能仍服务去重行）。sha256 唯一索引下的病态冲突（编辑结果
-// 与另一存活对象逐字节相同）上报而非吞掉。旧缩略图清除，避免残留旧预览。
-func (s *Store) ReplaceBytes(ctx context.Context, id uuid.UUID, r io.Reader, mime string, maxBytes int64) (*Object, error) {
+// 原位保存路径。新文件按新 sha 落在本地日期分区（即使原对象已冷迁到 S3
+// 也切回 local）。旧字节永不删除：其位置/键记入 object_versions 供审计与
+// 恢复。sha256 唯一索引下的病态冲突上报而非吞掉。旧缩略图清除。
+func (s *Store) ReplaceBytes(ctx context.Context, id uuid.UUID, r io.Reader, mime string, maxBytes int64, by *uuid.UUID) (*Object, error) {
 	o, err := s.Peek(ctx, id)
 	if err != nil {
 		return nil, err
@@ -234,13 +235,34 @@ func (s *Store) ReplaceBytes(ctx context.Context, id uuid.UUID, r io.Reader, mim
 		mime = o.Mime
 	}
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		// Snapshot the current version before re-pointing. 先记录旧版本。
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO object_versions
+			  (object_id, version, sha256, size_bytes, mime, location, storage_key, replaced_by)
+			SELECT o.id,
+			       COALESCE((SELECT max(v.version) FROM object_versions v WHERE v.object_id=o.id), 0) + 1,
+			       o.sha256, o.size_bytes, COALESCE(o.mime,''), o.location,
+			       COALESCE((SELECT g.storage_key FROM object_segments g
+			                 WHERE g.object_id=o.id AND g.seg_index=0), ''),
+			       $2
+			FROM objects o WHERE o.id=$1 AND o.status<>'deleted'`, id, by); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx,
-			`UPDATE objects SET sha256=$2, size_bytes=$3, mime=$4 WHERE id=$1 AND status<>'deleted'`,
+			`UPDATE objects SET sha256=$2, size_bytes=$3, mime=$4, location='local', segment_count=1
+			 WHERE id=$1 AND status<>'deleted'`,
 			id, sum[:], n, mime); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx,
-			`UPDATE object_segments SET size_bytes=$2, storage_key=$3 WHERE object_id=$1 AND seg_index=0`,
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM object_segments WHERE object_id=$1 AND seg_index>0`, id); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `
+			INSERT INTO object_segments (object_id, seg_index, size_bytes, storage_key)
+			VALUES ($1, 0, $2, $3)
+			ON CONFLICT (object_id, seg_index) DO UPDATE
+			  SET size_bytes=EXCLUDED.size_bytes, storage_key=EXCLUDED.storage_key`,
 			id, n, rel)
 		return err
 	})
@@ -249,7 +271,7 @@ func (s *Store) ReplaceBytes(ctx context.Context, id uuid.UUID, r io.Reader, mim
 		return nil, err
 	}
 	_ = os.Remove(s.ThumbPath(id)) // stale preview must not survive the edit / 旧缩略图不留
-	o.SHA256, o.Size, o.Mime = sum, n, mime
+	o.SHA256, o.Size, o.Mime, o.Location = sum, n, mime, "local"
 	return o, nil
 }
 

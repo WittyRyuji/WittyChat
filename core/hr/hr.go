@@ -100,9 +100,11 @@ func (s *Store) Create(ctx context.Context, kind string, requester uuid.UUID, pa
 }
 
 func scanReq(r *Request) []any {
-	return []any{&r.ID, &r.Kind, &r.Requester, &r.Status, &r.Payload,
+	return []any{
+		&r.ID, &r.Kind, &r.Requester, &r.Status, &r.Payload,
 		&r.DecidedBy, &r.DecidedAt, &r.DecisionNote, &r.CreatedAt,
-		&r.RequesterName, &r.RequesterEmail, &r.DeciderName}
+		&r.RequesterName, &r.RequesterEmail, &r.DeciderName,
+	}
 }
 
 const reqFrom = ` FROM hr_requests r

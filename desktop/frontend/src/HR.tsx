@@ -57,8 +57,9 @@ function AttLinks({ ids, names }: { ids?: string[]; names?: Record<string, strin
                 href={api2.officeEditURL(id)}
                 target="_blank"
                 rel="noreferrer"
+                title="申请附件是不可变记录，只读打开"
               >
-                在线编辑
+                在线查看
               </a>
             )}
           </span>
@@ -89,7 +90,7 @@ function payloadAtts(r: HRRequest): string[] {
 
 // Filenames live alongside the id list so links can show real names and
 // the office-edit affordance can match extensions. 附件文件名随 id 一起
-// 存 payload，链接显示真名、可编辑类型才有「在线编辑」。
+// 存 payload，链接显示真名、办公类型才有「在线查看」（申请附件只读）。
 function payloadAttNames(r: HRRequest): Record<string, string> {
   const v = (r.payload as Record<string, unknown>).attachment_names;
   return v && typeof v === "object" ? (v as Record<string, string>) : {};

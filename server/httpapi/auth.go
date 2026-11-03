@@ -156,6 +156,7 @@ func (d *Deps) logout(ctx context.Context, in *struct {
 		return nil, err
 	}
 	_ = d.Store.RevokeSession(ctx, u.ID, sess.ID)
+	d.docRevalidateUser(ctx, u.ID)
 	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.logout", u.Email, nil, clientIP(in.XForwardedFor))
 	return &struct{}{}, nil
 }
@@ -202,6 +203,7 @@ func (d *Deps) activate(ctx context.Context, in *struct {
 	if err := d.Store.SetPassword(ctx, userID, phc); err != nil {
 		return nil, err
 	}
+	d.docRevalidateUser(ctx, userID) // reset link bumps cred version / 重置会作废旧会话
 	if kind == auth.LinkKindActivation {
 		if err := d.Store.ActivateUser(ctx, userID); err != nil {
 			return nil, err
@@ -277,6 +279,7 @@ func (d *Deps) revokeSession(ctx context.Context, in *struct {
 		}
 		return nil, err
 	}
+	d.docRevalidateUser(ctx, u.ID)
 	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.session.revoke", in.ID, nil, clientIP(in.XForwardedFor))
 	return &struct{}{}, nil
 }

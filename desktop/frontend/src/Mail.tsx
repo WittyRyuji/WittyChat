@@ -114,16 +114,23 @@ export function Mail() {
 
   const [hasMore, setHasMore] = useState(false);
   const moreRef = useRef(false); // pagination in-flight guard / 翻页请求去重
+  // Folder the list currently shows — late responses for another folder
+  // are dropped. 列表当前对应的文件夹；其它文件夹的迟到响应直接丢弃。
+  const folderRef = useRef(activeFolder);
+  folderRef.current = activeFolder;
 
   const loadMsgs = useCallback(() => {
     if (!activeFolder) return;
+    const fid = activeFolder;
     mailApi
-      .messages(activeFolder, 0)
+      .messages(fid, 0)
       .then((ms) => {
+        if (folderRef.current !== fid) return;
         setMsgs(ms);
         setHasMore(ms.length === 50); // backend page size / 后端每页 50
       })
       .catch(() => {
+        if (folderRef.current !== fid) return;
         setMsgs([]);
         setHasMore(false);
       });
@@ -133,10 +140,12 @@ export function Mail() {
   // bottom (unread badge can exceed one page — 未读数可能超过单页 50)。
   const loadMore = useCallback(() => {
     if (!activeFolder || moreRef.current) return;
+    const fid = activeFolder;
     moreRef.current = true;
     mailApi
-      .messages(activeFolder, msgs.length)
+      .messages(fid, msgs.length)
       .then((ms) => {
+        if (folderRef.current !== fid) return;
         setMsgs((prev) => [...prev, ...ms.filter((m) => !prev.some((p) => p.id === m.id))]);
         setHasMore(ms.length === 50);
       })
@@ -444,8 +453,9 @@ export function Mail() {
                         href={api2.officeEditURL(a.object_id)}
                         target="_blank"
                         rel="noreferrer"
+                        title="邮件附件是不可变记录，只读打开"
                       >
-                        在线编辑
+                        在线查看
                       </a>
                     )}
                   </span>

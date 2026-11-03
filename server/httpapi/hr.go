@@ -9,10 +9,10 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
-
 	"wittychat/core/hr"
 	"wittychat/shared/apitypes"
 
@@ -97,6 +97,16 @@ func (d *Deps) hrCreate(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, err
 	}
+	// Attachments become readable by approvers (objectViaHR) — the
+	// requester must be able to read every one they reference.
+	// 附件会对审批人可读——申请人必须先能读其引用的每个对象。
+	objIDs, err := hrAttachmentIDs(in.Body.Payload)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	if err := d.requireReadableObjects(ctx, u.ID, objIDs); err != nil {
+		return nil, huma.Error403Forbidden(err.Error())
+	}
 	r, err := d.HR.Create(ctx, in.Body.Kind, u.ID, in.Body.Payload)
 	if errors.Is(err, hr.ErrBadPayload) {
 		return nil, huma.Error400BadRequest("invalid payload for kind / 载荷不符合类型要求")
@@ -106,6 +116,29 @@ func (d *Deps) hrCreate(ctx context.Context, in *struct {
 	}
 	d.Audit.Log(ctx, &u.ID, "user", "hr.request.create:"+r.Kind, r.ID.String(), nil, clientIP(in.XForwardedFor))
 	return &struct{ Body apitypes.HRRequest }{Body: toHRRequest(r)}, nil
+}
+
+// hrAttachmentIDs extracts payload.attachment_object_ids (any kind).
+// 取载荷中的附件对象 id（任意申请类型）。
+func hrAttachmentIDs(payload json.RawMessage) ([]uuid.UUID, error) {
+	var p struct {
+		IDs []string `json:"attachment_object_ids"`
+	}
+	if len(payload) == 0 {
+		return nil, nil
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return nil, errors.New("invalid payload / 载荷无效")
+	}
+	out := make([]uuid.UUID, 0, len(p.IDs))
+	for _, s := range p.IDs {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			return nil, errors.New("bad attachment id / 附件 id 无效")
+		}
+		out = append(out, id)
+	}
+	return out, nil
 }
 
 func (d *Deps) hrList(ctx context.Context, in *struct {

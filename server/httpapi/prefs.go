@@ -11,7 +11,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-
 	"wittychat/shared/apitypes"
 
 	"github.com/danielgtaylor/huma/v2"

@@ -54,7 +54,7 @@ func TestSignDKIM_BadKey(t *testing.T) {
 
 // Sanity: dkim package imports work and options struct has the fields we use.
 func TestDKIMAPI(t *testing.T) {
-	var _ = dkim.SignOptions{
+	_ = dkim.SignOptions{
 		Domain:   "x.test",
 		Selector: "s1",
 	}

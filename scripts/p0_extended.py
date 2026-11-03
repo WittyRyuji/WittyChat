@@ -291,6 +291,29 @@ st, b = req("GET", f"/api/v1/objects/{soid}/download?token={p0x}", None)
 check("sticker member download via refs", st == 200 and b.startswith(b"GIF89a"), str(st))
 st, b = req("GET", f"/api/v1/objects/{soid}/download?token={admin}", None)
 check("sticker still denied to outsider", st == 403, str(st))
+
+# capability-by-id regression: attaching an object id you cannot read must
+# be rejected on EVERY write path (IM / mail / HR) — otherwise the created
+# reference would grant you download access.
+# 引用越权回归：附上自己读不到的对象 id 必须在所有写入口被拒。
+st, pobj = upload_purpose(alice, "mail", "alice-private.txt", "text/plain",
+                         b"PRIVATE-" + uuid.uuid4().bytes)
+priv = pobj["id"]
+st, b = req("GET", f"/api/v1/objects/{priv}/download?token={p0x}", None)
+check("private object denied to p0x", st == 403, str(st))
+st, b = send_msg(p0x, grp, "", [priv])
+check("IM attach unreadable object 403", st == 403, str(st))
+st, b = req("POST", "/api/v1/mail/send", {"to": [email], "subject": "steal", "body": "x",
+                                          "object_ids": [priv]}, p0x)
+check("mail attach unreadable object 403", st == 403, str(st))
+st, b = req("POST", "/api/v1/hr/requests",
+            {"kind": "expense", "payload": {"category": "travel", "amount_cents": 1,
+                                            "attachment_object_ids": [priv]}}, p0x)
+check("HR attach unreadable object 403", st == 403, str(st))
+st, b = req("GET", f"/api/v1/objects/{priv}/download?token={p0x}", None)
+check("private object still denied after attempts", st == 403, str(st))
+st, b = send_msg(p0x, grp, "", ["not-a-uuid"])
+check("IM attach malformed id 400", st == 400, str(st))
 st, b = req("GET", f"/api/v1/objects/{img1}/thumb?token={p0x}", None)
 check("peer reads thumb", st == 200 and b[:2] == b"\xff\xd8", str(st))
 st, b = req("GET", f"/api/v1/objects/{img1}/thumb", None, admin)
@@ -657,6 +680,50 @@ else:
     st, _ = req_noredir(f"/office/open?obj={png_obj}&token={alice}")
     check("office open non-doc 400", st == 400, str(st))
 
+    # edit vs view: owner's own upload edits; a mail attachment is an
+    # immutable record → view-only for sender AND recipient.
+    st, b = req_noredir(edit_url.replace(BASE, "", 1))
+    check("office owner upload opens in edit mode", b'"mode":"edit"' in b, str(st))
+    st, mobj2 = upload_purpose(alice, "mail", "contract.docx", "application/octet-stream",
+                               b"pk-" + uuid.uuid4().bytes)
+    req("POST", "/api/v1/mail/send", {"to": [email], "subject": "office-record",
+                                     "body": "x", "object_ids": [mobj2["id"]]}, alice)
+    for who, tok in (("recipient", p0x), ("sender", alice)):
+        st, b = req("GET", f"/api/v1/objects/{mobj2['id']}/office-url", None, tok)
+        url = json.loads(b).get("url", "") if st == 200 else ""
+        st, b = req_noredir(url.replace(BASE, "", 1))
+        check(f"office mail record view-only ({who})",
+              st == 200 and b'"mode":"view"' in b and b'"edit":false' in b, str(st))
+
+    # callback JWT: key must name ?obj=, expired tokens rejected, and a
+    # save for a view-only record is refused (no current editor).
+    import base64, hashlib, hmac as _hmac
+    OO_SECRET = os.environ.get("WITTYCHAT_ONLYOFFICE_JWT_SECRET", "wittychat-office-dev").encode()
+    def oo_jwt(claims):
+        enc = lambda o: base64.urlsafe_b64encode(json.dumps(o).encode()).rstrip(b"=")
+        h, p = enc({"alg": "HS256", "typ": "JWT"}), enc(claims)
+        s = base64.urlsafe_b64encode(_hmac.new(OO_SECRET, h + b"." + p, hashlib.sha256).digest()).rstrip(b"=")
+        return (h + b"." + p + b"." + s).decode()
+    def oo_cb(obj_id, claims):
+        r = urllib.request.Request(f"{BASE}/api/v1/office/callback?obj={obj_id}", data=b"{}",
+                                   method="POST", headers={"Authorization": "Bearer " + oo_jwt(claims)})
+        try:
+            resp = urllib.request.urlopen(r, timeout=10)
+            return resp.status, json.loads(resp.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            return e.code, {}
+    now = int(time.time())
+    st, _ = oo_cb(oo_obj, {"payload": {"key": f"{png_obj}-abc", "status": 4}, "exp": now + 60})
+    check("office callback key/obj mismatch 403", st == 403, str(st))
+    st, _ = oo_cb(oo_obj, {"payload": {"key": f"{oo_obj}-abc", "status": 4}, "exp": now - 60})
+    check("office callback expired jwt 403", st == 403, str(st))
+    st, bd = oo_cb(oo_obj, {"payload": {"key": f"{oo_obj}-abc", "status": 4}, "exp": now + 60})
+    check("office callback valid no-op 200", st == 200 and bd.get("error") == 0, f"{st} {bd}")
+    st, bd = oo_cb(mobj2["id"], {"payload": {"key": f"{mobj2['id']}-abc", "status": 2,
+                                             "url": "http://x/cache/out.docx", "users": [alice_id]},
+                                 "exp": now + 60})
+    check("office save refused for mail record", st == 200 and bd.get("error") == 1, f"{st} {bd}")
+
 # ================= collaborative docs / 协同文档 =================
 st, b = req("POST", "/api/v1/docs", {"title": "p0x-doc"}, alice)
 check("doc create", st == 200 and json.loads(b).get("id"), str(st))
@@ -709,6 +776,32 @@ for _id, _nm in [(sheet_id, "sheet"), (slide_id, "slide")]:
     st, _b = req("DELETE", f"/api/v1/docs/{_id}", None, alice)
     check(f"doc delete {_nm}", st == 204, str(st))
 
+# ---- ids + title normalization ----
+st, b = req("POST", "/api/v1/docs", {"title": "  " + "长" * 300 + "  "}, alice)
+d = json.loads(b) if st == 200 else {}
+check("doc title trimmed+capped at 200", len(d.get("title", "")) == 200, str(len(d.get("title", ""))))
+check("doc id is UUIDv7", d.get("id", "")[14:15] == "7", d.get("id", ""))
+req("DELETE", f"/api/v1/docs/{d.get('id')}", None, alice)
+
+# ---- share: sending a doc link grants that conv access (manage right) ----
+st, b = req("POST", "/api/v1/docs", {"title": "p0x-share"}, alice)
+sh_id = json.loads(b).get("id")
+st, _ = req("GET", f"/api/v1/docs/{sh_id}", None, p0x)
+check("personal doc denied before share", st == 403, str(st))
+st, _ = req("POST", f"/api/v1/docs/{sh_id}/share", {"conv_id": conv}, p0x)
+check("share by non-accessor 403", st == 403, str(st))
+st, _ = req("POST", f"/api/v1/docs/{sh_id}/share", {"conv_id": conv}, alice)
+check("owner shares doc into conv", st == 204, str(st))
+st, _ = req("GET", f"/api/v1/docs/{sh_id}", None, p0x)
+check("conv member reads shared doc", st == 200, str(st))
+st, b = req("GET", f"/api/v1/conversations/{conv}/docs", None, p0x)
+check("shared doc listed in conv panel",
+      st == 200 and any(x["id"] == sh_id for x in json.loads(b).get("docs", [])), str(st))
+st, _ = req("POST", f"/api/v1/docs/{sh_id}/share", {"conv_id": grp}, p0x)
+check("non-manager reshare to other conv 403", st == 403, str(st))
+st, _ = req("POST", f"/api/v1/docs/{sh_id}/share", {"conv_id": conv}, p0x)
+check("re-share into already-visible conv is a 204 no-op", st == 204, str(st))
+
 # doc WS relay: handshake frames + update persist + late-join replay
 try:
     import websocket as _wsm
@@ -752,6 +845,77 @@ try:
         check("doc ws bad token", False, "connected")
     except Exception as e:
         check("doc ws bad token", "401" in str(e) or "unauthorized" in str(e).lower(), str(e)[:60])
+
+    def ws_closed_within(ws, secs):
+        """Drain frames until the server closes the socket (True) or timeout."""
+        ws.settimeout(secs)
+        deadline = time.time() + secs
+        while time.time() < deadline:
+            try:
+                ws.recv()
+            except _wsm.WebSocketTimeoutException:
+                return False
+            except Exception:
+                return True  # closed / reset
+        return False
+
+    def ws_replay(doc, tok):
+        """Collect replayed SyncStep2 payloads until the server's SyncStep1."""
+        ws = _wsm.create_connection(f"ws://localhost:8080/ws/doc/{doc}?token={tok}", timeout=5)
+        ws.settimeout(3)
+        frames = []
+        while True:
+            f = ws.recv()
+            if f[:2] == b"\x00\x00":  # server SyncStep1 → replay finished
+                return ws, frames
+            if f[:2] == b"\x00\x01":
+                frames.append(f)
+
+    # kicked member's live socket is dropped immediately (no 20s wait)
+    st, b = req("POST", "/api/v1/conversations/group",
+                {"title": f"p0x-kick-{uuid.uuid4().hex[:4]}", "is_public": False,
+                 "member_ids": [p0x_id]}, admin)
+    kgrp = json.loads(b)["id"]
+    st, b = req("POST", "/api/v1/docs", {"title": "p0x-kickdoc", "conv_id": kgrp}, admin)
+    kdoc = json.loads(b)["id"]
+    wsk = _wsm.create_connection(f"ws://localhost:8080/ws/doc/{kdoc}?token={p0x}", timeout=5)
+    wsk.recv()
+    st, _ = req("DELETE", f"/api/v1/conversations/{kgrp}/members/{p0x_id}", None, admin)
+    check("kick member from group", st in (200, 204), str(st))
+    check("kicked member's doc socket closed", ws_closed_within(wsk, 3))
+
+    # deleting a doc disconnects its live editors; soft-deleted doc is gone
+    wsd = _wsm.create_connection(f"ws://localhost:8080/ws/doc/{sh_id}?token={p0x}", timeout=5)
+    wsd.recv()
+    st, _ = req("DELETE", f"/api/v1/docs/{sh_id}", None, alice)
+    check("delete shared doc", st == 204, str(st))
+    check("deleted doc's sockets closed", ws_closed_within(wsd, 3))
+    st, _ = req("GET", f"/api/v1/docs/{sh_id}", None, p0x)
+    check("soft-deleted doc inaccessible", st in (403, 404), str(st))
+    st, b = req("GET", "/api/v1/docs", None, alice)
+    check("soft-deleted doc not listed", all(x["id"] != sh_id for x in json.loads(b).get("docs", [])))
+
+    # compaction: the first SyncStep2 after the server's SyncStep1 is the
+    # client's full state → replaces everything replayed before it.
+    st, b = req("POST", "/api/v1/docs", {"title": "p0x-compact"}, alice)
+    cmp_id = json.loads(b)["id"]
+    for blob in (b"cmp-u1", b"cmp-u2"):
+        w = _wsm.create_connection(f"ws://localhost:8080/ws/doc/{cmp_id}?token={alice}", timeout=5)
+        w.recv()
+        w.send(_vu(0) + _vu(2) + _vb(blob), _wsm.ABNF.OPCODE_BINARY)
+        time.sleep(0.2)
+        w.close()
+    w, frames = ws_replay(cmp_id, alice)
+    check("compaction precondition: 2 updates replayed", len(frames) == 2, str(len(frames)))
+    w.send(_vu(0) + _vu(1) + _vb(b"cmp-SNAPSHOT"), _wsm.ABNF.OPCODE_BINARY)  # SyncStep2
+    time.sleep(0.3)
+    w.close()
+    w, frames = ws_replay(cmp_id, alice)
+    w.close()
+    blob = b"".join(frames)
+    check("log compacted to the snapshot",
+          len(frames) == 1 and b"cmp-SNAPSHOT" in blob and b"cmp-u1" not in blob, str(len(frames)))
+    req("DELETE", f"/api/v1/docs/{cmp_id}", None, alice)
 except ImportError:
     print("SKIP doc ws checks (websocket-client not installed)")
 

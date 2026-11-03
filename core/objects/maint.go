@@ -121,16 +121,30 @@ func (s *Store) EnqueueVerifyAll(ctx context.Context) (int, error) {
 }
 
 // OrphanGC deletes objects that are pending for >7d (aborted uploads)
-// or ready-but-unreferenced for >7d (no attachment_refs, no mail_parts).
+// or ready-but-unreferenced for >7d. Only "upload then attach" purposes
+// are collectable; every reference kind (message, mail, HR request,
+// avatar, workspace logo) keeps an object alive. Stickers live on the
+// client shelf (unknown to the server) and are never collected.
 // Returns count marked deleted.
+//
+// 孤儿 GC：pending 超 7 天，或 ready 且无任何引用超 7 天。只回收"先传后
+// 附"用途；消息/邮件/HR/头像/工作区 logo 任一引用都会保活。表情存在客户
+// 端表情架（服务端不可知），永不回收。
 func (s *Store) OrphanGC(ctx context.Context) (int, error) {
 	cutoff := time.Now().Add(-7 * 24 * time.Hour)
 	rows, err := s.pool.Query(ctx,
 		`SELECT o.id, o.sha256, o.location FROM objects o
 		 WHERE o.status<>'deleted' AND o.created_at < $1
 		   AND (o.status='pending'
-		        OR (NOT EXISTS (SELECT 1 FROM attachment_refs a WHERE a.object_id=o.id)
-		        AND NOT EXISTS (SELECT 1 FROM mail_attachments p WHERE p.object_id=o.id)))`,
+		        OR (COALESCE(o.purpose,'') IN ('attachment','chat','mail','hr')
+		        AND NOT EXISTS (SELECT 1 FROM attachment_refs a WHERE a.object_id=o.id)
+		        AND NOT EXISTS (SELECT 1 FROM mail_attachments p WHERE p.object_id=o.id)
+		        AND NOT EXISTS (SELECT 1 FROM hr_requests h
+		                        WHERE h.payload->'attachment_object_ids' ? o.id::text)
+		        AND NOT EXISTS (SELECT 1 FROM users u WHERE u.avatar_object_id=o.id)
+		        AND NOT EXISTS (SELECT 1 FROM workspace_settings w
+		                        WHERE w.key='workspace.logo_object_id'
+		                          AND w.value #>> '{}' = o.id::text)))`,
 		cutoff)
 	if err != nil {
 		return 0, err

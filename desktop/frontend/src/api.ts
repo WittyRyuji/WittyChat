@@ -456,6 +456,9 @@ export const docsApi = {
   get: (id: string) => req<DocInfo>("GET", `/api/v1/docs/${id}`),
   rename: (id: string, title: string) => req("POST", `/api/v1/docs/${id}/rename`, { title }),
   del: (id: string) => req("DELETE", `/api/v1/docs/${id}`),
+  // Grant a conversation's members access (sent as a link there).
+  share: (id: string, convId: string) =>
+    req("POST", `/api/v1/docs/${id}/share`, { conv_id: convId }),
   convDocs: (convId: string) =>
     req<{ docs: DocInfo[] }>("GET", `/api/v1/conversations/${convId}/docs`),
 };

@@ -16,6 +16,16 @@ interface AwUser {
   cell?: string;
 }
 
+// One edit session, typed either in the cell or in the fx bar. Focus can
+// hand off between the two without committing.
+// 一次编辑会话，输入源为单元格或公式栏；两者间切换焦点不提交。
+interface Editing {
+  r: number;
+  c: number;
+  v: string;
+  src: "cell" | "fx";
+}
+
 export default function SheetEditor({
   ydoc,
   provider,
@@ -28,10 +38,24 @@ export default function SheetEditor({
   const cellsMap = ydoc.getMap<string>("cells");
   const [cells, setCells] = useState(() => cellsFromMap(cellsMap));
   const [sel, setSel] = useState<{ r: number; c: number }>({ r: 0, c: 0 });
-  const [editing, setEditing] = useState<{ r: number; c: number; v: string } | null>(null);
+  const [editing, setEditing] = useState<Editing | null>(null);
   const [peerCells, setPeerCells] = useState<Record<string, AwUser>>({});
+  const wrapRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const fxRef = useRef<HTMLInputElement>(null);
+  const cellInputRef = useRef<HTMLInputElement>(null);
+
+  // Focus the in-cell editor once when a cell edit opens (caret at end).
+  // 单元格编辑开启时聚焦一次（光标置尾）。
+  const editKey = editing ? `${editing.r}:${editing.c}:${editing.src}` : "";
+  // biome-ignore lint/correctness/useExhaustiveDependencies: run per edit session only / 每次编辑会话只跑一次
+  useEffect(() => {
+    const el = cellInputRef.current;
+    if (editing?.src === "cell" && el && document.activeElement !== el) {
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    }
+  }, [editKey]);
 
   useEffect(() => {
     const obs = () => setCells(cellsFromMap(cellsMap));
@@ -80,8 +104,7 @@ export default function SheetEditor({
   const startEdit = useCallback(
     (r: number, c: number, init?: string) => {
       setSel({ r, c });
-      setEditing({ r, c, v: init ?? cellsMap.get(cellKey(r, c)) ?? "" });
-      setTimeout(() => inputRef.current?.focus(), 0);
+      setEditing({ r, c, v: init ?? cellsMap.get(cellKey(r, c)) ?? "", src: "cell" });
     },
     [cellsMap]
   );
@@ -91,9 +114,12 @@ export default function SheetEditor({
       const rr = Math.max(0, Math.min(MAX_ROWS - 1, r));
       const cc = Math.max(0, Math.min(MAX_COLS - 1, c));
       setSel({ r: rr, c: cc });
+      // Keep the identity/color the pane published; only add our cell.
+      // 保留外层发布的身份与颜色，只追加当前单元格。
+      const prev = (provider.awareness.getLocalState()?.user ?? {}) as AwUser;
       provider.awareness.setLocalStateField("user", {
-        name: me.display_name || me.email,
-        color: "#7048e8",
+        ...prev,
+        name: prev.name ?? (me.display_name || me.email),
         cell: cellKey(rr, cc),
       });
       const rowEl = gridRef.current?.querySelector(`[data-row="${rr}"]`);
@@ -101,6 +127,22 @@ export default function SheetEditor({
     },
     [provider, me]
   );
+
+  // Commit and hand keyboard focus back to the grid so arrows/typing keep
+  // working. 提交并把键盘焦点交还网格，方向键/直接输入继续可用。
+  const finish = (ed: Editing, move?: [number, number]) => {
+    commit(ed.r, ed.c, ed.v);
+    if (move) select(move[0], move[1]);
+    wrapRef.current?.focus();
+  };
+
+  // Blur commits unless focus is merely moving between cell editor and fx.
+  // 失焦即提交，除非焦点只是在单元格编辑框与公式栏之间切换。
+  const onEditBlur = (e: React.FocusEvent<HTMLInputElement>) => {
+    const to = e.relatedTarget;
+    if (!editing || to === fxRef.current || to === cellInputRef.current) return;
+    commit(editing.r, editing.c, editing.v);
+  };
 
   const onGridKey = (e: React.KeyboardEvent) => {
     if (editing) return;
@@ -142,18 +184,18 @@ export default function SheetEditor({
   };
 
   const onEditKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    e.stopPropagation(); // keep typing out of the grid handler / 不让网格处理输入键
     if (!editing) return;
     if (e.key === "Enter") {
-      commit(editing.r, editing.c, editing.v);
-      select(editing.r + 1, editing.c);
       e.preventDefault();
+      finish(editing, [editing.r + 1, editing.c]);
     } else if (e.key === "Tab") {
-      commit(editing.r, editing.c, editing.v);
-      select(editing.r, editing.c + 1);
       e.preventDefault();
+      finish(editing, [editing.r, editing.c + 1]);
     } else if (e.key === "Escape") {
-      setEditing(null);
       e.preventDefault();
+      setEditing(null);
+      wrapRef.current?.focus();
     }
   };
 
@@ -167,7 +209,7 @@ export default function SheetEditor({
 
   return (
     // biome-ignore lint/a11y/noNoninteractiveTabindex lint/a11y/noStaticElementInteractions: spreadsheet grid is keyboard-navigable by design / 表格网格本身用键盘导航
-    <div className="sheet-wrap" onKeyDown={onGridKey} tabIndex={0}>
+    <div className="sheet-wrap" ref={wrapRef} onKeyDown={onGridKey} tabIndex={0}>
       <div className="sheet-fx">
         <span className="fx-name">
           {colName(sel.c)}
@@ -175,17 +217,25 @@ export default function SheetEditor({
         </span>
         <span className="fx-tag">fx</span>
         <input
-          ref={inputRef}
+          ref={fxRef}
           className="fx-input"
           value={rawVal}
           placeholder="输入值或以 = 开头的公式，如 =SUM(A1:A10)"
           onChange={(e) =>
-            editing
-              ? setEditing({ ...editing, v: e.target.value })
-              : setEditing({ r: sel.r, c: sel.c, v: e.target.value })
+            setEditing(
+              editing
+                ? { ...editing, v: e.target.value, src: "fx" }
+                : { r: sel.r, c: sel.c, v: e.target.value, src: "fx" }
+            )
           }
-          onFocus={() => !editing && setEditing({ r: sel.r, c: sel.c, v: cells[selKey] ?? "" })}
-          onBlur={() => editing && commit(editing.r, editing.c, editing.v)}
+          onFocus={() =>
+            setEditing(
+              editing
+                ? { ...editing, src: "fx" }
+                : { r: sel.r, c: sel.c, v: cells[selKey] ?? "", src: "fx" }
+            )
+          }
+          onBlur={onEditBlur}
           onKeyDown={onEditKey}
         />
       </div>
@@ -210,6 +260,7 @@ export default function SheetEditor({
                   const disp = ev.display[k] ?? "";
                   const isErr = ev.errors[k] !== undefined;
                   const isEditing = editing?.r === r && editing?.c === c;
+                  const inCell = isEditing && editing?.src === "cell";
                   return (
                     // biome-ignore lint/a11y/useKeyWithClickEvents: cell keyboard nav handled at grid level / 键盘导航在网格局部处理
                     <td
@@ -228,20 +279,18 @@ export default function SheetEditor({
                           {peer.name?.[0]}
                         </span>
                       )}
-                      {isEditing ? (
+                      {inCell && editing ? (
                         <input
                           className="cell-input"
-                          ref={(el) => el?.focus()}
+                          ref={cellInputRef}
                           value={editing.v}
                           onChange={(e) => setEditing({ ...editing, v: e.target.value })}
-                          onBlur={() => commit(editing.r, editing.c, editing.v)}
+                          onBlur={onEditBlur}
                           onKeyDown={onEditKey}
                         />
                       ) : (
-                        <span
-                          className={`cell-val${typeof disp === "string" && /^-?[\d.]+$/.test(disp) ? " num" : ""}`}
-                        >
-                          {disp}
+                        <span className={`cell-val${/^-?[\d.]+$/.test(disp) ? " num" : ""}`}>
+                          {isEditing && editing ? editing.v : disp}
                         </span>
                       )}
                     </td>

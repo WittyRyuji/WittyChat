@@ -27,6 +27,7 @@ import { useEffect, useState } from "react";
 import type { WebsocketProvider } from "y-websocket";
 import type * as Y from "yjs";
 import type { UserPublic } from "./api";
+import { cursorColor } from "./colors";
 
 // FontSize via TextStyle global attribute (v2 has no official ext).
 // 字号：挂到 TextStyle 上的自定义属性（v2 无官方字号扩展）。
@@ -100,7 +101,7 @@ export default function DocTextEditor({
         Collaboration.configure({ document: ydoc }),
         CollaborationCursor.configure({
           provider,
-          user: { name: me.display_name || me.email, color: "#7048e8" },
+          user: { name: me.display_name || me.email, color: cursorColor(me.id) },
         }),
         TextStyle,
         FontFamily,

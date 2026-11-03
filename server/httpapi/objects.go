@@ -146,23 +146,14 @@ func (d *Deps) downloadObject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	obj, err := d.Objects.Get(r.Context(), objID, uid)
+	obj, err := d.canReadObject(r.Context(), objID, uid)
 	if err != nil {
-		if errors.Is(err, objects.ErrForbidden) &&
-			(d.objectViaMail(r.Context(), objID, uid) ||
-				d.objectViaHR(r.Context(), objID, uid) ||
-				d.objectViaAttachmentRef(r.Context(), objID, uid)) {
-			// 邮件/HR/会话引用任一命中即可下载（收件人、审批人、会话成员）
-			obj, err = d.Objects.Peek(r.Context(), objID)
+		if errors.Is(err, objects.ErrForbidden) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+		} else {
+			http.Error(w, "not found", http.StatusNotFound)
 		}
-		if err != nil {
-			if errors.Is(err, objects.ErrForbidden) {
-				http.Error(w, "forbidden", http.StatusForbidden)
-			} else {
-				http.Error(w, "not found", http.StatusNotFound)
-			}
-			return
-		}
+		return
 	}
 	rc, err := d.Objects.Open(r.Context(), obj)
 	if err != nil {
@@ -176,6 +167,43 @@ func (d *Deps) downloadObject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, max-age=300")
 	w.Header().Set("Content-Disposition", `attachment; filename*=UTF-8''`+escapeName(obj.Name))
 	_, _ = io.Copy(w, rc) // stream / 流式
+}
+
+// canReadObject is THE object read check: owner / object-conv member, or
+// a reference the user legitimately holds (mail copy, HR request, op in a
+// conv they belong to). References are only trusted because every write
+// path that creates one validates the writer could read the object first
+// (requireReadableObjects) — keep those two in lockstep.
+// canReadObject 是唯一的对象读权限判定：属主/对象会话成员，或用户合法
+// 持有的引用（邮件副本、HR 申请、所在会话的消息）。引用之所以可信，是
+// 因为所有产生引用的写入口都先校验写入者可读（requireReadableObjects）。
+func (d *Deps) canReadObject(ctx context.Context, objID, uid uuid.UUID) (*objects.Object, error) {
+	obj, err := d.Objects.Get(ctx, objID, uid)
+	if err == nil || !errors.Is(err, objects.ErrForbidden) {
+		return obj, err
+	}
+	if d.objectViaMail(ctx, objID, uid) || d.objectViaHR(ctx, objID, uid) ||
+		d.objectViaAttachmentRef(ctx, objID, uid) {
+		return d.Objects.Peek(ctx, objID)
+	}
+	return nil, objects.ErrForbidden
+}
+
+// errObjectNotReadable flags a write that references an object the writer
+// cannot read — attaching an id must never grant access by itself.
+// 写入引用了写入者不可读的对象——附上 id 本身绝不能授予访问权。
+var errObjectNotReadable = errors.New("object not readable by sender / 无权引用该附件")
+
+// requireReadableObjects validates every object id a user attaches (IM
+// message, mail, HR request) before a reference row is created.
+// 附件引用写入前逐个校验写入者可读（消息/邮件/HR 申请）。
+func (d *Deps) requireReadableObjects(ctx context.Context, uid uuid.UUID, ids []uuid.UUID) error {
+	for _, id := range ids {
+		if _, err := d.canReadObject(ctx, id, uid); err != nil {
+			return errObjectNotReadable
+		}
+	}
+	return nil
 }
 
 // objectViaMail: requester owns a mail message that references this object
@@ -230,18 +258,13 @@ func (d *Deps) thumbObject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if _, err := d.Objects.Get(r.Context(), objID, uid); err != nil {
+	if _, err := d.canReadObject(r.Context(), objID, uid); err != nil {
 		if errors.Is(err, objects.ErrForbidden) {
-			if !d.objectViaMail(r.Context(), objID, uid) &&
-				!d.objectViaHR(r.Context(), objID, uid) &&
-				!d.objectViaAttachmentRef(r.Context(), objID, uid) {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
+			http.Error(w, "forbidden", http.StatusForbidden)
 		} else {
 			http.Error(w, "not found", http.StatusNotFound)
-			return
 		}
+		return
 	}
 	w.Header().Set("Cache-Control", "private, max-age=300")
 	// Path derived from a parsed uuid under a fixed data dir — safe.
@@ -444,7 +467,7 @@ func (d *Deps) signedObjectURL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
-	if _, err := d.Objects.Get(r.Context(), objID, uid); err != nil {
+	if _, err := d.canReadObject(r.Context(), objID, uid); err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}

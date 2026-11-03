@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
@@ -31,6 +32,7 @@ import (
 	"strings"
 	"time"
 	"wittychat/core/audit"
+	"wittychat/core/auth"
 
 	"github.com/google/uuid"
 )
@@ -77,13 +79,36 @@ func officeExt(name string) (ext, docType string) {
 	return ext, officeType[ext]
 }
 
-// officeACL mirrors downloadObject's access model: owner / conv member /
-// referenced-by-mail / referenced-by-hr-request.
+// officeACL mirrors downloadObject's read model (canReadObject).
 func (d *Deps) officeACL(ctx context.Context, objID, uid uuid.UUID) bool {
-	if _, err := d.Objects.Get(ctx, objID, uid); err == nil {
-		return true
+	_, err := d.canReadObject(ctx, objID, uid)
+	return err == nil
+}
+
+// objectIsRecord: referenced by a mail or an HR request — those are
+// immutable records (a recipient/approver must never rewrite the sender's
+// evidence), so office opens them view-only for everyone.
+// 被邮件或 HR 申请引用即为不可变记录（收件人/审批人不得改写原件），
+// 一律只读打开。
+func (d *Deps) objectIsRecord(ctx context.Context, objID uuid.UUID) bool {
+	var ok bool
+	err := d.Pool.QueryRow(ctx, `SELECT
+		EXISTS(SELECT 1 FROM mail_attachments WHERE object_id=$1) OR
+		EXISTS(SELECT 1 FROM hr_requests WHERE payload->'attachment_object_ids' ? $1::text)`,
+		objID).Scan(&ok)
+	return err != nil || ok // fail safe: unknown → treat as record / 查询失败按记录处理
+}
+
+// officeCanEdit: owner or member of the object's own conversation (chat
+// attachments are co-edited in the group), and not a mail/HR record.
+// Read access through a reference (mail copy, reshared sticker…) never
+// implies write. 可编辑=属主或对象所属会话成员，且非邮件/HR 记录；经引用
+// 获得的读权限绝不蕴含写权限。
+func (d *Deps) officeCanEdit(ctx context.Context, objID, uid uuid.UUID) bool {
+	if _, err := d.Objects.Get(ctx, objID, uid); err != nil {
+		return false
 	}
-	return d.objectViaMail(ctx, objID, uid) || d.objectViaHR(ctx, objID, uid)
+	return !d.objectIsRecord(ctx, objID)
 }
 
 // signedEditURL mints the self-contained edit page URL for (obj,user) —
@@ -160,6 +185,14 @@ func (d *Deps) officeEdit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "link expired or invalid / 链接过期或无效", http.StatusForbidden)
 		return
 	}
+	// The signature proves who the link was minted for, not that they may
+	// still use it: re-check account status + object access on every load.
+	// 签名只证明链接签发给谁；每次打开都复核账号状态与对象权限。
+	user, err := d.Store.UserByID(r.Context(), uid)
+	if err != nil || user.Status != auth.StatusActive || !d.officeACL(r.Context(), objID, uid) {
+		http.Error(w, "access revoked / 无权访问", http.StatusForbidden)
+		return
+	}
 	obj, err := d.Objects.Peek(r.Context(), objID)
 	if err != nil || obj.Status != "ready" {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -170,10 +203,10 @@ func (d *Deps) officeEdit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not an office document / 非可编辑文档", http.StatusBadRequest)
 		return
 	}
-	user, err := d.Store.UserByID(r.Context(), uid)
-	if err != nil {
-		http.Error(w, "user gone", http.StatusNotFound)
-		return
+	canEdit := d.officeCanEdit(r.Context(), objID, uid)
+	mode := "view"
+	if canEdit {
+		mode = "edit"
 	}
 
 	// File feed + callback are scoped for the docs container, not the user.
@@ -195,14 +228,14 @@ func (d *Deps) officeEdit(w http.ResponseWriter, r *http.Request) {
 			"title":    obj.Name,
 			"url":      fileURL,
 			"permissions": map[string]any{
-				"edit": true, "download": true, "print": true,
-				"review": true, "comment": true, "copy": true,
+				"edit": canEdit, "download": true, "print": true,
+				"review": canEdit, "comment": canEdit, "copy": true,
 			},
 		},
 		"editorConfig": map[string]any{
 			"callbackUrl": callbackURL,
 			"lang":        "zh-CN",
-			"mode":        "edit",
+			"mode":        mode,
 			"user":        map[string]string{"id": uid.String(), "name": user.DisplayName},
 			"customization": map[string]any{
 				"autosave":      true,
@@ -222,10 +255,14 @@ func (d *Deps) officeEdit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "config failed", http.StatusInternalServerError)
 		return
 	}
-	docsURL := strings.TrimRight(d.Office.DocsURL, "/")
-	title := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;").Replace(obj.Name)
+	docsURL := html.EscapeString(strings.TrimRight(d.Office.DocsURL, "/"))
+	title := html.EscapeString(obj.Name)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!doctype html><html lang="zh"><head><meta charset="utf-8">
+	// All interpolations are escaped: title/docsURL via html.EscapeString,
+	// cfgJSON via json.Marshal (escapes <, >, & as \u003c… — safe in <script>).
+	// 全部插值已转义：title/docsURL 走 html.EscapeString，cfgJSON 由 json.Marshal 转义。
+	//nolint:gosec // G705: see above — every value is escaped for its context
+	_, _ = fmt.Fprintf(w, `<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <title>%s — WittyChat Office</title>
 <style>html,body{margin:0;height:100%%;overflow:hidden}#placeholder{width:100%%;height:100vh}</style>
 <script src="%s/web-apps/apps/api/documents/api.js"></script></head>
@@ -284,61 +321,85 @@ func (d *Deps) officeCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad obj", http.StatusBadRequest)
 		return
 	}
+	// The JWT is mandatory (office is disabled without a secret): the save
+	// path overwrites object bytes. 必须携带 JWT（无密钥时 office 不启用）。
+	if len(d.Office.JWTSecret) == 0 {
+		http.Error(w, "office jwt not configured", http.StatusForbidden)
+		return
+	}
+	tok, ok := bearerToken(r.Header.Get("Authorization"))
+	if !ok {
+		http.Error(w, "missing token", http.StatusUnauthorized)
+		return
+	}
+	payload, err := jwtVerify(tok, d.Office.JWTSecret)
+	if err != nil {
+		http.Error(w, "bad token", http.StatusForbidden)
+		return
+	}
+	// OnlyOffice ≥7.2 wraps the real body under a "payload" claim.
+	// 真实回调体嵌在 JWT 的 payload 声明里，顶层只有包装。
+	if inner, ok := payload["payload"].(map[string]any); ok {
+		payload = inner
+	}
 	var body officeCallbackBody
-	if len(d.Office.JWTSecret) > 0 {
-		tok, ok := bearerToken(r.Header.Get("Authorization"))
-		if !ok {
-			http.Error(w, "missing token", http.StatusUnauthorized)
-			return
-		}
-		payload, err := jwtVerify(tok, d.Office.JWTSecret)
-		if err != nil {
-			http.Error(w, "bad token", http.StatusForbidden)
-			return
-		}
-		// OnlyOffice ≥7.2 wraps the real body under a "payload" claim.
-		// 真实回调体嵌在 JWT 的 payload 声明里，顶层只有包装。
-		if inner, ok := payload["payload"].(map[string]any); ok {
-			payload = inner
-		}
-		raw, _ := json.Marshal(payload)
-		if err := json.Unmarshal(raw, &body); err != nil {
-			http.Error(w, "bad payload", http.StatusBadRequest)
-			return
-		}
-	} else {
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "bad body", http.StatusBadRequest)
-			return
-		}
+	raw, _ := json.Marshal(payload)
+	if err := json.Unmarshal(raw, &body); err != nil {
+		http.Error(w, "bad payload", http.StatusBadRequest)
+		return
+	}
+	// ?obj= is not covered by the signature — the signed document key is
+	// "<objID>-<sha>", so it must name the same object.
+	// ?obj= 不在签名覆盖内；签名内的 key 为 "<objID>-<sha>"，必须指向同一对象。
+	if !strings.HasPrefix(body.Key, objID.String()+"-") {
+		http.Error(w, "key/object mismatch", http.StatusForbidden)
+		return
 	}
 	if body.Status == 2 || body.Status == 6 {
-		if err := d.officePull(r.Context(), objID, body.URL); err != nil {
-			log.Printf("office save obj=%s: %v", objID, err)
+		editor := d.officeSaveActor(r.Context(), objID, body.Users)
+		if editor == nil {
+			// Nobody in the session may (still) write this object — e.g.
+			// a view-only record or every editor lost access.
+			// 会话中无人（仍）有写权限：只读记录，或编辑者均已失权。
+			log.Printf("office save rejected obj=%s: no current editor", objID) //nolint:gosec // objID is a parsed UUID
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": 1})
+			return
+		}
+		if err := d.officePull(r.Context(), objID, body.URL, editor); err != nil {
+			log.Printf("office save obj=%s: %v", objID, err) //nolint:gosec // objID is a parsed UUID
 			// OnlyOffice expects {"error":N}; non-zero makes it show a
 			// save-failed notice and keep the session's output.
 			_ = json.NewEncoder(w).Encode(map[string]any{"error": 1})
 			return
 		}
-		var actor *uuid.UUID
-		var kind = audit.ActorSystem
-		if len(body.Users) > 0 {
-			if u, err := uuid.Parse(body.Users[0]); err == nil {
-				actor = &u
-				kind = audit.ActorUser
-			}
-		}
-		d.Audit.Log(r.Context(), actor, kind, "office.save", objID.String(),
+		d.Audit.Log(r.Context(), editor, audit.ActorUser, "office.save", objID.String(),
 			map[string]string{"key": body.Key}, nil)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": 0})
 }
 
+// officeSaveActor returns the first session user who may currently edit
+// the object (nil if none). 返回会话中第一个当前仍可编辑的用户。
+func (d *Deps) officeSaveActor(ctx context.Context, objID uuid.UUID, users []string) *uuid.UUID {
+	for _, s := range users {
+		uid, err := uuid.Parse(s)
+		if err != nil {
+			continue
+		}
+		u, err := d.Store.UserByID(ctx, uid)
+		if err == nil && u.Status == auth.StatusActive && d.officeCanEdit(ctx, objID, uid) {
+			return &uid
+		}
+	}
+	return nil
+}
+
 // officePull fetches the converted output the docs server points at and
-// swaps the object's bytes. The callback url may carry a host only the
-// container can resolve, so scheme+host are rebuilt from FetchBase.
-func (d *Deps) officePull(ctx context.Context, objID uuid.UUID, docURL string) error {
+// swaps the object's bytes (prior version kept in object_versions). The
+// callback url may carry a host only the container can resolve, so
+// scheme+host are rebuilt from FetchBase.
+func (d *Deps) officePull(ctx context.Context, objID uuid.UUID, docURL string, by *uuid.UUID) error {
 	if docURL == "" {
 		return errors.New("callback carried no url")
 	}
@@ -378,7 +439,7 @@ func (d *Deps) officePull(ctx context.Context, objID uuid.UUID, docURL string) e
 	if i := strings.IndexByte(mime, ';'); i >= 0 {
 		mime = strings.TrimSpace(mime[:i])
 	}
-	_, err = d.Objects.ReplaceBytes(ctx, objID, res.Body, mime, maxBytes)
+	_, err = d.Objects.ReplaceBytes(ctx, objID, res.Body, mime, maxBytes, by)
 	return err
 }
 
@@ -417,6 +478,11 @@ func jwtVerify(tok string, secret []byte) (map[string]any, error) {
 	var payload map[string]any
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return nil, err
+	}
+	// Reject expired tokens (OnlyOffice stamps exp on outbox tokens) so a
+	// captured callback can't be replayed later. 拒绝过期 token，防重放。
+	if exp, ok := payload["exp"].(float64); ok && time.Now().Unix() > int64(exp) {
+		return nil, errors.New("jwt expired")
 	}
 	return payload, nil
 }

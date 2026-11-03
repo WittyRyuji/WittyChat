@@ -572,18 +572,28 @@ export function Chat({
     }
   };
 
-  // Post a doc link message into the feed (explicit share action).
-  // 把文档链接显式发到消息流（点链接应用内打开）。
+  // Share a doc into this conv (grants members access) then post its link
+  // into the feed. 先把文档分享给本会话（授予成员访问权），再发链接。
   const sendDocLink = async (d: DocInfo) => {
     if (!activeId) return;
     setDocPick(null);
     setPlusMenu(false);
     try {
+      await docsApi.share(d.id, activeId);
+    } catch {
+      setErr("无法分享该文档：仅属主或群管理员可分享到其它会话");
+      return;
+    }
+    // Escape markdown link-text metacharacters in the title.
+    // 转义标题中的 Markdown 链接元字符。
+    const title = (d.title || "未命名").replace(/[\\[\]()*_`]/g, "\\$&");
+    try {
       const op = await api.send(
         activeId,
         newClientMsgId(),
-        `${KIND_ICON[d.kind] ?? "📄"} [${d.title}](#doc/${d.id})`
+        `${KIND_ICON[d.kind] ?? "📄"} [${title}](#doc/${d.id})`
       );
+      if (docsPanel) loadConvDocs();
       setStates((prev) => {
         const c = prev[activeId] ?? { ops: [], watermark: 0, hasOlder: true, loaded: true };
         if (c.ops.some((o) => o.op_seq === op.op_seq)) return prev;
@@ -1297,9 +1307,8 @@ export function Chat({
               {docsPanel && (
                 <aside className="docs-panel" style={{ width: panelW }}>
                   {/* drag-resize handle on the left edge / 左缘拖拽调宽 */}
-                  <div
+                  <hr
                     className="dp-resize"
-                    role="separator"
                     aria-orientation="vertical"
                     onMouseDown={(e) => {
                       e.preventDefault();

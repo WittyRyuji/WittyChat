@@ -147,6 +147,7 @@ func registerPages(mux *http.ServeMux, d *Deps) {
 			http.Error(w, "internal", http.StatusInternalServerError)
 			return
 		}
+		d.docRevalidateUser(r.Context(), userID) // reset link bumps cred version / 重置会作废旧会话
 		if kind == auth.LinkKindActivation {
 			if err := d.Store.ActivateUser(r.Context(), userID); err != nil && !errors.Is(err, auth.ErrUserNotActive) {
 				http.Error(w, "internal", http.StatusInternalServerError)

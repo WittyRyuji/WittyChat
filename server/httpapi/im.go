@@ -363,9 +363,17 @@ func (d *Deps) sendMessage(ctx context.Context, in *struct {
 	}
 	var objIDs []uuid.UUID
 	for _, s := range in.Body.ObjectIDs {
-		if id, err := uuid.Parse(s); err == nil {
-			objIDs = append(objIDs, id)
+		id, err := uuid.Parse(s)
+		if err != nil {
+			return nil, huma.Error400BadRequest("bad object id")
 		}
+		objIDs = append(objIDs, id)
+	}
+	// Attaching an id creates an attachment_ref that grants conv members
+	// read access — the sender must be able to read it first.
+	// 附件引用会授予会话成员读权限——发送者必须先可读。
+	if err := d.requireReadableObjects(ctx, u.ID, objIDs); err != nil {
+		return nil, huma.Error403Forbidden(err.Error())
 	}
 	// @all permission: workspace may restrict it to owner/admin.
 	// @所有人权限：工作区可限制为仅群主/管理员。
@@ -608,5 +616,6 @@ func (d *Deps) removeMember(ctx context.Context, in *struct {
 	if err := d.IM.RemoveMember(ctx, u.ID, convID, target); err != nil {
 		return nil, imErr(err)
 	}
+	d.docRevalidateUser(ctx, target) // drop live conv-doc sockets / 断开失权的群文档连接
 	return &struct{}{}, nil
 }

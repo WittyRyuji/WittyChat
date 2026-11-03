@@ -204,6 +204,7 @@ func (d *Deps) adminSetStatus(status, action string) func(ctx context.Context, i
 		if err := d.Store.SetStatus(ctx, uid, status, nil); err != nil {
 			return nil, err
 		}
+		d.docRevalidateUser(ctx, uid)
 		d.Audit.Log(ctx, &admin.ID, audit.ActorAdmin, action, target.Email, nil, clientIP(in.XForwardedFor))
 		return &struct{}{}, nil
 	}
@@ -238,6 +239,7 @@ func (d *Deps) adminOffboard(ctx context.Context, in *struct {
 	if err := d.Store.SetStatus(ctx, uid, auth.StatusOffboarded, &to); err != nil {
 		return nil, err
 	}
+	d.docRevalidateUser(ctx, uid)
 	d.Audit.Log(ctx, &admin.ID, audit.ActorAdmin, "admin.user.offboard", target.Email,
 		map[string]string{"transfer_to": toUser.Email}, clientIP(in.XForwardedFor))
 	return &struct{}{}, nil

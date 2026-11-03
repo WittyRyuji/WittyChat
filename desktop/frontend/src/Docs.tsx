@@ -6,28 +6,11 @@
 // 统一走 /ws/doc/{id} Yjs 同步；awareness 驱动在线徽章；中继逐条落库。
 import { useEffect, useMemo, useRef, useState } from "react";
 import { type DocInfo, docsApi, type UserPublic } from "./api";
+import { cursorColor } from "./colors";
 import DocTextEditor from "./DocTextEditor";
 import SheetEditor from "./SheetEditor";
 import SlideEditor from "./SlideEditor";
 import { useDocConn } from "./useDocConn";
-
-// Peer color — stable per user id. 对端颜色按用户 id 哈希取色，同人同色。
-const CURSOR_COLORS = [
-  "#7c5cfc",
-  "#1f9cf0",
-  "#00b96b",
-  "#f0a41f",
-  "#f0524f",
-  "#c94fd6",
-  "#0fb5ba",
-  "#8a6d3b",
-];
-
-export function cursorColor(id: string): string {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  return CURSOR_COLORS[h % CURSOR_COLORS.length];
-}
 
 export const KIND_LABEL: Record<string, string> = {
   doc: "文档",
@@ -102,7 +85,7 @@ export function Docs({
   };
 
   const delDoc = (d: DocInfo) => {
-    if (!window.confirm(`删除「${d.title || "未命名"}」？删除后不可恢复。`)) return;
+    if (!window.confirm(`删除「${d.title || "未命名"}」？删除后所有成员都将无法再访问。`)) return;
     docsApi
       .del(d.id)
       .then(() => {
@@ -193,7 +176,11 @@ export function Docs({
         />
       ) : (
         <div className="pane">
-          <div className="empty">从左侧选择一个文件，或新建文档 / 表格 / 演示与成员实时协作</div>
+          <div className="empty">
+            {activeId && docs !== null
+              ? "该文档不存在、已被删除，或你没有访问权限。可请文档属主或群管理员分享给你。"
+              : "从左侧选择一个文件，或新建文档 / 表格 / 演示与成员实时协作"}
+          </div>
         </div>
       )}
     </div>
@@ -212,7 +199,7 @@ function DocEditorPane({
   onDeleted: () => void;
 }) {
   const [title, setTitle] = useState(doc.title);
-  const { ydoc, provider, peers, connected } = useDocConn(doc.id);
+  const { ydoc, provider, peers, connected, synced } = useDocConn(doc.id);
   const user = useMemo(
     () => ({ name: me.display_name || me.email || me.id, color: cursorColor(me.id) }),
     [me]
@@ -235,7 +222,7 @@ function DocEditorPane({
   };
 
   const del = () => {
-    if (!window.confirm(`删除「${title || "未命名"}」？删除后不可恢复。`)) return;
+    if (!window.confirm(`删除「${title || "未命名"}」？删除后所有成员都将无法再访问。`)) return;
     docsApi
       .del(doc.id)
       .then(onDeleted)
@@ -273,7 +260,13 @@ function DocEditorPane({
       {doc.kind === "sheet" ? (
         <SheetEditor ydoc={ydoc} provider={provider} me={me} />
       ) : doc.kind === "slide" ? (
-        <SlideEditor ydoc={ydoc} provider={provider} me={me} />
+        <SlideEditor
+          ydoc={ydoc}
+          provider={provider}
+          me={me}
+          synced={synced}
+          isOwner={doc.owner === me.id}
+        />
       ) : (
         <DocTextEditor ydoc={ydoc} provider={provider} me={me} />
       )}

@@ -31,10 +31,13 @@ type Tok =
   | { t: "op"; v: string }
   | { t: "fn"; v: string };
 
+/** Plain decimal number (what a typed numeric cell looks like). 纯十进制数。 */
+const NUM_RE = /^\s*-?(\d+(\.\d*)?|\.\d+)\s*$/;
+
 function tokenize(src: string): Tok[] {
   const toks: Tok[] = [];
   let i = 0;
-  const isCol = (ch: string) => ch >= "A" && ch <= "Z";
+  const isAlpha = (ch: string) => /[A-Za-z]/.test(ch);
   while (i < src.length) {
     const ch = src[i];
     if (ch === " " || ch === "\t") {
@@ -45,24 +48,30 @@ function tokenize(src: string): Tok[] {
       let s = "";
       i++;
       while (i < src.length && src[i] !== '"') s += src[i++];
+      if (i >= src.length) throw new Error("#ERR"); // unterminated string
       i++;
       toks.push({ t: "str", v: s });
       continue;
     }
-    if (ch >= "0" && ch <= "9") {
+    if ((ch >= "0" && ch <= "9") || ch === ".") {
       let n = "";
       while (i < src.length && /[\d.]/.test(src[i])) n += src[i++];
+      if (!NUM_RE.test(n)) throw new Error("#ERR"); // e.g. 1.5.5
       toks.push({ t: "num", v: parseFloat(n) });
       continue;
     }
-    if (isCol(ch)) {
-      // cell ref A1..Z99 or function name
+    if (isAlpha(ch)) {
+      // cell ref A1..Z100 or function name — case-insensitive like Excel
+      // 单元格引用或函数名，与 Excel 一样不区分大小写
       let id = "";
-      while (i < src.length && /[A-Z_]/.test(src[i])) id += src[i++];
+      while (i < src.length && /[A-Za-z_]/.test(src[i])) id += src[i++];
+      id = id.toUpperCase();
       let num = "";
       while (i < src.length && /\d/.test(src[i])) num += src[i++];
       if (id.length === 1 && num.length > 0) {
         toks.push({ t: "ref", r: parseInt(num, 10) - 1, c: id.charCodeAt(0) - 65 });
+      } else if (num.length > 0) {
+        throw new Error("#REF"); // AA1 etc. beyond the A–Z grid / 超出列范围
       } else {
         toks.push({ t: "fn", v: id });
       }
@@ -80,17 +89,12 @@ function tokenize(src: string): Tok[] {
       i++;
       continue;
     }
-    if ("&".includes(ch)) {
+    if (ch === "&") {
       toks.push({ t: "op", v: ch });
       i++;
       continue;
     }
-    if (ch === "!") {
-      // skip sheet-qualified refs (A1!B2 not supported) — treat as unary not
-      i++;
-      continue;
-    }
-    throw new Error(`bad char ${ch}`);
+    throw new Error("#ERR"); // unsupported character / 不支持的字符
   }
   return toks;
 }
@@ -145,8 +149,12 @@ function evalTokens(toks: Tok[], ctx: Ctx): Val {
     if (t?.t === "op" && ["=", "<>", "<", ">", "<=", ">="].includes(t.v)) {
       pos++;
       const r = concat();
-      const lo = typeof l === "string" && typeof r === "string" ? l : num(l);
-      const ro = typeof l === "string" && typeof r === "string" ? r : num(r);
+      // Text vs text compares case-insensitively (Excel); anything else
+      // numerically — numeric cells are already numbers (see getVal).
+      // 文本对文本按不区分大小写比较；其余按数值比较。
+      const text = typeof l === "string" && typeof r === "string" && !(l === "" && r === "");
+      const lo = text ? (l as string).toLowerCase() : num(l);
+      const ro = text ? (r as string).toLowerCase() : num(r);
       switch (t.v) {
         case "=":
           return lo === ro;
@@ -253,7 +261,10 @@ function evalTokens(toks: Tok[], ctx: Ctx): Val {
     }
     throw new Error("#ERR");
   }
-  return expr();
+  const out = expr();
+  if (pos < toks.length) throw new Error("#ERR"); // trailing tokens, e.g. "=1 2"
+  if (out instanceof RangeMarker) throw new Error("#VALUE");
+  return out;
 }
 
 function callFn(name: string, args: Val[], rangeLists: Val[][]): Val {
@@ -380,7 +391,9 @@ export function evalSheet(cells: RawCells): EvalResult {
         throw e;
       }
     }
-    const v: Val = raw === "" ? "" : raw;
+    // Typed numbers become numbers so comparisons/COUNT behave like Excel.
+    // 手输数字转为数值，比较与 COUNT 才与 Excel 一致。
+    const v: Val = raw === "" ? "" : NUM_RE.test(raw) ? parseFloat(raw) : raw;
     memo.set(key, v);
     return v;
   };

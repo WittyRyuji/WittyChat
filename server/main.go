@@ -115,6 +115,13 @@ func officeConfig() *httpapi.OfficeConfig {
 		}
 		log.Printf("onlyoffice: auto-detected docs server at %s", docs)
 	}
+	if secret == "" {
+		// The save callback overwrites object bytes — without the shared
+		// JWT secret anyone could forge it. Fail closed.
+		// 保存回调会覆盖对象字节——无共享 JWT 密钥即可被伪造，直接禁用。
+		log.Printf("onlyoffice: WITTYCHAT_ONLYOFFICE_JWT_SECRET unset — office integration DISABLED")
+		return nil
+	}
 	fetch := envOr("WITTYCHAT_ONLYOFFICE_INTERNAL_URL", docs)
 	return &httpapi.OfficeConfig{
 		DocsURL:      docs,

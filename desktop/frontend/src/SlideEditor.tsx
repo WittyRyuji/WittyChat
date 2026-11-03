@@ -16,14 +16,21 @@ export default function SlideEditor({
   ydoc,
   provider,
   me,
+  synced,
+  isOwner,
 }: {
   ydoc: Y.Doc;
   provider: WebsocketProvider;
   me: UserPublic;
+  synced: boolean;
+  isOwner: boolean;
 }) {
   const slides = ydoc.getArray<Y.Map<string>>("slides");
   const [count, setCount] = useState(slides.length);
-  const [tick, setTick] = useState(0);
+  // Re-render trigger only — never use it as a React key: remounting the
+  // canvas on every change would steal focus from the input being typed in.
+  // 仅作重渲染触发；绝不能当 key，否则每次改动重挂载画布会夺走输入焦点。
+  const [, setTick] = useState(0);
   const [cur, setCur] = useState(0);
   const [peersOn, setPeersOn] = useState<Record<number, string[]>>({});
 
@@ -36,19 +43,17 @@ export default function SlideEditor({
     return () => slides.unobserveDeep(obs);
   }, [slides]);
 
-  // ensure at least one slide once doc syncs (only creator writes)
+  // Seed the first slide once synced — owner only, so two members opening
+  // an empty deck at once can't both push a "page 1".
+  // 同步后补第一页——仅属主执行，避免两人同时打开空演示各插一页。
   useEffect(() => {
-    if (provider.synced && slides.length === 0) {
-      ydoc.transact(() => {
-        if (slides.length === 0) {
-          const m = new Y.Map<string>();
-          m.set("title", "第 1 页");
-          m.set("body", "");
-          slides.push([m]);
-        }
-      });
+    if (synced && isOwner && slides.length === 0) {
+      const m = new Y.Map<string>();
+      m.set("title", "第 1 页");
+      m.set("body", "");
+      ydoc.transact(() => slides.push([m]));
     }
-  }, [provider.synced, slides, ydoc]);
+  }, [synced, isOwner, slides, ydoc]);
 
   // peer focus via awareness.user.slide
   useEffect(() => {
@@ -76,9 +81,12 @@ export default function SlideEditor({
   const goto = useCallback(
     (i: number) => {
       setCur(i);
+      // Keep the identity/color the pane published; only add our slide.
+      // 保留外层发布的身份与颜色，只追加当前页。
+      const prev = (provider.awareness.getLocalState()?.user ?? {}) as { name?: string };
       provider.awareness.setLocalStateField("user", {
-        name: me.display_name || me.email,
-        color: "#7048e8",
+        ...prev,
+        name: prev.name ?? (me.display_name || me.email),
         slide: i,
       });
     },
@@ -121,7 +129,7 @@ export default function SlideEditor({
     if (m) ydoc.transact(() => m.set(f, v));
   };
 
-  const curIdx = Math.min(cur, count - 1);
+  const curIdx = Math.max(0, Math.min(cur, count - 1));
   const data: SlideData[] = [];
   for (let i = 0; i < count; i++) {
     const m = slides.get(i);
@@ -129,7 +137,7 @@ export default function SlideEditor({
   }
 
   return (
-    <div className="slide-wrap" key={tick}>
+    <div className="slide-wrap">
       <div className="slide-rail">
         <button type="button" className="ghost slide-add" onClick={() => addSlide()}>
           ＋ 新增页
@@ -183,20 +191,24 @@ export default function SlideEditor({
             {curIdx + 1} / {count}
           </span>
         </div>
-        <div className="slide-canvas">
-          <input
-            className="slide-title"
-            value={data[curIdx]?.title ?? ""}
-            placeholder="标题"
-            onChange={(e) => setField(curIdx, "title", e.target.value)}
-          />
-          <textarea
-            className="slide-body"
-            value={data[curIdx]?.body ?? ""}
-            placeholder="正文内容…"
-            onChange={(e) => setField(curIdx, "body", e.target.value)}
-          />
-        </div>
+        {count === 0 ? (
+          <div className="empty">演示还没有页面，点左侧「＋ 新增页」开始</div>
+        ) : (
+          <div className="slide-canvas">
+            <input
+              className="slide-title"
+              value={data[curIdx]?.title ?? ""}
+              placeholder="标题"
+              onChange={(e) => setField(curIdx, "title", e.target.value)}
+            />
+            <textarea
+              className="slide-body"
+              value={data[curIdx]?.body ?? ""}
+              placeholder="正文内容…"
+              onChange={(e) => setField(curIdx, "body", e.target.value)}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

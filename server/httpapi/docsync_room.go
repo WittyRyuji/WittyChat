@@ -1,0 +1,311 @@
+package httpapi
+
+// Doc relay connection lifecycle: rooms, serve loop, revalidation, kicks.
+// 文档中继连接生命周期：房间、收发循环、权限复核、踢出。
+
+import (
+	"bytes"
+	"context"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/coder/websocket"
+	"github.com/google/uuid"
+)
+
+// docRevalidateEvery is the keepalive + access re-check period. It must
+// stay under the y-websocket client's 30s silence watchdog.
+// 保活兼权限复核周期，须小于 y-websocket 客户端 30s 静默看门狗。
+const docRevalidateEvery = 20 * time.Second
+
+type docRoom struct {
+	mu    sync.Mutex
+	conns map[*docConn]struct{}
+	dead  bool // removed from docRooms; joiners must fetch a fresh room
+}
+
+type docConn struct {
+	ws     *websocket.Conn
+	wmu    sync.Mutex
+	docID  uuid.UUID
+	uid    uuid.UUID
+	token  string             // session token, re-validated periodically
+	cancel context.CancelFunc // kicks the conn (ends its read loop)
+	awIDs  map[uint64]uint64  // awareness clientIDs seen on this conn
+	awLast []byte             // last awareness payload, replayed to joiners
+}
+
+var docRooms sync.Map // uuid.UUID → *docRoom
+
+func docBrokerCount(docID uuid.UUID) int {
+	if v, ok := docRooms.Load(docID); ok {
+		r := v.(*docRoom)
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return len(r.conns)
+	}
+	return 0
+}
+
+// docJoin adds c to its doc's room. A room that emptied out is marked
+// dead and dropped from the map under its own lock, so a racing joiner
+// retries with a fresh room instead of joining an orphan.
+// 加入房间。空房间在自身锁内标记 dead 并移出 map，竞争中的加入者重试
+// 新房间，不会进入孤儿房间。
+func docJoin(c *docConn) *docRoom {
+	for {
+		v, _ := docRooms.LoadOrStore(c.docID, &docRoom{conns: map[*docConn]struct{}{}})
+		room := v.(*docRoom)
+		room.mu.Lock()
+		if room.dead {
+			room.mu.Unlock()
+			continue
+		}
+		room.conns[c] = struct{}{}
+		room.mu.Unlock()
+		return room
+	}
+}
+
+func docLeave(room *docRoom, c *docConn) {
+	room.mu.Lock()
+	defer room.mu.Unlock()
+	delete(room.conns, c)
+	if len(room.conns) == 0 {
+		room.dead = true
+		docRooms.CompareAndDelete(c.docID, room)
+	}
+}
+
+func docRoomConns(docID uuid.UUID) []*docConn {
+	v, ok := docRooms.Load(docID)
+	if !ok {
+		return nil
+	}
+	room := v.(*docRoom)
+	room.mu.Lock()
+	defer room.mu.Unlock()
+	out := make([]*docConn, 0, len(room.conns))
+	for c := range room.conns {
+		out = append(out, c)
+	}
+	return out
+}
+
+// docStillAllowed: session still valid for the same user AND doc ACL holds.
+// 会话仍有效（同一用户）且文档权限仍成立。
+func (d *Deps) docStillAllowed(ctx context.Context, c *docConn) bool {
+	sess, err := d.Store.ValidateSession(ctx, c.token)
+	return err == nil && sess.UserID == c.uid && d.docAccess(ctx, c.docID, c.uid)
+}
+
+// docRevalidateUser immediately re-checks every live doc conn of uid and
+// kicks the ones that lost access (member removed, suspended, password
+// changed, session revoked). uuid.Nil re-checks everyone.
+// 立即复核 uid 的全部文档连接并踢掉失权者（被踢、停用、改密、吊销）。
+func (d *Deps) docRevalidateUser(ctx context.Context, uid uuid.UUID) {
+	docRooms.Range(func(k, _ any) bool {
+		for _, c := range docRoomConns(k.(uuid.UUID)) {
+			if (uid == uuid.Nil || c.uid == uid) && !d.docStillAllowed(ctx, c) {
+				c.cancel()
+			}
+		}
+		return true
+	})
+}
+
+// docCloseRoom kicks everyone off a doc (deleted). 删除文档时清空房间。
+func docCloseRoom(docID uuid.UUID) {
+	for _, c := range docRoomConns(docID) {
+		c.cancel()
+	}
+}
+
+// docWS — GET /ws/doc/{id}?token= : auth → ACL → join room → relay.
+func (d *Deps) docWS(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	sess, err := d.Store.ValidateSession(r.Context(), token)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	docID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil || !d.docAccess(r.Context(), docID, sess.UserID) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	c := &docConn{
+		ws: ws, docID: docID, uid: sess.UserID, token: token, cancel: cancel,
+		awIDs: map[uint64]uint64{},
+	}
+	d.docServe(ctx, c)
+}
+
+// write serializes WS sends per conn. 每连接串行写。
+func (c *docConn) write(ctx context.Context, frame []byte) error {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	return c.ws.Write(ctx, websocket.MessageBinary, frame)
+}
+
+func (d *Deps) docServe(ctx context.Context, c *docConn) {
+	room := docJoin(c)
+	defer func() {
+		docLeave(room, c)
+		for id, clock := range c.awIDs {
+			d.docBroadcast(c.docID, c, awarenessRemove(id, clock+1))
+		}
+		_ = c.ws.Close(websocket.StatusPolicyViolation, "closed")
+	}()
+
+	// Replay stored updates: one SyncStep2 frame per update (empty
+	// SyncStep2 when the log is empty so the client finishes its
+	// handshake either way). replayedTo is the compaction watermark.
+	updates, replayedTo, err := d.Docs.LoadUpdates(ctx, c.docID)
+	if err != nil {
+		return
+	}
+	if len(updates) == 0 {
+		_ = c.write(ctx, syncFrame(syncStep2, emptyYjsUpdate))
+	}
+	for _, u := range updates {
+		if err := c.write(ctx, syncFrame(syncStep2, u)); err != nil {
+			return
+		}
+	}
+	// Ask the client for its state — empty state vector pulls its full
+	// doc; the reply (this conn's first SyncStep2) compacts the log.
+	_ = c.write(ctx, syncFrame(syncStep1, emptyStateVector))
+	snapshotPending := true
+
+	// Keepalive + access re-check (see docRevalidateEvery).
+	// 保活 + 权限复核。
+	go func() {
+		t := time.NewTicker(docRevalidateEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if !d.docStillAllowed(ctx, c) {
+					c.cancel()
+					return
+				}
+				if err := c.write(ctx, []byte{msgQueryAwareness}); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	// Replay peers' latest awareness so presence shows up instantly
+	// instead of waiting for their next cursor move.
+	room.mu.Lock()
+	var awFrames [][]byte
+	for peer := range room.conns {
+		if peer != c && len(peer.awLast) > 0 {
+			awFrames = append(awFrames, awarenessFrame(peer.awLast))
+		}
+	}
+	room.mu.Unlock()
+	for _, f := range awFrames {
+		if err := c.write(ctx, f); err != nil {
+			return
+		}
+	}
+
+	for {
+		mt, raw, err := c.ws.Read(ctx)
+		if err != nil {
+			return
+		}
+		if mt != websocket.MessageBinary || len(raw) == 0 || len(raw) > docMaxMsg {
+			continue
+		}
+		r := bytes.NewReader(raw)
+		mtype, err := getVarUint(r)
+		if err != nil {
+			continue
+		}
+		switch mtype {
+		case msgSync:
+			sub, err := getVarUint(r)
+			if err != nil {
+				continue
+			}
+			data, err := getVarBytes(r)
+			if err != nil {
+				continue
+			}
+			switch sub {
+			case syncStep1:
+				// Client asks for what it misses: replay the current
+				// log — reload so updates landed since join are included.
+				log2, _, err := d.Docs.LoadUpdates(ctx, c.docID)
+				if err != nil {
+					return
+				}
+				for _, u := range log2 {
+					if err := c.write(ctx, syncFrame(syncStep2, u)); err != nil {
+						return
+					}
+				}
+				if len(log2) == 0 {
+					_ = c.write(ctx, syncFrame(syncStep2, emptyYjsUpdate))
+				}
+			case syncUpd, syncStep2:
+				if len(data) == 0 || bytes.Equal(data, emptyYjsUpdate) {
+					if sub == syncStep2 {
+						snapshotPending = false
+					}
+					continue
+				}
+				var perr error
+				if sub == syncStep2 && snapshotPending && replayedTo > 0 {
+					// Full state captured after the replay → compact.
+					perr = d.Docs.Compact(ctx, c.docID, data, replayedTo)
+				} else {
+					perr = d.Docs.AppendUpdate(ctx, c.docID, data)
+				}
+				if sub == syncStep2 {
+					snapshotPending = false
+				}
+				if perr != nil {
+					return // doc deleted or DB down: stop relaying / 文档已删或库不可用
+				}
+				d.docBroadcast(c.docID, c, raw)
+			}
+		case msgAwareness:
+			data, err := getVarBytes(r)
+			if err != nil {
+				continue
+			}
+			for id, clock := range awarenessClients(data) {
+				c.awIDs[id] = clock
+			}
+			room.mu.Lock()
+			c.awLast = data
+			room.mu.Unlock()
+			d.docBroadcast(c.docID, c, raw)
+		}
+	}
+}
+
+// docBroadcast sends a frame to every conn in the room except src.
+func (d *Deps) docBroadcast(docID uuid.UUID, src *docConn, frame []byte) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, c := range docRoomConns(docID) {
+		if c != src {
+			_ = c.write(ctx, frame)
+		}
+	}
+}

@@ -34,8 +34,10 @@ var appIconPNG []byte
 // 两个坑：1) 拦截器还会看到先于真窗口收消息的隐藏辅助 HWND，once 会浪费在
 // 它身上，要按 hwnd 记；2) 必须先标记再发消息——WM_SETICON 同步重入同一
 // wndProc，sync.Once 会在建窗消息里自锁导致窗口永远建不出来。
-var iconHwnds sync.Map
-var iconSm, iconLg atomic.Uintptr
+var (
+	iconHwnds      sync.Map
+	iconSm, iconLg atomic.Uintptr
+)
 
 func setWindowIcon(hwnd uintptr) {
 	if _, done := iconHwnds.LoadOrStore(hwnd, struct{}{}); done {
@@ -141,7 +143,7 @@ func saveWindowRect(hwnd uintptr) {
 	if p == "" {
 		return
 	}
-	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	_ = os.MkdirAll(filepath.Dir(p), 0o750)
 	if b, err := json.Marshal(r); err == nil {
 		_ = os.WriteFile(p, b, 0o600)
 	}
@@ -155,7 +157,7 @@ func savedWindowRect() (winRect, bool) {
 	if p == "" {
 		return r, false
 	}
-	b, err := os.ReadFile(p)
+	b, err := os.ReadFile(p) //nolint:gosec // G304: fixed file under the user config dir
 	if err != nil || json.Unmarshal(b, &r) != nil || r.W < 200 || r.H < 100 {
 		return r, false
 	}

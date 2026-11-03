@@ -128,6 +128,13 @@ func (d *Deps) mailSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request / 请求无效", http.StatusBadRequest)
 		return
 	}
+	// Mail attachments become readable by every recipient (objectViaMail)
+	// and may leave the system via SMTP — sender must be able to read them.
+	// 邮件附件对所有收件人可读且可能经 SMTP 外发——发件人必须先可读。
+	if err := d.requireReadableObjects(r.Context(), uid, req.ObjectIDs); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	msgID, external, err := d.Mail.Compose(r.Context(), uid, req.To, req.Cc,
 		req.Subject, req.Body, req.InReplyTo, req.ObjectIDs)
 	if errors.Is(err, mail.ErrNoAddress) {
