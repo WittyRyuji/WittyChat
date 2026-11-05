@@ -66,10 +66,10 @@ func (d *Deps) updateMe(ctx context.Context, in *struct {
 		return nil, err
 	}
 	if name != nil {
-		d.Audit.Log(ctx, &u.ID, audit.ActorUser, "profile.rename", u.Email, nil, clientIP(in.XForwardedFor))
+		d.Audit.Log(ctx, &u.ID, audit.ActorUser, "profile.rename", u.Email, nil, clientIPCtx(ctx))
 	}
 	if avatar != nil {
-		d.Audit.Log(ctx, &u.ID, audit.ActorUser, "profile.avatar", u.Email, nil, clientIP(in.XForwardedFor))
+		d.Audit.Log(ctx, &u.ID, audit.ActorUser, "profile.avatar", u.Email, nil, clientIPCtx(ctx))
 	}
 	fresh, err := d.Store.UserByID(ctx, u.ID)
 	if err != nil {

@@ -31,23 +31,25 @@ import (
 
 // Deps carries everything handlers need.
 type Deps struct {
-	Pool      *pgxpool.Pool
-	Store     *auth.Store
-	Audit     *audit.Emitter
-	Limiter   *auth.Limiter
-	SecretKey []byte
-	Issuer    string // TOTP issuer / 工作区名
-	PublicURL string // e.g. https://im.example.com — used to build activation URLs
-	IM        *im.Store
-	Hub       *realtime.Hub
-	Objects   *objects.Store
-	Settings  *settings.Store
-	Signer    *objects.Signer // short-lived download URLs / 签名下载URL
-	Mail      *mail.Store
-	Agents    *agents.Store
-	HR        *hr.Store
-	Docs      *docs.Store
-	Office    *OfficeConfig // nil → OnlyOffice routes off / 未配置则不挂编辑路由
+	Pool        *pgxpool.Pool
+	Store       *auth.Store
+	Audit       *audit.Emitter
+	Limiter     *auth.Limiter // per email+IP throttle / 按账号+IP
+	AcctLimiter *auth.Limiter // per-account throttle / 按账号（IP 轮换防不住）
+	SecretKey   []byte
+	Issuer      string // TOTP issuer / 工作区名
+	PublicURL   string // e.g. https://im.example.com — used to build activation URLs
+	TrustProxy  bool   // WITTYCHAT_TRUST_PROXY: honor the rightmost XFF hop / 信任反代追加的 XFF
+	IM          *im.Store
+	Hub         *realtime.Hub
+	Objects     *objects.Store
+	Settings    *settings.Store
+	Signer      *objects.Signer // short-lived download URLs / 签名下载URL
+	Mail        *mail.Store
+	Agents      *agents.Store
+	HR          *hr.Store
+	Docs        *docs.Store
+	Office      *OfficeConfig // nil → OnlyOffice routes off / 未配置则不挂编辑路由
 }
 
 // New builds the root handler: API routes + HTML pages + healthz.
@@ -86,7 +88,7 @@ func New(d *Deps) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	return cors(securityHeaders(mux))
+	return cors(securityHeaders(realIPMiddleware(d.TrustProxy, mux)))
 }
 
 // cors allows cross-origin API access for trusted client shells only —
@@ -144,14 +146,55 @@ func bearerToken(h string) (string, bool) {
 	return t, t != ""
 }
 
-func clientIP(xff string) net.IP {
-	if xff != "" {
-		if i := strings.IndexByte(xff, ','); i >= 0 {
-			xff = xff[:i]
+// The real client IP is resolved ONCE per request in realIPMiddleware and
+// carried in the context. Trust rules: without a trusted proxy the TCP peer
+// is authoritative; behind our own proxy (WITTYCHAT_TRUST_PROXY) only the
+// RIGHTMOST X-Forwarded-For hop counts — proxies append, so the last entry
+// is the one our trusted proxy saw and the client cannot forge it. Using
+// the leftmost entry let attackers rotate IPs past the login lockout.
+// 真实客户端 IP 每请求只解析一次（realIPMiddleware）入 context。信任规则：
+// 无受信代理时以 TCP 对端为准；在自有代理后只认 XFF 最右一跳——代理是追加
+// 语义，最右项是可信代理亲眼所见，客户端伪造不了。此前取最左项，攻击者轮换
+// IP 即可绕过登录锁定。
+type ctxKeyIP struct{}
+
+func realIPMiddleware(trustProxy bool, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := remoteIP(r)
+		if trustProxy {
+			if x := rightmostXFF(r.Header.Get("X-Forwarded-For")); x != nil {
+				ip = x
+			}
 		}
-		return net.ParseIP(strings.TrimSpace(xff))
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyIP{}, ip)))
+	})
+}
+
+func remoteIP(r *http.Request) net.IP {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	return net.ParseIP(host)
+}
+
+func rightmostXFF(xff string) net.IP {
+	if xff == "" {
+		return nil
+	}
+	parts := strings.Split(xff, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if ip := net.ParseIP(strings.TrimSpace(parts[i])); ip != nil {
+			return ip
+		}
 	}
 	return nil
+}
+
+// clientIPCtx returns the resolved client IP (nil outside the middleware).
+func clientIPCtx(ctx context.Context) net.IP {
+	ip, _ := ctx.Value(ctxKeyIP{}).(net.IP)
+	return ip
 }
 
 // requireUser validates the bearer token → session + active user.

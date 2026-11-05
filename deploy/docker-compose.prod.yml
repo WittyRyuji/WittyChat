@@ -49,6 +49,9 @@ services:
       # ONLYOFFICE_URL 保持浏览器可达地址。
       WITTYCHAT_ONLYOFFICE_CALLBACK_BASE: http://server:8080
       WITTYCHAT_ONLYOFFICE_INTERNAL_URL: http://onlyoffice
+      # Behind nginx: the rightmost X-Forwarded-For hop is the real client IP
+      # (login throttling + audit). 生产走 nginx：XFF 最右一跳即真实来源。
+      WITTYCHAT_TRUST_PROXY: "1"
     volumes:
       - objdata:/data
     depends_on:

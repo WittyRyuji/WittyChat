@@ -114,14 +114,13 @@ func (d *Deps) renameConv(ctx context.Context, in *struct {
 		return nil, err
 	}
 	convID, _ := uuid.Parse(in.ID)
-	seq, err := d.IM.RenameConv(ctx, u.ID, convID, in.Body.Title)
+	op, err := d.IM.RenameConv(ctx, u.ID, convID, in.Body.Title)
 	if err != nil {
 		return nil, imErr(err)
 	}
-	d.notifyMembers(ctx, convID, seq, u.ID)
-	return &struct{ Body apitypes.OpEvent }{
-		Body: apitypes.OpEvent{OpSeq: seq, Kind: apitypes.OpRename},
-	}, nil
+	d.notifyMembers(ctx, convID, op.Seq, u.ID)
+	op.ActorName = u.DisplayName
+	return &struct{ Body apitypes.OpEvent }{Body: *opEvent(op)}, nil
 }
 
 func (d *Deps) transferConv(ctx context.Context, in *struct {
@@ -139,14 +138,13 @@ func (d *Deps) transferConv(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, huma.Error400BadRequest("bad user_id")
 	}
-	seq, err := d.IM.TransferOwner(ctx, u.ID, convID, target)
+	op, err := d.IM.TransferOwner(ctx, u.ID, convID, target)
 	if err != nil {
 		return nil, imErr(err)
 	}
-	d.notifyMembers(ctx, convID, seq, u.ID)
-	return &struct{ Body apitypes.OpEvent }{
-		Body: apitypes.OpEvent{OpSeq: seq, Kind: apitypes.OpTransfer},
-	}, nil
+	d.notifyMembers(ctx, convID, op.Seq, u.ID)
+	op.ActorName = u.DisplayName
+	return &struct{ Body apitypes.OpEvent }{Body: *opEvent(op)}, nil
 }
 
 func (d *Deps) setMemberRole(ctx context.Context, in *struct {
@@ -165,14 +163,13 @@ func (d *Deps) setMemberRole(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, huma.Error400BadRequest("bad user_id")
 	}
-	seq, err := d.IM.SetMemberRole(ctx, u.ID, convID, target, in.Body.Role)
+	op, err := d.IM.SetMemberRole(ctx, u.ID, convID, target, in.Body.Role)
 	if err != nil {
 		return nil, imErr(err)
 	}
-	d.notifyMembers(ctx, convID, seq, u.ID)
-	return &struct{ Body apitypes.OpEvent }{
-		Body: apitypes.OpEvent{OpSeq: seq, Kind: apitypes.OpRoleChange},
-	}, nil
+	d.notifyMembers(ctx, convID, op.Seq, u.ID)
+	op.ActorName = u.DisplayName
+	return &struct{ Body apitypes.OpEvent }{Body: *opEvent(op)}, nil
 }
 
 func (d *Deps) searchPublicGroups(ctx context.Context, in *struct {
@@ -207,12 +204,12 @@ func (d *Deps) joinPublicGroup(ctx context.Context, in *struct {
 		return nil, err
 	}
 	convID, _ := uuid.Parse(in.ID)
-	seq, err := d.IM.JoinPublicGroup(ctx, convID, u.ID)
+	op, err := d.IM.JoinPublicGroup(ctx, convID, u.ID)
 	if err != nil {
 		return nil, imErr(err)
 	}
-	if seq >= 0 {
-		d.notifyMembers(ctx, convID, seq, u.ID)
+	if op != nil {
+		d.notifyMembers(ctx, convID, op.Seq, u.ID)
 	}
 	return &struct{}{}, nil
 }

@@ -235,15 +235,21 @@ func (s *Store) ReplaceBytes(ctx context.Context, id uuid.UUID, r io.Reader, mim
 		mime = o.Mime
 	}
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		// Snapshot the current version before re-pointing. 先记录旧版本。
+		// Snapshot the current version before re-pointing, with the full
+		// segment list so old bytes stay restorable/GC-able. 先记录旧版本，
+		// 含全部分段，旧字节才可恢复、GC 才能删对文件。
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO object_versions
-			  (object_id, version, sha256, size_bytes, mime, location, storage_key, replaced_by)
+			  (object_id, version, sha256, size_bytes, mime, location, storage_key, segments, replaced_by)
 			SELECT o.id,
 			       COALESCE((SELECT max(v.version) FROM object_versions v WHERE v.object_id=o.id), 0) + 1,
 			       o.sha256, o.size_bytes, COALESCE(o.mime,''), o.location,
 			       COALESCE((SELECT g.storage_key FROM object_segments g
 			                 WHERE g.object_id=o.id AND g.seg_index=0), ''),
+			       (SELECT COALESCE(jsonb_agg(
+			          jsonb_build_object('seg', g.seg_index, 'size', g.size_bytes, 'key', g.storage_key)
+			          ORDER BY g.seg_index), '[]'::jsonb)
+			        FROM object_segments g WHERE g.object_id=o.id),
 			       $2
 			FROM objects o WHERE o.id=$1 AND o.status<>'deleted'`, id, by); err != nil {
 			return err
@@ -352,10 +358,14 @@ func (s *Store) Peek(ctx context.Context, id uuid.UUID) (*Object, error) {
 }
 
 // UsedBytes sums ready-object sizes for the workspace quota check.
+// Retained version history counts too — otherwise an editor could grow
+// storage without limit by re-saving. 配额统计含保留的历史版本，
+// 否则反复保存可绕过配额膨胀存储。
 func (s *Store) UsedBytes(ctx context.Context) (int64, error) {
 	var n int64
-	err := s.pool.QueryRow(ctx,
-		`SELECT COALESCE(SUM(size_bytes),0) FROM objects WHERE status='ready'`).Scan(&n)
+	err := s.pool.QueryRow(ctx, `
+		SELECT (SELECT COALESCE(SUM(size_bytes),0) FROM objects WHERE status='ready')
+		     + (SELECT COALESCE(SUM(size_bytes),0) FROM object_versions)`).Scan(&n)
 	return n, err
 }
 

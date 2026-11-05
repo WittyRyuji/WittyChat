@@ -114,7 +114,7 @@ func (d *Deps) hrCreate(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, err
 	}
-	d.Audit.Log(ctx, &u.ID, "user", "hr.request.create:"+r.Kind, r.ID.String(), nil, clientIP(in.XForwardedFor))
+	d.Audit.Log(ctx, &u.ID, "user", "hr.request.create:"+r.Kind, r.ID.String(), nil, clientIPCtx(ctx))
 	return &struct{ Body apitypes.HRRequest }{Body: toHRRequest(r)}, nil
 }
 
@@ -192,7 +192,7 @@ func (d *Deps) hrDecide(ctx context.Context, in *struct {
 		action = "hr.request.approve"
 	}
 	d.Audit.Log(ctx, &u.ID, "admin", action+":"+r.Kind, r.ID.String(),
-		map[string]any{"requester": r.Requester.String(), "note": in.Body.Note}, clientIP(in.XForwardedFor))
+		map[string]any{"requester": r.Requester.String(), "note": in.Body.Note}, clientIPCtx(ctx))
 	return &struct{ Body apitypes.HRRequest }{Body: toHRRequest(r)}, nil
 }
 

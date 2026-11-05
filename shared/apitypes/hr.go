@@ -7,8 +7,8 @@ import "encoding/json"
 // HRRequestCreate — kind + free-form payload validated server-side per kind:
 //
 //	leave:    {leave_type, start_date, end_date, days?, reason?}
-//	contract: {title, counterparty, amount_cents?, attachment_object_id?, reason?}
-//	expense:  {category, amount_cents, currency?, invoice_date?, attachment_object_id?, memo?}
+//	contract: {title, counterparty, amount_cents?, attachment_object_ids?, reason?}
+//	expense:  {category, amount_cents, currency?, invoice_date?, attachment_object_ids?, memo?}
 type HRRequestCreate struct {
 	Kind    string          `json:"kind" required:"true" enum:"leave,contract,expense"`
 	Payload json.RawMessage `json:"payload" required:"true"`

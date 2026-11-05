@@ -241,9 +241,19 @@ export const api2 = {
     if (!res.ok) throw new Error(`upload failed: ${res.status}`);
     return res.json() as Promise<{ id: string; name: string; size: number; mime: string }>;
   },
-  downloadURL: (objId: string) =>
-    `${API_BASE}/api/v1/objects/${objId}/download?token=${getToken()}`,
-  thumbURL: (objId: string) => `${API_BASE}/api/v1/objects/${objId}/thumb?token=${getToken()}`,
+  // Object fetch paths carry NO token — bytes are pulled via authBlob
+  // (Authorization header) and shown through blob: URLs; browser/system
+  // contexts get a short-lived signed URL instead (objectSignedURL).
+  // 对象路径不带 token——字节经 authBlob（Authorization 头）取回后用
+  // blob: URL 展示；系统浏览器场景换 15 分钟签名链接。
+  downloadURL: (objId: string) => `${API_BASE}/api/v1/objects/${objId}/download`,
+  thumbURL: (objId: string) => `${API_BASE}/api/v1/objects/${objId}/thumb`,
+  // objectSignedURL mints a 15-min capability URL for the object —
+  // safe to hand to the system browser / history (no session token).
+  objectSignedURL: async (objId: string) => {
+    const r = await req<{ url: string }>("GET", `/api/v1/objects/${objId}/url`);
+    return API_BASE + r.url;
+  },
   // uploadThumb pushes a client-generated thumbnail for an object.
   // uploadThumb 上传客户端生成的缩略图（canvas 压缩，服务端不再解码）。
   uploadThumb: async (objId: string, blob: Blob) => {
@@ -257,7 +267,7 @@ export const api2 = {
     if (!res.ok) throw new Error(`thumb ${res.status}`);
   },
   avatarURL: (userId: string) => `${API_BASE}/api/v1/users/${userId}/avatar`,
-  workspaceLogoURL: () => `${API_BASE}/api/v1/workspace/logo?token=${getToken()}`,
+  workspaceLogoPath: () => "/api/v1/workspace/logo",
   uploadObject: async (file: File, purpose: string) => {
     const fd = new FormData();
     fd.append("file", file, file.name);
@@ -276,10 +286,12 @@ export const api2 = {
     if (!res.ok) throw new Error("download failed");
     return res.blob();
   },
-  // OnlyOffice edit entry — /office/open validates the session and 302s
-  // to the signed editor page; the shell's link interceptor opens it in
-  // the system browser. 在线编辑入口（服务端校验后跳签名编辑页）。
-  officeEditURL: (objId: string) => `${API_BASE}/office/open?obj=${objId}&token=${getToken()}`,
+  // OnlyOffice edit URL — header-authed endpoint returns a signed
+  // capability link for the system browser. Session tokens never leave
+  // the app (the old ?token= office link leaked into browser history).
+  // 在线编辑地址：鉴权接口返回签名能力链接交系统浏览器——会话 token
+  // 不出应用（旧 ?token= 链接会落浏览器历史）。
+  officeURL: (objId: string) => req<{ url: string }>("GET", `/api/v1/objects/${objId}/office-url`),
   officeEnabled: () =>
     (officeOn ??= api
       .settings()
@@ -412,7 +424,13 @@ export const mailApi = {
 export function connectWS(onFrame: (f: WsFrame) => void, onClose: () => void): WebSocket {
   const proto = location.protocol === "https:" || API_BASE.startsWith("https") ? "wss" : "ws";
   const host = API_BASE ? new URL(API_BASE).host : location.host;
-  const ws = new WebSocket(`${proto}://${host}/ws?token=${getToken()}`);
+  // Session token rides Sec-WebSocket-Protocol (wt1.<token>) — never the
+  // URI, so proxies/access logs never record it. 会话 token 走
+  // Sec-WebSocket-Protocol 子协议而非 URI——代理/访问日志都记不到。
+  const ws = new WebSocket(
+    `${proto}://${host}/ws`,
+    getToken() ? ["wittychat", `wt1.${getToken()}`] : []
+  );
   ws.onmessage = (ev) => {
     try {
       onFrame(JSON.parse(ev.data));
@@ -429,6 +447,44 @@ export function newClientMsgId(): string {
   return crypto.randomUUID();
 }
 
+// authBlob fetches bytes with the session header (no ?token= URL) —
+// feed <img> with the returned Blob via URL.createObjectURL.
+// 带会话头取字节（URL 不含 token）；返回 Blob 供 createObjectURL 给 <img>。
+export async function authBlob(path: string): Promise<Blob> {
+  const res = await fetch(API_BASE + path, {
+    headers: { Authorization: `Bearer ${getToken()}` },
+  });
+  if (!res.ok) throw new Error(`fetch ${res.status}`);
+  return res.blob();
+}
+
+// openExternal hands an absolute URL to the system browser — the Wails
+// shell API inside the app, window.open elsewhere.
+// 交给系统浏览器：壳内走 Wails runtime，浏览器开发环境走 window.open。
+export async function openExternal(url: string): Promise<void> {
+  if (inWails) {
+    const { Browser } = await import("@wailsio/runtime");
+    await Browser.OpenURL(url).catch(() => {});
+    return;
+  }
+  window.open(url, "_blank", "noopener");
+}
+
+// downloadExternal: mint a 15-min signed URL and open it in the system
+// browser — session token never reaches history/logs.
+// 下载外链：签发 15 分钟能力 URL 交系统浏览器——token 不进历史/日志。
+export async function downloadExternal(objId: string): Promise<void> {
+  const u = await api2.objectSignedURL(objId);
+  await openExternal(u);
+}
+
+// officeOpenExternal: signed editor page in the system browser.
+// 在线编辑：取签名编辑页地址交系统浏览器。
+export async function officeOpenExternal(objId: string): Promise<void> {
+  const r = await api2.officeURL(objId);
+  await openExternal(r.url);
+}
+
 // ---- Docs / 协同文档 ----
 // In-app native documents (Feishu-style). REST below manages metadata;
 // realtime editing rides GET /ws/doc/{id} speaking the y-websocket
@@ -443,6 +499,7 @@ export interface DocInfo {
   created_at: string;
   updated_at: string;
   editors: number; // live editor count, relay-provided
+  shared?: boolean; // convDocs: present via doc_shares, not bound / 经分享而非绑定
 }
 
 export const docsApi = {
@@ -459,6 +516,8 @@ export const docsApi = {
   // Grant a conversation's members access (sent as a link there).
   share: (id: string, convId: string) =>
     req("POST", `/api/v1/docs/${id}/share`, { conv_id: convId }),
+  unshare: (id: string, convId: string) =>
+    req("POST", `/api/v1/docs/${id}/unshare`, { conv_id: convId }),
   convDocs: (convId: string) =>
     req<{ docs: DocInfo[] }>("GET", `/api/v1/conversations/${convId}/docs`),
 };

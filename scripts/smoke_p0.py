@@ -46,9 +46,9 @@ act_url = body["activation_url"]
 uid = body["user"]["id"]
 from urllib.parse import urlparse, parse_qs
 tok = parse_qs(urlparse(act_url).query).get("token", [act_url.rsplit("/", 1)[-1]])[0]
-st, b = req("POST", "/api/v1/auth/activate", {"token": tok, "password": "SmokePass123!"})
+st, b = req("POST", "/api/v1/auth/activate", {"token": tok, "password": "SmokePass123!00"})
 check("activate link", st == 200, str(st))
-st, b = req("POST", "/api/v1/auth/login", {"email": email, "password": "SmokePass123!",
+st, b = req("POST", "/api/v1/auth/login", {"email": email, "password": "SmokePass123!00",
                                            "device_name": "s", "device_kind": "web"})
 smoke = json.loads(b)["session_token"] if st == 200 else None
 check("new user login", smoke is not None, str(st))

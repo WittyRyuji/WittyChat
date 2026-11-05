@@ -10,11 +10,13 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"html/template"
 	"net/http"
 	"strings"
 	"wittychat/core/audit"
 	"wittychat/core/auth"
+	"wittychat/core/settings"
 	"wittychat/server/adminui"
 
 	"github.com/google/uuid"
@@ -127,8 +129,8 @@ func registerPages(mux *http.ServeMux, d *Deps) {
 			fail("两次输入的密码不一致")
 			return
 		}
-		if len(pw) < 8 {
-			fail("密码至少 8 位")
+		if min := int(d.Settings.Int(r.Context(), settings.KeySecurityMinPass, settings.DefMinPassword)); len(pw) < min {
+			fail(fmt.Sprintf("密码至少 %d 位", min))
 			return
 		}
 		userID, kind, err := d.Store.ConsumeLink(r.Context(), token)
@@ -302,8 +304,8 @@ func registerSetup(mux *http.ServeMux, d *Deps) {
 			data.Error = "邮箱和显示名必填"
 		} else if pw != pw2 {
 			data.Error = "两次输入的密码不一致"
-		} else if len(pw) < 8 {
-			data.Error = "密码至少 8 位"
+		} else if min := int(d.Settings.Int(r.Context(), settings.KeySecurityMinPass, settings.DefMinPassword)); len(pw) < min {
+			data.Error = fmt.Sprintf("密码至少 %d 位", min)
 		}
 		if data.Error != "" {
 			renderSetup(w, data)

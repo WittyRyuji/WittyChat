@@ -176,6 +176,10 @@ export default function SheetEditor({
         break;
       default:
         if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          // The char is seeded via startEdit — prevent the browser from
+          // also inserting it into the freshly-mounted input (double char).
+          // 首字符由 startEdit 预填；阻止浏览器再把它敲进新出现的输入框。
+          e.preventDefault();
           startEdit(r, c, e.key);
         }
         return;

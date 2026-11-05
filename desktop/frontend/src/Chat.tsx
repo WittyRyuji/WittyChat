@@ -3,6 +3,7 @@ import type { DocInfo } from "./api";
 import {
   api,
   api2,
+  authBlob,
   type ConversationInfo,
   connectWS,
   docsApi,
@@ -11,6 +12,7 @@ import {
   type MessageSearchHit,
   newClientMsgId,
   type OpEvent,
+  openExternal,
   type UserPublic,
   type WsFrame,
 } from "./api";
@@ -32,6 +34,7 @@ import {
 } from "./icons";
 import { Mail } from "./Mail";
 import { Md } from "./md";
+import { ObjImg } from "./objimg";
 import { Settings } from "./Settings";
 
 const MSG_LIMIT = 2000;
@@ -369,7 +372,11 @@ export function Chat({
       .then((s) => {
         setMsgLimit(s.im.message_max_chars);
         setWsName(s.workspace.name);
-        setWsLogo(api2.workspaceLogoURL()); // server falls back to built-in logo
+        // Logo via header-authed blob — keeps the session token out of
+        // image URLs. logo 经鉴权 blob 取回，URL 不携带会话 token。
+        authBlob(api2.workspaceLogoPath())
+          .then((b) => setWsLogo(URL.createObjectURL(b)))
+          .catch(() => {});
       })
       .catch(() => {});
     let dead = false;
@@ -612,6 +619,35 @@ export function Chat({
     }
   };
 
+  // Office edit + big-image viewer: session token never leaves the app —
+  // office goes through the header-authed office-url endpoint (signed
+  // capability for the system browser), the viewer fetches to a blob.
+  // 在线编辑与大图预览：token 不出应用——编辑链接走鉴权端点取签名能力
+  // URL 交系统浏览器，预览图经 Authorization 头取成 blob。
+  const officeOpen = (objId: string) => {
+    api2
+      .officeURL(objId)
+      .then((r) => openExternal(r.url))
+      .catch(() => setErr("无法打开在线编辑"));
+  };
+
+  const openViewerBlob = (objId: string, name: string) => {
+    authBlob(api2.downloadURL(objId))
+      .then((b) =>
+        setViewer((v) => {
+          if (v?.url.startsWith("blob:")) URL.revokeObjectURL(v.url);
+          return { url: URL.createObjectURL(b), name };
+        })
+      )
+      .catch(() => setErr("预览失败"));
+  };
+
+  const closeViewer = () =>
+    setViewer((v) => {
+      if (v?.url.startsWith("blob:")) URL.revokeObjectURL(v.url);
+      return null;
+    });
+
   const delConvDoc = async (d: DocInfo) => {
     if (!window.confirm(`删除「${d.title || "未命名"}」？`)) return;
     try {
@@ -619,6 +655,19 @@ export function Chat({
       setConvDocs((l) => l?.filter((x) => x.id !== d.id) ?? l);
     } catch {
       setErr("删除失败：只有属主或群主可删");
+    }
+  };
+
+  // Remove a shared doc from this conv's list (the doc itself survives).
+  // 把分享进来的文档移出本群列表（文档本体不受影响）。
+  const unshareConvDoc = async (d: DocInfo) => {
+    if (!activeId) return;
+    if (!window.confirm(`把「${d.title || "未命名"}」移出本群？文档本身不会删除。`)) return;
+    try {
+      await docsApi.unshare(d.id, activeId);
+      setConvDocs((l) => l?.filter((x) => x.id !== d.id) ?? l);
+    } catch {
+      setErr("移出失败：只有文档属主或其群的群主/管理员可撤销分享");
     }
   };
 
@@ -989,26 +1038,12 @@ export function Chat({
                                       key={a.id}
                                       className="att-img"
                                       title={`${a.name} · 点击查看大图`}
-                                      onClick={() =>
-                                        setViewer({ url: api2.downloadURL(a.id), name: a.name })
-                                      }
+                                      onClick={() => openViewerBlob(a.id, a.name)}
                                     >
-                                      <img
-                                        src={
-                                          a.mime === "image/gif"
-                                            ? api2.downloadURL(a.id)
-                                            : api2.thumbURL(a.id)
-                                        }
+                                      <ObjImg
+                                        id={a.id}
+                                        kind={a.mime === "image/gif" ? "full" : "thumb"}
                                         alt={a.name}
-                                        loading="lazy"
-                                        onError={(e) => {
-                                          // thumb task may not have run yet — fall back to full image
-                                          const img = e.currentTarget;
-                                          if (!img.dataset.fbk) {
-                                            img.dataset.fbk = "1";
-                                            img.src = api2.downloadURL(a.id);
-                                          }
-                                        }}
                                       />
                                     </button>
                                   ) : (
@@ -1023,14 +1058,13 @@ export function Chat({
                                         <span className="att-size">{fmtSize(a.size)}</span>
                                       </button>
                                       {officeOn && isOfficeFile(a.name) && (
-                                        <a
+                                        <button
+                                          type="button"
                                           className="att-edit"
-                                          href={api2.officeEditURL(a.id)}
-                                          target="_blank"
-                                          rel="noreferrer"
+                                          onClick={() => officeOpen(a.id)}
                                         >
                                           在线编辑
-                                        </a>
+                                        </button>
                                       )}
                                     </span>
                                   )
@@ -1248,12 +1282,9 @@ export function Chat({
                                   title={`${s.name} · 点击发送`}
                                   onClick={() => sendSticker(s.id)}
                                 >
-                                  <img
-                                    src={
-                                      s.mime === "image/gif"
-                                        ? api2.downloadURL(s.id)
-                                        : api2.thumbURL(s.id)
-                                    }
+                                  <ObjImg
+                                    id={s.id}
+                                    kind={s.mime === "image/gif" ? "full" : "thumb"}
                                     alt={s.name}
                                   />
                                 </button>
@@ -1369,16 +1400,28 @@ export function Chat({
                           <i className="doc-kind-ic">{KIND_ICON[d.kind] ?? "📄"}</i>
                           <span className="dp-title">{d.title || "未命名"}</span>
                           {d.editors > 0 && <i className="doc-live">{d.editors}</i>}
+                          {d.shared && <i className="dp-shared">分享</i>}
                           <time>{d.updated_at?.slice(0, 10)}</time>
                         </button>
-                        <button
-                          type="button"
-                          className="dp-del"
-                          title="删除"
-                          onClick={() => delConvDoc(d)}
-                        >
-                          ✕
-                        </button>
+                        {d.shared ? (
+                          <button
+                            type="button"
+                            className="dp-del"
+                            title="移出本群（不删除文档）"
+                            onClick={() => unshareConvDoc(d)}
+                          >
+                            ⊘
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="dp-del"
+                            title="删除"
+                            onClick={() => delConvDoc(d)}
+                          >
+                            ✕
+                          </button>
+                        )}
                       </div>
                     ))
                   )}
@@ -1449,8 +1492,8 @@ export function Chat({
             className="lightbox"
             role="dialog"
             aria-modal="true"
-            onClick={() => setViewer(null)}
-            onKeyDown={(e) => e.key === "Escape" && setViewer(null)}
+            onClick={closeViewer}
+            onKeyDown={(e) => e.key === "Escape" && closeViewer()}
           >
             <img src={viewer.url} alt={viewer.name} />
             <span className="lightbox-name">{viewer.name}</span>

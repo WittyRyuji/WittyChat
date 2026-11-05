@@ -6,9 +6,12 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"wittychat/core/audit"
 	"wittychat/core/auth"
+	"wittychat/core/settings"
 	"wittychat/shared/apitypes"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -89,21 +92,29 @@ func (d *Deps) login(ctx context.Context, in *struct {
 	Body apitypes.LoginRequest
 },
 ) (*struct{ Body apitypes.LoginResponse }, error) {
-	ip := clientIP(in.XForwardedFor)
-	key := in.Body.Email + "|" + func() string {
-		if ip != nil {
-			return ip.String()
-		}
-		return "?"
-	}()
+	ip := clientIPCtx(ctx)
+	// Throttle on two keys: email+IP (stops one source hammering many
+	// accounts) and email alone (stops distributed attempts at one
+	// account — a spoofed/rotated XFF can't dodge it). The email is
+	// normalized so case variants share one counter.
+	// 双键限速：账号+IP 防单源横扫多账号，仅账号防分布式打同一账号
+	// （伪造 XFF 绕不过）；邮箱归一化避免大小写变体绕过。
+	email := strings.ToLower(strings.TrimSpace(in.Body.Email))
+	ipStr := "?"
+	if ip != nil {
+		ipStr = ip.String()
+	}
+	key := email + "|" + ipStr
+	acctKey := email + "|*"
 
-	if !d.Limiter.Allow(key) {
+	if !d.Limiter.Allow(key) || !d.AcctLimiter.Allow(acctKey) {
 		return nil, huma.Error429TooManyRequests("too many failed attempts, try later / 失败过多，稍后再试")
 	}
 
-	u, err := d.Store.UserByEmail(ctx, in.Body.Email)
+	u, err := d.Store.UserByEmail(ctx, email)
 	if err != nil {
 		d.Limiter.Fail(key)
+		d.AcctLimiter.Fail(acctKey)
 		return nil, huma.Error401Unauthorized("invalid credentials")
 	}
 	if u.Status != auth.StatusActive {
@@ -116,6 +127,7 @@ func (d *Deps) login(ctx context.Context, in *struct {
 	ok, _ := auth.VerifyPassword(in.Body.Password, hash)
 	if !ok {
 		d.Limiter.Fail(key)
+		d.AcctLimiter.Fail(acctKey)
 		d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.login.fail", u.Email, nil, ip)
 		return nil, huma.Error401Unauthorized("invalid credentials")
 	}
@@ -127,6 +139,7 @@ func (d *Deps) login(ctx context.Context, in *struct {
 		}
 		if !d.Store.TOTPVerify(ctx, u.ID, in.Body.TOTP, d.SecretKey) {
 			d.Limiter.Fail(key)
+			d.AcctLimiter.Fail(acctKey)
 			return nil, huma.Error401Unauthorized("invalid totp code")
 		}
 	}
@@ -136,6 +149,7 @@ func (d *Deps) login(ctx context.Context, in *struct {
 		return nil, err
 	}
 	d.Limiter.Reset(key)
+	d.AcctLimiter.Reset(acctKey)
 	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.login", u.Email, nil, ip)
 
 	return &struct{ Body apitypes.LoginResponse }{
@@ -157,7 +171,7 @@ func (d *Deps) logout(ctx context.Context, in *struct {
 	}
 	_ = d.Store.RevokeSession(ctx, u.ID, sess.ID)
 	d.docRevalidateUser(ctx, u.ID)
-	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.logout", u.Email, nil, clientIP(in.XForwardedFor))
+	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.logout", u.Email, nil, clientIPCtx(ctx))
 	return &struct{}{}, nil
 }
 
@@ -196,6 +210,11 @@ func (d *Deps) activate(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, huma.Error400BadRequest("link invalid or expired / 链接无效或已过期")
 	}
+	// Workspace password floor (security.min_password, NIST default 15).
+	// 工作区密码下限（security.min_password，NIST 默认 15）。
+	if min := int(d.Settings.Int(ctx, settings.KeySecurityMinPass, settings.DefMinPassword)); len(in.Body.Password) < min {
+		return nil, huma.Error400BadRequest(fmt.Sprintf("password too short: at least %d chars / 密码至少 %d 位", min, min))
+	}
 	phc, err := auth.HashPassword(in.Body.Password)
 	if err != nil {
 		return nil, err
@@ -213,7 +232,7 @@ func (d *Deps) activate(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, err
 	}
-	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.link.used:"+kind, u.Email, nil, clientIP(in.XForwardedFor))
+	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.link.used:"+kind, u.Email, nil, clientIPCtx(ctx))
 
 	// Auto-login after activation/reset — one less step.
 	// 激活/重置后直接发会话，少一步登录。
@@ -280,7 +299,7 @@ func (d *Deps) revokeSession(ctx context.Context, in *struct {
 		return nil, err
 	}
 	d.docRevalidateUser(ctx, u.ID)
-	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.session.revoke", in.ID, nil, clientIP(in.XForwardedFor))
+	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.session.revoke", in.ID, nil, clientIPCtx(ctx))
 	return &struct{}{}, nil
 }
 
@@ -319,7 +338,7 @@ func (d *Deps) totpConfirm(ctx context.Context, in *struct {
 		}
 		return nil, err
 	}
-	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.totp.enable", u.Email, nil, clientIP(in.XForwardedFor))
+	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.totp.enable", u.Email, nil, clientIPCtx(ctx))
 	return &struct{}{}, nil
 }
 
@@ -343,6 +362,6 @@ func (d *Deps) totpDisable(ctx context.Context, in *struct {
 	if err := d.Store.TOTPDisable(ctx, u.ID); err != nil {
 		return nil, err
 	}
-	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.totp.disable", u.Email, nil, clientIP(in.XForwardedFor))
+	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.totp.disable", u.Email, nil, clientIPCtx(ctx))
 	return &struct{}{}, nil
 }

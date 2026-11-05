@@ -8,11 +8,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api2,
+  downloadExternal,
   type HRDay,
   type HRRequest,
   type HRSummary,
   hrApi,
   isOfficeFile,
+  officeOpenExternal,
   type UserPublic,
 } from "./api";
 
@@ -48,19 +50,26 @@ function AttLinks({ ids, names }: { ids?: string[]; names?: Record<string, strin
         const name = names?.[id] ?? "附件";
         return (
           <span key={id} className="att-file">
-            <a href={api2.downloadURL(id)} target="_blank" rel="noreferrer" className="hr-att">
+            <a
+              href={api2.downloadURL(id)}
+              rel="noreferrer"
+              className="hr-att"
+              onClick={(e) => {
+                e.preventDefault();
+                downloadExternal(id).catch(() => {});
+              }}
+            >
               {name}
             </a>
             {officeOn && isOfficeFile(name) && (
-              <a
+              <button
+                type="button"
                 className="att-edit"
-                href={api2.officeEditURL(id)}
-                target="_blank"
-                rel="noreferrer"
                 title="申请附件是不可变记录，只读打开"
+                onClick={() => officeOpenExternal(id).catch(() => {})}
               >
                 在线查看
-              </a>
+              </button>
             )}
           </span>
         );

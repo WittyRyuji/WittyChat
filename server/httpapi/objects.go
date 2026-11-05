@@ -179,7 +179,20 @@ func (d *Deps) downloadObject(w http.ResponseWriter, r *http.Request) {
 // 因为所有产生引用的写入口都先校验写入者可读（requireReadableObjects）。
 func (d *Deps) canReadObject(ctx context.Context, objID, uid uuid.UUID) (*objects.Object, error) {
 	obj, err := d.Objects.Get(ctx, objID, uid)
-	if err == nil || !errors.Is(err, objects.ErrForbidden) {
+	if err == nil {
+		if obj.Owner == uid {
+			return obj, nil
+		}
+		// Conv-member path: once every message referencing the object was
+		// recalled, the attachment must stop being readable ("撤回消息附件
+		// 留审计不可见"). An object never sent (no refs) stays readable by
+		// its conv like any other pending upload.
+		// 成员路径：引用该对象的消息全部被撤回后不再可读（撤回附件留审计
+		// 不可见）。从未被引用的对象（待发送）沿用对象会话权限。
+		if has, live := d.objectRefState(ctx, objID); !has || live {
+			return obj, nil
+		}
+	} else if !errors.Is(err, objects.ErrForbidden) {
 		return obj, err
 	}
 	if d.objectViaMail(ctx, objID, uid) || d.objectViaHR(ctx, objID, uid) ||
@@ -187,6 +200,22 @@ func (d *Deps) canReadObject(ctx context.Context, objID, uid uuid.UUID) (*object
 		return d.Objects.Peek(ctx, objID)
 	}
 	return nil, objects.ErrForbidden
+}
+
+// objectRefState reports (has attachment_refs, has ≥1 live ref): a ref is
+// dead once its message op was recalled. 返回（存在引用，存在未撤回引用）。
+func (d *Deps) objectRefState(ctx context.Context, objID uuid.UUID) (has, live bool) {
+	err := d.Pool.QueryRow(ctx, `
+		SELECT count(*) > 0,
+		       COALESCE(bool_or(NOT EXISTS (
+		         SELECT 1 FROM conv_ops x
+		         WHERE x.conv_id = r.conv_id AND x.kind='recall' AND x.target_op_seq = r.op_seq
+		       )), false)
+		FROM attachment_refs r WHERE r.object_id = $1`, objID).Scan(&has, &live)
+	if err != nil {
+		return false, true // unknown → don't withhold / 查询失败不收紧
+	}
+	return has, live
 }
 
 // errObjectNotReadable flags a write that references an object the writer
@@ -229,7 +258,11 @@ func (d *Deps) objectViaAttachmentRef(ctx context.Context, objID, uid uuid.UUID)
 			SELECT 1 FROM attachment_refs r
 			JOIN conv_members m ON m.conv_id = r.conv_id AND m.user_id = $2
 			 AND m.left_at IS NULL
-			WHERE r.object_id = $1)`, objID, uid).Scan(&ok)
+			WHERE r.object_id = $1
+			  AND NOT EXISTS (
+			    SELECT 1 FROM conv_ops x
+			    WHERE x.conv_id = r.conv_id AND x.kind='recall'
+			      AND x.target_op_seq = r.op_seq))`, objID, uid).Scan(&ok)
 	return err == nil && ok
 }
 
@@ -379,7 +412,7 @@ func (d *Deps) adminObjectsPurge(w http.ResponseWriter, r *http.Request) {
 		d.Objects.RemoveFiles(&deleted[i])
 	}
 	d.Audit.Log(r.Context(), &admin.ID, audit.ActorAdmin, "admin.objects.purge", req.Owner,
-		map[string]string{"day": req.Day, "count": fmt.Sprint(len(deleted))}, clientIP(r.Header.Get("X-Forwarded-For")))
+		map[string]string{"day": req.Day, "count": fmt.Sprint(len(deleted))}, clientIPCtx(r.Context()))
 	_ = json.NewEncoder(w).Encode(map[string]any{"deleted": len(deleted)})
 }
 

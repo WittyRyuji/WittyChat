@@ -15,18 +15,20 @@ import (
 
 // Policy keys / 策略键
 const (
-	KeyIMMessageMaxChars = "im.message_max_chars"    // int, default 2000, hard cap 5000
-	KeyIMRecallTimeout   = "im.recall_timeout_sec"   // int seconds, default 300
-	KeyIMReadReceipts    = "im.read_receipts"        // bool, default true
-	KeyIMAtAll           = "im.at_all"               // "all" | "admin", default "all"
-	KeyStorageQuota      = "storage.quota_bytes"     // int bytes, 0 = unlimited
-	KeyStorageUploadMax  = "storage.upload_max_mb"   // int MB per file, default 5
-	KeyMailOutbound      = "mail.outbound_enabled"   // bool, default true
-	KeyMailDKIMKey       = "mail.dkim_key"           // string PEM, RSA private key
-	KeyMailDKIMSelector  = "mail.dkim_selector"      // string, default "s1"
-	KeySecurityMinPass   = "security.min_password"   // int chars, default 12
-	KeySecurityLockN     = "security.lock_threshold" // int fails, default 5
-	KeySecurityLockMin   = "security.lock_minutes"   // int minutes, default 15
+	KeyIMMessageMaxChars = "im.message_max_chars"      // int, default 2000, hard cap 5000
+	KeyIMRecallTimeout   = "im.recall_timeout_sec"     // int seconds, default 300
+	KeyIMReadReceipts    = "im.read_receipts"          // bool, default true
+	KeyIMAtAll           = "im.at_all"                 // "all" | "admin", default "all"
+	KeyStorageQuota      = "storage.quota_bytes"       // int bytes, 0 = unlimited
+	KeyStorageUploadMax  = "storage.upload_max_mb"     // int MB per file, default 5
+	KeyMailOutbound      = "mail.outbound_enabled"     // bool, default true
+	KeyMailDKIMKey       = "mail.dkim_key"             // string PEM, RSA private key
+	KeyMailDKIMSelector  = "mail.dkim_selector"        // string, default "s1"
+	KeySecurityMinPass   = "security.min_password"     // int chars, default 15 (NIST single-factor)
+	KeySecurityLockN     = "security.lock_threshold"   // int fails, default 5
+	KeySecurityLockMin   = "security.lock_minutes"     // int minutes, default 15
+	KeyDocsLogMaxMB      = "docs.log_max_mb"           // int MB of Yjs log per doc, default 64
+	KeyVersionKeepDays   = "storage.version_keep_days" // int days to keep replaced object versions, default 180
 )
 
 // Defaults / 默认值
@@ -35,6 +37,11 @@ const (
 	MaxMessageCharsCap = int64(5000)
 	DefRecallTimeout   = int64(300)
 	DefUploadMaxMB     = int64(5)
+	DefMinPassword     = int64(15)
+	DefLockThreshold   = int64(5)
+	DefLockMinutes     = int64(15)
+	DefDocsLogMaxMB    = int64(64)
+	DefVersionKeepDays = int64(180)
 )
 
 type Store struct {

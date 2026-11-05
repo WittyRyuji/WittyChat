@@ -22,7 +22,12 @@ export function useDocConn(docId: string) {
   const [{ ydoc, provider }] = useState(() => {
     const y = new Y.Doc();
     const p = new WebsocketProvider(docWsBase(), docId, y, {
-      params: { token: getToken() },
+      // Token via Sec-WebSocket-Protocol (wt1.<token>), not a URL param —
+      // keeps it out of access logs/browser histories. "wittychat" is the
+      // benign protocol the server echoes back. token 走
+      // Sec-WebSocket-Protocol 子协议而非 URL 参数——不进日志/历史；
+      // 服务端回选固定的 "wittychat" 而非 wt1。
+      protocols: ["wittychat", `wt1.${getToken()}`],
     });
     return { ydoc: y, provider: p };
   });

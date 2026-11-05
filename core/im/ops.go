@@ -34,14 +34,17 @@ type Op struct {
 }
 
 // appendOpTx increments last_op_seq and inserts the op in the same tx.
+// Returns the op as stored (op_id + created_at from the DB) so API events
+// carry the real values instead of zeroes.
+// 返回落库后的完整 op（含 op_id 与 created_at），保证 API 事件字段真实。
 func (s *Store) appendOpTx(ctx context.Context, tx pgx.Tx, convID, actor uuid.UUID,
 	kind string, clientMsgID *uuid.UUID, targetSeq int64, body string, payload map[string]any,
-) (int64, error) {
+) (*Op, error) {
 	var seq int64
 	if err := tx.QueryRow(ctx,
 		`UPDATE conversations SET last_op_seq = last_op_seq + 1 WHERE id=$1 RETURNING last_op_seq`,
 		convID).Scan(&seq); err != nil {
-		return 0, err
+		return nil, err
 	}
 	var tgt *int64
 	if targetSeq > 0 {
@@ -50,11 +53,17 @@ func (s *Store) appendOpTx(ctx context.Context, tx pgx.Tx, convID, actor uuid.UU
 	if payload == nil {
 		payload = map[string]any{}
 	}
-	_, err := tx.Exec(ctx,
+	op := &Op{
+		Seq: seq, ConvID: convID, Kind: kind, ActorID: &actor,
+		TargetSeq: targetSeq, Body: body, Payload: payload, ClientMsg: clientMsgID,
+	}
+	err := tx.QueryRow(ctx,
 		`INSERT INTO conv_ops (conv_id, op_seq, op_id, kind, actor_id, client_msg_id, target_op_seq, body, payload)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		convID, seq, uuid.Must(uuid.NewV7()), kind, actor, clientMsgID, tgt, nilIfEmpty(body), payload)
-	return seq, err
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		 RETURNING op_id, created_at`,
+		convID, seq, uuid.Must(uuid.NewV7()), kind, actor, clientMsgID, tgt, nilIfEmpty(body), payload).
+		Scan(&op.ID, &op.CreatedAt)
+	return op, err
 }
 
 func nilIfEmpty(s string) any {
@@ -114,20 +123,17 @@ func (s *Store) SendMessage(ctx context.Context, sender, convID uuid.UUID,
 		if _, _, err := s.requireMember(ctx, tx, convID, sender); err != nil {
 			return err
 		}
-		seq, err := s.appendOpTx(ctx, tx, convID, sender, OpMessage, &clientMsgID, 0, body, payload)
+		o, err := s.appendOpTx(ctx, tx, convID, sender, OpMessage, &clientMsgID, 0, body, payload)
 		if err != nil {
 			return err
 		}
 		// Sender has obviously read their own message.
 		if _, err := tx.Exec(ctx,
 			`UPDATE conv_members SET last_read_op_seq=$3 WHERE conv_id=$1 AND user_id=$2`,
-			convID, sender, seq); err != nil {
+			convID, sender, o.Seq); err != nil {
 			return err
 		}
-		op = &Op{
-			Seq: seq, ConvID: convID, Kind: OpMessage, ActorID: &sender,
-			Body: body, Payload: payload, ClientMsg: &clientMsgID, CreatedAt: time.Now(),
-		}
+		op = o
 		return nil
 	})
 	if err != nil {
@@ -148,11 +154,11 @@ const MaxMessageLen = 5000 // hard ceiling; workspace default 2000 enforced at A
 var ErrMessageTooLong = errors.New("message exceeds max length")
 
 // EditMessage appends an edit op targeting a message op (author only).
-func (s *Store) EditMessage(ctx context.Context, actor, convID uuid.UUID, targetSeq int64, markdown string) (int64, error) {
+func (s *Store) EditMessage(ctx context.Context, actor, convID uuid.UUID, targetSeq int64, markdown string) (*Op, error) {
 	if len([]rune(markdown)) > MaxMessageLen {
-		return 0, ErrMessageTooLong
+		return nil, ErrMessageTooLong
 	}
-	var seq int64
+	var op *Op
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, _, err := s.requireMember(ctx, tx, convID, actor); err != nil {
 			return err
@@ -164,16 +170,17 @@ func (s *Store) EditMessage(ctx context.Context, actor, convID uuid.UUID, target
 		if kind != OpMessage || owner == nil || *owner != actor {
 			return ErrNoPermission
 		}
-		seq, err = s.appendOpTx(ctx, tx, convID, actor, OpEdit,
+		o, err := s.appendOpTx(ctx, tx, convID, actor, OpEdit,
 			nil, targetSeq, "", map[string]any{"markdown": markdown})
+		op = o
 		return err
 	})
-	return seq, err
+	return op, err
 }
 
 // RecallMessage appends a recall op (author only, within RecallWindow).
-func (s *Store) RecallMessage(ctx context.Context, actor, convID uuid.UUID, targetSeq int64) (int64, error) {
-	var seq int64
+func (s *Store) RecallMessage(ctx context.Context, actor, convID uuid.UUID, targetSeq int64) (*Op, error) {
+	var op *Op
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, _, err := s.requireMember(ctx, tx, convID, actor); err != nil {
 			return err
@@ -188,10 +195,11 @@ func (s *Store) RecallMessage(ctx context.Context, actor, convID uuid.UUID, targ
 		if time.Since(created) > s.RecallWindow {
 			return ErrRecallExpired
 		}
-		seq, err = s.appendOpTx(ctx, tx, convID, actor, OpRecall, nil, targetSeq, "", nil)
+		o, err := s.appendOpTx(ctx, tx, convID, actor, OpRecall, nil, targetSeq, "", nil)
+		op = o
 		return err
 	})
-	return seq, err
+	return op, err
 }
 
 // ReactMessage appends a reaction op (add/remove) on a message — any member.
@@ -199,11 +207,11 @@ func (s *Store) RecallMessage(ctx context.Context, actor, convID uuid.UUID, targ
 // 表情回应 op（点赞/取消）：任意成员可对消息操作；重复同状态为幂等空操作。
 func (s *Store) ReactMessage(ctx context.Context, actor, convID uuid.UUID,
 	targetSeq int64, emoji string, add bool,
-) (int64, error) {
+) (*Op, error) {
 	if n := len([]rune(emoji)); n == 0 || n > 32 {
-		return 0, ErrBadEmoji
+		return nil, ErrBadEmoji
 	}
-	var seq int64
+	var op *Op
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, _, err := s.requireMember(ctx, tx, convID, actor); err != nil {
 			return err
@@ -230,11 +238,12 @@ func (s *Store) ReactMessage(ctx context.Context, actor, convID uuid.UUID,
 		if (lastAdd == nil && !add) || (lastAdd != nil && *lastAdd == add) {
 			return nil // already in the desired state / 已是目标状态
 		}
-		seq, err = s.appendOpTx(ctx, tx, convID, actor, OpReaction,
+		o, err := s.appendOpTx(ctx, tx, convID, actor, OpReaction,
 			nil, targetSeq, "", map[string]any{"emoji": emoji, "add": add})
+		op = o
 		return err
 	})
-	return seq, err
+	return op, err
 }
 
 // MarkRead advances my read watermark (monotonic, coalescing).

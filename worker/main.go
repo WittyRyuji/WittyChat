@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 	"wittychat/core/db"
+	"wittychat/core/docs"
 	"wittychat/core/mail"
 	"wittychat/core/objects"
 
@@ -101,7 +102,21 @@ func (w *worker) dispatch(ctx context.Context, t *objects.Task) error {
 	case "gc":
 		n, err := w.store.OrphanGC(ctx)
 		log.Printf("gc: %d orphans deleted", n)
-		return err
+		if err != nil {
+			return err
+		}
+		// Retention sweeps: prior object versions and archived doc updates
+		// past the audit window (30d matches the audit-retention setting).
+		// 保留期清扫：超审计窗口（30 天）的对象历史版本与文档更新归档。
+		v, verr := w.store.PurgeOldVersions(ctx, 30*24*time.Hour)
+		if verr == nil {
+			var a int64
+			a, verr = docs.PurgeArchive(ctx, w.pool, 30*24*time.Hour)
+			if verr == nil {
+				log.Printf("gc: %d versions + %d archived updates purged", v, a)
+			}
+		}
+		return verr
 	case "verify":
 		objID, err := uuid.Parse(str(t.Payload["object_id"]))
 		if err != nil {

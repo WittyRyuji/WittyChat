@@ -92,12 +92,19 @@ func publicURL() string {
 // WITTYCHAT_ONLYOFFICE_URL is set — the docs container is a separate
 // docker service (deploy/docker-compose*.yml). When unset, we probe the
 // standard local dev address (localhost:8180 healthcheck) so `docker
-// compose up onlyoffice` + `server serve` just works without env fiddling.
-// 未配置 URL 时探测本地开发地址（healthcheck 必须返回 true，不误伤其它
-// 8180 服务）；探测到则按 dev 默认 JWT 密钥启用，compose dev 默认值一致。
+// Office is OFF unless WITTYCHAT_ONLYOFFICE_URL is set. Dev convenience:
+// WITTYCHAT_ONLYOFFICE_AUTODETECT=1 explicitly opts into probing
+// localhost:8180 — an opt-in env var, not silent magic. The JWT secret is
+// ALWAYS required (no public default baked into the binary): the save
+// callback overwrites object bytes and a public default secret would let
+// anyone forge it.
+// 未配置 URL 即关闭。开发便捷项：WITTYCHAT_ONLYOFFICE_AUTODETECT=1 显式
+// 探测 localhost:8180——显式开关而非静默魔法。JWT 密钥始终必填（二进制
+// 内无公开默认值）：保存回调覆盖对象字节，公开默认密钥等于放伪造。
 //
 //	WITTYCHAT_ONLYOFFICE_URL            browser-facing docs base (api.js)
-//	WITTYCHAT_ONLYOFFICE_JWT_SECRET     shared HS256 secret (recommended)
+//	WITTYCHAT_ONLYOFFICE_JWT_SECRET     shared HS256 secret (required)
+//	WITTYCHAT_ONLYOFFICE_AUTODETECT     =1 → probe localhost:8180 when URL unset
 //	WITTYCHAT_ONLYOFFICE_CALLBACK_BASE  how the container reaches US
 //	                                    (Docker Desktop: host.docker.internal)
 //	WITTYCHAT_ONLYOFFICE_INTERNAL_URL   where WE fetch saved output
@@ -106,14 +113,12 @@ func officeConfig() *httpapi.OfficeConfig {
 	docs := envOr("WITTYCHAT_ONLYOFFICE_URL", "")
 	secret := os.Getenv("WITTYCHAT_ONLYOFFICE_JWT_SECRET")
 	if docs == "" {
-		if !probeDocsServer("http://localhost:8180") {
+		if os.Getenv("WITTYCHAT_ONLYOFFICE_AUTODETECT") != "1" ||
+			!probeDocsServer("http://localhost:8180") {
 			return nil
 		}
 		docs = "http://localhost:8180"
-		if secret == "" {
-			secret = "wittychat-office-dev" // compose dev default
-		}
-		log.Printf("onlyoffice: auto-detected docs server at %s", docs)
+		log.Printf("onlyoffice: auto-detected docs server at %s (AUTODETECT=1)", docs)
 	}
 	if secret == "" {
 		// The save callback overwrites object bytes — without the shared
@@ -181,23 +186,27 @@ func cmdServe() {
 	imStore.RecallWindow = time.Duration(
 		settingsStore.Int(context.Background(), settings.KeyIMRecallTimeout, settings.DefRecallTimeout)) * time.Second
 	d := &httpapi.Deps{
-		Pool:      pool,
-		Store:     auth.NewStore(pool),
-		Audit:     audit.New(pool),
-		Limiter:   auth.NewLimiter(),
-		SecretKey: key,
-		Issuer:    envOr("WITTYCHAT_ISSUER", "WittyChat"),
-		PublicURL: publicURL(),
-		IM:        imStore,
-		Hub:       realtime.NewHub(imStore.IsMember),
-		Objects:   objStore,
-		Settings:  settingsStore,
-		Signer:    objects.NewSigner(key),
-		Mail:      mail.NewStore(pool, envOr("WITTYCHAT_MAIL_DOMAIN", "wittyloong.com")),
-		Agents:    agents.NewStore(pool),
-		HR:        hr.New(pool),
-		Docs:      docs.New(pool, imStore.IsMember, imStore.MemberRole),
-		Office:    officeConfig(),
+		Pool:        pool,
+		Store:       auth.NewStore(pool),
+		Audit:       audit.New(pool),
+		Limiter:     auth.NewLimiter(int(settingsStore.Int(context.Background(), settings.KeySecurityLockN, settings.DefLockThreshold))),
+		AcctLimiter: auth.NewLimiter(int(settingsStore.Int(context.Background(), settings.KeySecurityLockN, settings.DefLockThreshold)) * 2),
+		SecretKey:   key,
+		Issuer:      envOr("WITTYCHAT_ISSUER", "WittyChat"),
+		PublicURL:   publicURL(),
+		// Behind our nginx the client's X-Forwarded-For last hop is real.
+		// 生产走 nginx：可信代理追加的 XFF 最右一跳才是真实来源。
+		TrustProxy: envOr("WITTYCHAT_TRUST_PROXY", "") == "1" || envOr("WITTYCHAT_TRUST_PROXY", "") == "true",
+		IM:         imStore,
+		Hub:        realtime.NewHub(imStore.IsMember),
+		Objects:    objStore,
+		Settings:   settingsStore,
+		Signer:     objects.NewSigner(key),
+		Mail:       mail.NewStore(pool, envOr("WITTYCHAT_MAIL_DOMAIN", "wittyloong.com")),
+		Agents:     agents.NewStore(pool),
+		HR:         hr.New(pool),
+		Docs:       docs.New(pool, imStore.IsMember, imStore.MemberRole),
+		Office:     officeConfig(),
 	}
 
 	addr := envOr("WITTYCHAT_ADDR", ":8080")

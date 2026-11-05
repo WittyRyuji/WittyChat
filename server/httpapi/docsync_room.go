@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sync"
 	"time"
+	"wittychat/core/settings"
 
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
@@ -26,14 +27,16 @@ type docRoom struct {
 }
 
 type docConn struct {
-	ws     *websocket.Conn
-	wmu    sync.Mutex
-	docID  uuid.UUID
-	uid    uuid.UUID
-	token  string             // session token, re-validated periodically
-	cancel context.CancelFunc // kicks the conn (ends its read loop)
-	awIDs  map[uint64]uint64  // awareness clientIDs seen on this conn
-	awLast []byte             // last awareness payload, replayed to joiners
+	ws         *websocket.Conn
+	wmu        sync.Mutex
+	docID      uuid.UUID
+	uid        uuid.UUID
+	owner      uuid.UUID          // doc owner — only their conn may compact / 仅属主连接可压缩
+	token      string             // session token, re-validated periodically
+	cancel     context.CancelFunc // kicks the conn (ends its read loop)
+	replayedTo int64              // seq watermark this conn has been served / 已下发水位
+	awIDs      map[uint64]uint64  // awareness clientIDs seen on this conn
+	awLast     []byte             // last awareness payload, replayed to joiners
 }
 
 var docRooms sync.Map // uuid.UUID → *docRoom
@@ -115,6 +118,17 @@ func (d *Deps) docRevalidateUser(ctx context.Context, uid uuid.UUID) {
 	})
 }
 
+// docRevalidateDoc re-checks every live conn of one doc and kicks the
+// ones that lost access (e.g. unshare). 复核一个文档的全部连接并踢掉
+// 失权者（如撤销分享）。
+func (d *Deps) docRevalidateDoc(ctx context.Context, docID uuid.UUID) {
+	for _, c := range docRoomConns(docID) {
+		if !d.docStillAllowed(ctx, c) {
+			c.cancel()
+		}
+	}
+}
+
 // docCloseRoom kicks everyone off a doc (deleted). 删除文档时清空房间。
 func docCloseRoom(docID uuid.UUID) {
 	for _, c := range docRoomConns(docID) {
@@ -122,9 +136,10 @@ func docCloseRoom(docID uuid.UUID) {
 	}
 }
 
-// docWS — GET /ws/doc/{id}?token= : auth → ACL → join room → relay.
+// docWS — GET /ws/doc/{id} : auth (wt1. subprotocol or ?token=) → ACL →
+// join room → relay.
 func (d *Deps) docWS(w http.ResponseWriter, r *http.Request) {
-	token := r.URL.Query().Get("token")
+	token := wsToken(r)
 	sess, err := d.Store.ValidateSession(r.Context(), token)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -135,14 +150,20 @@ func (d *Deps) docWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		InsecureSkipVerify: true,
+		// Clients that require a negotiated protocol get "wittychat"
+		// back — never wt1.<token>. / 需要协商子协议的客户端回选固定值。
+		Subprotocols: []string{"wittychat"},
+	})
 	if err != nil {
 		return
 	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	owner, _ := d.Docs.OwnerOf(r.Context(), docID)
 	c := &docConn{
-		ws: ws, docID: docID, uid: sess.UserID, token: token, cancel: cancel,
+		ws: ws, docID: docID, uid: sess.UserID, owner: owner, token: token, cancel: cancel,
 		awIDs: map[uint64]uint64{},
 	}
 	d.docServe(ctx, c)
@@ -167,11 +188,12 @@ func (d *Deps) docServe(ctx context.Context, c *docConn) {
 
 	// Replay stored updates: one SyncStep2 frame per update (empty
 	// SyncStep2 when the log is empty so the client finishes its
-	// handshake either way). replayedTo is the compaction watermark.
-	updates, replayedTo, err := d.Docs.LoadUpdates(ctx, c.docID)
+	// handshake either way). c.replayedTo is the compaction watermark.
+	updates, replayedTo, err := d.Docs.LoadUpdates(ctx, c.docID, 0)
 	if err != nil {
 		return
 	}
+	c.replayedTo = replayedTo
 	if len(updates) == 0 {
 		_ = c.write(ctx, syncFrame(syncStep2, emptyYjsUpdate))
 	}
@@ -247,9 +269,13 @@ func (d *Deps) docServe(ctx context.Context, c *docConn) {
 			}
 			switch sub {
 			case syncStep1:
-				// Client asks for what it misses: replay the current
-				// log — reload so updates landed since join are included.
-				log2, _, err := d.Docs.LoadUpdates(ctx, c.docID)
+				// Client asks for what it misses. The join already sent
+				// everything up to c.replayedTo (frames arrive in order),
+				// so only the delta since then is due — answering with
+				// the whole log again doubled every connect's traffic.
+				// 客户端请求补差。连接建立时已按序下发到水位，此处只补增量——
+				// 此前每次连接都把全量日志重复下发了一遍。
+				log2, maxSeq, err := d.Docs.LoadUpdates(ctx, c.docID, c.replayedTo)
 				if err != nil {
 					return
 				}
@@ -261,6 +287,9 @@ func (d *Deps) docServe(ctx context.Context, c *docConn) {
 				if len(log2) == 0 {
 					_ = c.write(ctx, syncFrame(syncStep2, emptyYjsUpdate))
 				}
+				if maxSeq > c.replayedTo {
+					c.replayedTo = maxSeq
+				}
 			case syncUpd, syncStep2:
 				if len(data) == 0 || bytes.Equal(data, emptyYjsUpdate) {
 					if sub == syncStep2 {
@@ -269,11 +298,20 @@ func (d *Deps) docServe(ctx context.Context, c *docConn) {
 					continue
 				}
 				var perr error
-				if sub == syncStep2 && snapshotPending && replayedTo > 0 {
-					// Full state captured after the replay → compact.
-					perr = d.Docs.Compact(ctx, c.docID, data, replayedTo)
+				if sub == syncStep2 && snapshotPending && c.replayedTo > 0 && c.uid == c.owner {
+					// Owner's full state after the replay → compact (large
+					// logs only, replaced rows archived). Members' first
+					// SyncStep2 is treated as an ordinary update so no one
+					// but the owner can rewrite the whole history.
+					// 属主回放后的全量态→压缩（仅大日志，旧行归档）。成员首帧
+					// 按普通 update 处理——除属主外无人能改写整体历史。
+					var done bool
+					done, perr = d.Docs.CompactIfLarge(ctx, c.docID, data, c.replayedTo)
+					if perr == nil && !done {
+						perr = d.Docs.AppendUpdate(ctx, c.docID, data, d.docMaxLogBytes(ctx))
+					}
 				} else {
-					perr = d.Docs.AppendUpdate(ctx, c.docID, data)
+					perr = d.Docs.AppendUpdate(ctx, c.docID, data, d.docMaxLogBytes(ctx))
 				}
 				if sub == syncStep2 {
 					snapshotPending = false
@@ -297,6 +335,15 @@ func (d *Deps) docServe(ctx context.Context, c *docConn) {
 			d.docBroadcast(c.docID, c, raw)
 		}
 	}
+}
+
+// docMaxLogBytes — docs.log_max_mb workspace cap (0 = unlimited).
+// 文档日志字节上限（工作区设置，0=不限）。
+func (d *Deps) docMaxLogBytes(ctx context.Context) int64 {
+	if d.Settings == nil {
+		return 0
+	}
+	return d.Settings.Int(ctx, settings.KeyDocsLogMaxMB, settings.DefDocsLogMaxMB) << 20
 }
 
 // docBroadcast sends a frame to every conn in the room except src.

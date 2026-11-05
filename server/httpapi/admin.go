@@ -108,7 +108,7 @@ func (d *Deps) adminCreateUser(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, err
 	}
-	d.Audit.Log(ctx, &admin.ID, audit.ActorAdmin, "admin.user.create", u.Email, nil, clientIP(in.XForwardedFor))
+	d.Audit.Log(ctx, &admin.ID, audit.ActorAdmin, "admin.user.create", u.Email, nil, clientIPCtx(ctx))
 	return &struct{ Body apitypes.CreateUserResponse }{
 		Body: apitypes.CreateUserResponse{
 			User:          publicUser(u),
@@ -166,7 +166,7 @@ func (d *Deps) adminNewLink(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, err
 	}
-	d.Audit.Log(ctx, &admin.ID, audit.ActorAdmin, "admin.user.link:"+kind, u.Email, nil, clientIP(in.XForwardedFor))
+	d.Audit.Log(ctx, &admin.ID, audit.ActorAdmin, "admin.user.link:"+kind, u.Email, nil, clientIPCtx(ctx))
 	return &struct{ Body apitypes.CreateUserResponse }{
 		Body: apitypes.CreateUserResponse{
 			User:          publicUser(u),
@@ -205,7 +205,7 @@ func (d *Deps) adminSetStatus(status, action string) func(ctx context.Context, i
 			return nil, err
 		}
 		d.docRevalidateUser(ctx, uid)
-		d.Audit.Log(ctx, &admin.ID, audit.ActorAdmin, action, target.Email, nil, clientIP(in.XForwardedFor))
+		d.Audit.Log(ctx, &admin.ID, audit.ActorAdmin, action, target.Email, nil, clientIPCtx(ctx))
 		return &struct{}{}, nil
 	}
 }
@@ -241,7 +241,7 @@ func (d *Deps) adminOffboard(ctx context.Context, in *struct {
 	}
 	d.docRevalidateUser(ctx, uid)
 	d.Audit.Log(ctx, &admin.ID, audit.ActorAdmin, "admin.user.offboard", target.Email,
-		map[string]string{"transfer_to": toUser.Email}, clientIP(in.XForwardedFor))
+		map[string]string{"transfer_to": toUser.Email}, clientIPCtx(ctx))
 	return &struct{}{}, nil
 }
 
@@ -260,7 +260,7 @@ func (d *Deps) adminAuditList(ctx context.Context, in *struct {
 	}
 	// Viewing retained audit data is itself audited. 查看审计数据本身留痕。
 	d.Audit.Log(ctx, &admin.ID, audit.ActorAdmin, "admin.audit.view", "",
-		map[string]string{"action": in.Action, "actor": in.Actor}, clientIP(in.XForwardedFor))
+		map[string]string{"action": in.Action, "actor": in.Actor}, clientIPCtx(ctx))
 	limit := in.Limit
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -338,7 +338,7 @@ func (d *Deps) adminSettingsSet(ctx context.Context, in *struct {
 	d.IM.RecallWindow = time.Duration(
 		d.Settings.Int(ctx, settings.KeyIMRecallTimeout, settings.DefRecallTimeout)) * time.Second
 	d.Audit.Log(ctx, &admin.ID, audit.ActorAdmin, "admin.settings.set", "",
-		in.Body.Settings, clientIP(in.XForwardedFor))
+		in.Body.Settings, clientIPCtx(ctx))
 	return &struct{}{}, nil
 }
 

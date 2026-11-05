@@ -24,7 +24,13 @@ import (
 var (
 	ErrNotFound = errors.New("docs: not found")
 	ErrBadKind  = errors.New("docs: bad kind")
+	ErrLogFull  = errors.New("docs: update log over the workspace cap")
 )
+
+// compactMinRows is the smallest log worth compacting — below it the
+// rewrite cost buys nothing and only adds risk.
+// 日志少于此行数不压缩——重写代价换不来收益，只引入风险。
+const compactMinRows = 50
 
 // MaxTitleRunes caps doc titles. 标题长度上限。
 const MaxTitleRunes = 200
@@ -38,6 +44,7 @@ type Doc struct {
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
 	Editors   int        `json:"editors"` // live editors, filled by relay
+	Shared    bool       `json:"shared"`  // ListByConv: here via doc_shares, not the binding / 经分享而非绑定
 }
 
 type Store struct {
@@ -155,10 +162,14 @@ func (s *Store) AccessibleToConv(ctx context.Context, docID, convID uuid.UUID) b
 	return err == nil && ok
 }
 
-// ListByConv lists docs bound or shared to a conversation (群文档面板).
+// ListByConv lists docs bound or shared to a conversation (群文档面板);
+// Shared marks the ones present only through doc_shares.
 func (s *Store) ListByConv(ctx context.Context, convID uuid.UUID) ([]Doc, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT `+docCols+` FROM docs d
+		SELECT `+docCols+`,
+		       EXISTS (SELECT 1 FROM doc_shares sh2
+		               WHERE sh2.doc_id=d.id AND sh2.conv_id=$1) AS shared
+		FROM docs d
 		WHERE d.deleted_at IS NULL
 		  AND (d.conv_id=$1 OR EXISTS (SELECT 1 FROM doc_shares sh
 		       WHERE sh.doc_id=d.id AND sh.conv_id=$1))
@@ -166,7 +177,17 @@ func (s *Store) ListByConv(ctx context.Context, convID uuid.UUID) ([]Doc, error)
 	if err != nil {
 		return nil, err
 	}
-	return scanDocs(rows)
+	defer rows.Close()
+	out := []Doc{}
+	for rows.Next() {
+		var d Doc
+		if err := rows.Scan(&d.ID, &d.Title, &d.Kind, &d.Owner, &d.ConvID,
+			&d.CreatedAt, &d.UpdatedAt, &d.Shared); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }
 
 // accessSQL: owner, member of the bound conv, or member of a conv the doc
@@ -226,9 +247,11 @@ func (s *Store) Rename(ctx context.Context, docID uuid.UUID, title string) error
 }
 
 // AppendUpdate persists one Yjs update blob and bumps updated_at. Log
-// growth is bounded by Compact (client snapshots), not by byte dedupe.
-// 追加一条 Yjs update；日志增长由 Compact（客户端快照）收敛。
-func (s *Store) AppendUpdate(ctx context.Context, docID uuid.UUID, data []byte) error {
+// growth is bounded by Compact (owner snapshots) and capped by
+// maxLogBytes (docs.log_max_mb) so a member can't fill the DB.
+// 追加一条 Yjs update；日志由属主快照压缩收敛，并受 maxLogBytes
+// （docs.log_max_mb）限制，成员无法无限写库。
+func (s *Store) AppendUpdate(ctx context.Context, docID uuid.UUID, data []byte, maxLogBytes int64) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
 			`UPDATE docs SET updated_at=now() WHERE id=$1 AND deleted_at IS NULL`, docID)
@@ -238,17 +261,28 @@ func (s *Store) AppendUpdate(ctx context.Context, docID uuid.UUID, data []byte) 
 		if tag.RowsAffected() == 0 {
 			return ErrNotFound
 		}
+		if maxLogBytes > 0 {
+			var total int64
+			if err := tx.QueryRow(ctx,
+				`SELECT COALESCE(SUM(LENGTH(data)),0) FROM doc_updates WHERE doc_id=$1`,
+				docID).Scan(&total); err != nil {
+				return err
+			}
+			if total+int64(len(data)) > maxLogBytes {
+				return ErrLogFull
+			}
+		}
 		_, err = tx.Exec(ctx, `INSERT INTO doc_updates (doc_id, data) VALUES ($1,$2)`, docID, data)
 		return err
 	})
 }
 
-// LoadUpdates replays the full update log; maxSeq is the highest seq
-// returned (0 when empty) — the compaction watermark for this replay.
-// 回放全部 update；maxSeq 是本次回放的最高序号，作为压缩水位。
-func (s *Store) LoadUpdates(ctx context.Context, docID uuid.UUID) (out [][]byte, maxSeq int64, err error) {
+// LoadUpdates replays the log after `after` seq (0 = full log); maxSeq is
+// the highest seq returned (0 when empty) — the compaction watermark.
+// 回放 seq > after 的 update（0=全量）；maxSeq 为本次回放最高序号。
+func (s *Store) LoadUpdates(ctx context.Context, docID uuid.UUID, after int64) (out [][]byte, maxSeq int64, err error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT seq, data FROM doc_updates WHERE doc_id=$1 ORDER BY seq`, docID)
+		`SELECT seq, data FROM doc_updates WHERE doc_id=$1 AND seq>$2 ORDER BY seq`, docID, after)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -265,23 +299,73 @@ func (s *Store) LoadUpdates(ctx context.Context, docID uuid.UUID) (out [][]byte,
 	return out, maxSeq, rows.Err()
 }
 
-// Compact replaces every update with seq <= upTo by one snapshot. Safe
-// because the snapshot is a client's full state captured AFTER it applied
-// the replay that ended at upTo (y-protocols process frames in order), so
-// it is a superset of those updates; later updates are untouched.
-// 压缩：用一个快照替换 seq<=upTo 的全部 update。快照是客户端在应用完截至
-// upTo 的回放之后的全量状态（协议按序处理），必为其超集；更晚的不动。
-func (s *Store) Compact(ctx context.Context, docID uuid.UUID, snapshot []byte, upTo int64) error {
+// CompactIfLarge replaces every update with seq <= upTo by one snapshot —
+// but only when the log is at least compactMinRows long, and the replaced
+// rows are archived (not deleted) for the audit retention window. The
+// caller restricts this to the doc owner's connection: a member must not
+// be able to swap the whole history (see the a460bd3 review).
+// 压缩：用一个快照替换 seq<=upTo 的全部 update——但仅当日志行数达到阈值，
+// 且被替换的行归档保留（不删除）至审计期。调用方限定只有属主连接可触发：
+// 普通成员不得整体改写历史（见 a460bd3 审查）。
+func (s *Store) CompactIfLarge(ctx context.Context, docID uuid.UUID, snapshot []byte, upTo int64) (bool, error) {
 	if len(snapshot) == 0 || upTo <= 0 {
-		return nil
+		return false, nil
 	}
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	var done bool
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var n int
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM doc_updates WHERE doc_id=$1 AND seq <= $2`,
+			docID, upTo).Scan(&n); err != nil {
+			return err
+		}
+		if n < compactMinRows {
+			return nil
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO doc_update_archive (doc_id, seq, data)
+			 SELECT doc_id, seq, data FROM doc_updates WHERE doc_id=$1 AND seq <= $2`,
+			docID, upTo); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx,
 			`DELETE FROM doc_updates WHERE doc_id=$1 AND seq <= $2`, docID, upTo); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx,
-			`INSERT INTO doc_updates (doc_id, data) VALUES ($1,$2)`, docID, snapshot)
-		return err
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO doc_updates (doc_id, data) VALUES ($1,$2)`, docID, snapshot); err != nil {
+			return err
+		}
+		done = true
+		return nil
 	})
+	return done, err
+}
+
+// OwnerOf returns the doc's owner id (for owner-only compaction).
+// 返回文档属主 id（压缩仅属主连接可触发）。
+func (s *Store) OwnerOf(ctx context.Context, docID uuid.UUID) (uuid.UUID, error) {
+	var owner uuid.UUID
+	err := s.pool.QueryRow(ctx,
+		`SELECT owner FROM docs WHERE id=$1 AND deleted_at IS NULL`, docID).Scan(&owner)
+	return owner, err
+}
+
+// Unshare removes a doc_shares grant. 撤销一次分享。
+func (s *Store) Unshare(ctx context.Context, docID, convID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`DELETE FROM doc_shares WHERE doc_id=$1 AND conv_id=$2`, docID, convID)
+	return err
+}
+
+// PurgeArchive deletes archived update rows past the audit-retention
+// window — archive is for audit/recovery, not forever. Package-level so
+// the worker can run it without the member callbacks.
+// 归档清除：删除超过审计保留期的归档行——归档为审计/恢复，非永久保留。
+// 包级函数，worker 无需成员回调即可执行。
+func PurgeArchive(ctx context.Context, pool *pgxpool.Pool, older time.Duration) (int64, error) {
+	tag, err := pool.Exec(ctx,
+		`DELETE FROM doc_update_archive WHERE compacted_at < $1`,
+		time.Now().Add(-older))
+	return tag.RowsAffected(), err
 }

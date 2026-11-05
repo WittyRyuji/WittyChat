@@ -13,13 +13,16 @@ DATA = os.path.join(os.path.dirname(__file__), "..", "data")
 passed, failed = [], []
 
 
-def req(method, path, body=None, token=None, raw=None, ctype="application/json"):
+def req(method, path, body=None, token=None, raw=None, ctype="application/json",
+        headers=None):
     data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
     r = urllib.request.Request(BASE + path, data=data, method=method)
     if data is not None:
         r.add_header("Content-Type", ctype)
     if token:
         r.add_header("Authorization", f"Bearer {token}")
+    for k, v in (headers or {}).items():
+        r.add_header(k, v)
     try:
         resp = urllib.request.urlopen(r, timeout=15)
         return resp.status, resp.read()
@@ -104,9 +107,33 @@ st, b = req("POST", "/api/v1/admin/users", {"email": email, "display_name": "P0X
 act = json.loads(b)["activation_url"]
 from urllib.parse import urlparse, parse_qs
 tok = parse_qs(urlparse(act).query).get("token", [act.rsplit("/", 1)[-1]])[0]
-req("POST", "/api/v1/auth/activate", {"token": tok, "password": "P0xPass123!"})
-p0x = login(email, "P0xPass123!")
+req("POST", "/api/v1/auth/activate", {"token": tok, "password": "P0x-Pass-12345!"})
+p0x = login(email, "P0x-Pass-12345!")
 check("provision+activate+login", p0x is not None)
+
+# --- login lockout: forged X-Forwarded-For must NOT bypass counting
+# (dev server has WITTYCHAT_TRUST_PROXY unset → all attempts land on the
+# same email|real-IP key); while locked even the correct password 429s.
+lock_email = f"lock-{uuid.uuid4().hex[:8]}@wittyloong.com"
+codes = []
+for i in range(15):  # threshold is a workspace setting — loop until locked
+    st, _ = req("POST", "/api/v1/auth/login",
+                {"email": lock_email, "password": "wrong",
+                 "device_name": "x", "device_kind": "web"},
+                headers={"X-Forwarded-For": f"10.9.9.{i}"})
+    codes.append(st)
+    if st == 429:
+        break
+check("XFF rotation does not bypass lockout",
+      codes[-1] == 429 and all(c == 401 for c in codes[:-1]), str(codes))
+st, _ = req("POST", "/api/v1/auth/login",
+            {"email": lock_email, "password": "wrong",
+             "device_name": "x", "device_kind": "web"},
+            headers={"X-Forwarded-For": "10.9.9.99"})
+check("still locked on 7th attempt", st == 429, str(st))
+# email normalization: login is case-insensitive on the address.
+norm = login(email.upper(), "P0x-Pass-12345!")
+check("login email case-insensitive", norm is not None)
 
 st, b = req("GET", "/api/v1/auth/me", None, p0x)
 p0x_id = json.loads(b)["user"]["id"]
@@ -176,9 +203,19 @@ check("mention_all", st == 201, str(st))
 
 # recall
 st, b = send_msg(alice, conv, "oops recall me")
-rseq = json.loads(b)["op_seq"]
+so = json.loads(b)
+rseq = so["op_seq"]
+check("send response carries op_id+created_at",
+      so.get("op_id") not in (None, "", "00000000-0000-0000-0000-000000000000")
+      and not str(so.get("created_at", "")).startswith("0001-01-01"),
+      json.dumps({k: so.get(k) for k in ("op_id", "created_at")}))
 st, b = req("POST", f"/api/v1/conversations/{conv}/messages/{rseq}/recall", None, alice)
 check("recall own msg", st in (200, 201, 204), str(st))
+ro = json.loads(b) if st in (200, 201) else {}
+check("recall response carries op_id+created_at",
+      ro.get("op_id") not in (None, "", "00000000-0000-0000-0000-000000000000")
+      and not str(ro.get("created_at", "")).startswith("0001-01-01"),
+      json.dumps({k: ro.get(k) for k in ("op_id", "created_at")}))
 ops = get_ops(p0x, conv)
 rc = [o for o in ops if o["op_seq"] == rseq]
 check("peer sees recalled state", rc and rc[0].get("recalled") is True,
@@ -291,6 +328,19 @@ st, b = req("GET", f"/api/v1/objects/{soid}/download?token={p0x}", None)
 check("sticker member download via refs", st == 200 and b.startswith(b"GIF89a"), str(st))
 st, b = req("GET", f"/api/v1/objects/{soid}/download?token={admin}", None)
 check("sticker still denied to outsider", st == 403, str(st))
+
+# recall revokes attachment read access — the reference that granted it
+# dies with the message (留审计不可见).
+roid = upload(alice, conv, "secret-recall.txt", "text/plain", b"RECALL-ME")
+st, b = send_msg(alice, conv, "", [roid])
+check("attachment msg for recall", st == 201, str(st))
+ratt_seq = json.loads(b)["op_seq"]
+st, b = req("GET", f"/api/v1/objects/{roid}/download?token={p0x}", None)
+check("attachment readable before recall", st == 200, str(st))
+st, _ = req("POST", f"/api/v1/conversations/{conv}/messages/{ratt_seq}/recall", None, alice)
+check("recall attachment msg", st in (200, 201, 204), str(st))
+st, b = req("GET", f"/api/v1/objects/{roid}/download?token={p0x}", None)
+check("recalled attachment denied", st == 403, str(st))
 
 # capability-by-id regression: attaching an object id you cannot read must
 # be rejected on EVERY write path (IM / mail / HR) — otherwise the created
@@ -802,6 +852,20 @@ check("non-manager reshare to other conv 403", st == 403, str(st))
 st, _ = req("POST", f"/api/v1/docs/{sh_id}/share", {"conv_id": conv}, p0x)
 check("re-share into already-visible conv is a 204 no-op", st == 204, str(st))
 
+# ---- unshare: revoking the share drops member access ----
+st, _ = req("POST", f"/api/v1/docs/{sh_id}/unshare", {"conv_id": conv}, p0x)
+check("unshare by non-manager 403", st == 403, str(st))
+st, _ = req("POST", f"/api/v1/docs/{sh_id}/unshare", {"conv_id": conv}, alice)
+check("owner unshares doc", st == 204, str(st))
+st, _ = req("GET", f"/api/v1/docs/{sh_id}", None, p0x)
+check("unshared doc denied again", st == 403, str(st))
+st, b = req("GET", f"/api/v1/conversations/{conv}/docs", None, p0x)
+check("unshared doc leaves conv panel",
+      st == 200 and all(x["id"] != sh_id for x in json.loads(b).get("docs", [])), str(st))
+# restore the share for later tests (deleted-doc socket close uses it)
+st, _ = req("POST", f"/api/v1/docs/{sh_id}/share", {"conv_id": conv}, alice)
+check("re-share for later tests", st == 204, str(st))
+
 # doc WS relay: handshake frames + update persist + late-join replay
 try:
     import websocket as _wsm
@@ -895,27 +959,61 @@ try:
     st, b = req("GET", "/api/v1/docs", None, alice)
     check("soft-deleted doc not listed", all(x["id"] != sh_id for x in json.loads(b).get("docs", [])))
 
-    # compaction: the first SyncStep2 after the server's SyncStep1 is the
-    # client's full state → replaces everything replayed before it.
-    st, b = req("POST", "/api/v1/docs", {"title": "p0x-compact"}, alice)
-    cmp_id = json.loads(b)["id"]
-    for blob in (b"cmp-u1", b"cmp-u2"):
-        w = _wsm.create_connection(f"ws://localhost:8080/ws/doc/{cmp_id}?token={alice}", timeout=5)
-        w.recv()
-        w.send(_vu(0) + _vu(2) + _vb(blob), _wsm.ABNF.OPCODE_BINARY)
-        time.sleep(0.2)
+    # ws auth via Sec-WebSocket-Protocol (wt1.<token>) — the production
+    # path the client uses so the session token never sits in a URI.
+    try:
+        w = _wsm.create_connection(f"ws://localhost:8080/ws/doc/{cdoc_id}",
+                                   subprotocols=["wittychat", f"wt1.{alice}"], timeout=5)
+        check("doc ws wt1 subprotocol auth", len(w.recv()) > 0)
         w.close()
-    w, frames = ws_replay(cmp_id, alice)
-    check("compaction precondition: 2 updates replayed", len(frames) == 2, str(len(frames)))
-    w.send(_vu(0) + _vu(1) + _vb(b"cmp-SNAPSHOT"), _wsm.ABNF.OPCODE_BINARY)  # SyncStep2
+    except Exception as e:
+        check("doc ws wt1 subprotocol auth", False, str(e)[:60])
+    try:
+        _wsm.create_connection(f"ws://localhost:8080/ws/doc/{cdoc_id}",
+                               subprotocols=["wt1.bad-token"], timeout=5)
+        check("doc ws bad wt1 subprotocol", False, "connected")
+    except Exception as e:
+        check("doc ws bad wt1 subprotocol", "401" in str(e) or "unauthorized" in str(e).lower())
+
+    # compaction hardening: a member's first SyncStep2 is only an update —
+    # solely the OWNER's can compact, and only past the row threshold;
+    # replaced rows go to doc_update_archive (audit), not the void.
+    st, b = req("POST", "/api/v1/conversations/group",
+                {"title": f"p0x-cmp-{uuid.uuid4().hex[:4]}", "is_public": False,
+                 "member_ids": [p0x_id]}, admin)
+    cgrp = json.loads(b)["id"]
+    st, b = req("POST", "/api/v1/docs", {"title": "p0x-compact", "conv_id": cgrp}, admin)
+    cmp_id = json.loads(b)["id"]
+    w = _wsm.create_connection(f"ws://localhost:8080/ws/doc/{cmp_id}?token={admin}", timeout=5)
+    w.recv()
+    for i in range(55):  # above the compact threshold / 超过压缩行数阈值
+        w.send(_vu(0) + _vu(2) + _vb(f"cmp-u{i}".encode()), _wsm.ABNF.OPCODE_BINARY)
+    time.sleep(0.4)
+    w.close()
+
+    w, _ = ws_replay(cmp_id, p0x)
+    w.send(_vu(0) + _vu(1) + _vb(b"member-FORGED-SNAPSHOT"), _wsm.ABNF.OPCODE_BINARY)
     time.sleep(0.3)
     w.close()
-    w, frames = ws_replay(cmp_id, alice)
+    w, frames = ws_replay(cmp_id, p0x)
     w.close()
     blob = b"".join(frames)
-    check("log compacted to the snapshot",
-          len(frames) == 1 and b"cmp-SNAPSHOT" in blob and b"cmp-u1" not in blob, str(len(frames)))
-    req("DELETE", f"/api/v1/docs/{cmp_id}", None, alice)
+    check("member snapshot cannot compact history",
+          b"member-FORGED-SNAPSHOT" in blob and b"cmp-u0" in blob, f"{len(frames)} frames")
+
+    w, _ = ws_replay(cmp_id, admin)
+    w.send(_vu(0) + _vu(1) + _vb(b"owner-SNAPSHOT"), _wsm.ABNF.OPCODE_BINARY)
+    time.sleep(0.4)
+    w.close()
+    # p0x is a member but NOT the owner — history should be the
+    # owner's snapshot only; forged member bytes stay in archive.
+    w, frames = ws_replay(cmp_id, p0x)
+    w.close()
+    blob = b"".join(frames)
+    check("owner snapshot compacts large log",
+          b"owner-SNAPSHOT" in blob and b"cmp-u0" not in blob and b"member-FORGED" not in blob,
+          f"{len(frames)} frames")
+    req("DELETE", f"/api/v1/docs/{cmp_id}", None, admin)
 except ImportError:
     print("SKIP doc ws checks (websocket-client not installed)")
 

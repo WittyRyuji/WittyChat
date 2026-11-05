@@ -8,6 +8,7 @@ package objects
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -239,6 +240,68 @@ func (s *Store) MigrateCold(ctx context.Context, older time.Duration, limit int)
 		}
 		_ = os.Remove(s.path(c.id, c.sha))
 		_ = os.Remove(s.legacyPath(c.sha))
+		n++
+	}
+	return n, nil
+}
+
+// PurgeOldVersions deletes version-history rows older than `older`
+// (the audit-retention window) and removes their stored bytes — local
+// files under the recorded sha, S3 objects under each segment key.
+// 版本保留清除：删除超过审计保留期的历史版本并移除其字节——本地按
+// 记录的 sha 删文件，S3 按分段 key 删对象。
+func (s *Store) PurgeOldVersions(ctx context.Context, older time.Duration) (int, error) {
+	cutoff := time.Now().Add(-older)
+	rows, err := s.pool.Query(ctx,
+		`SELECT object_id, version, sha256, location, segments
+		 FROM object_versions WHERE created_at < $1`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	type ver struct {
+		obj      uuid.UUID
+		ver      int
+		sha      []byte
+		loc      string
+		segments []byte
+	}
+	var list []ver
+	for rows.Next() {
+		var v ver
+		if err := rows.Scan(&v.obj, &v.ver, &v.sha, &v.loc, &v.segments); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		list = append(list, v)
+	}
+	rows.Close()
+	n := 0
+	for _, v := range list {
+		if _, err := s.pool.Exec(ctx,
+			`DELETE FROM object_versions WHERE object_id=$1 AND version=$2 AND created_at < $3`,
+			v.obj, v.ver, cutoff); err != nil {
+			return n, err
+		}
+		if v.loc == "s3" && s.s3 != nil {
+			var segs []struct {
+				Key string `json:"key"`
+			}
+			if len(v.segments) > 0 {
+				_ = json.Unmarshal(v.segments, &segs)
+			}
+			for _, sg := range segs {
+				if sg.Key != "" {
+					_, _ = s.s3.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+						Bucket: aws.String(s.s3.cfg.Bucket), Key: aws.String(sg.Key),
+					})
+				}
+			}
+		} else if len(v.sha) == 32 {
+			var fixed [32]byte
+			copy(fixed[:], v.sha)
+			_ = os.Remove(s.path(v.obj, fixed))
+			_ = os.Remove(s.legacyPath(fixed))
+		}
 		n++
 	}
 	return n, nil

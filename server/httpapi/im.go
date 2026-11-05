@@ -262,7 +262,7 @@ func (d *Deps) createGroup(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, imErr(err)
 	}
-	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "im.group.create", in.Body.Title, nil, clientIP(in.XForwardedFor))
+	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "im.group.create", in.Body.Title, nil, clientIPCtx(ctx))
 	return &struct{ Body apitypes.ConversationInfo }{
 		Body: apitypes.ConversationInfo{
 			ID: c.ID.String(), Kind: c.Kind, Title: c.Title, IsPublic: c.IsPublic,
@@ -391,10 +391,17 @@ func (d *Deps) sendMessage(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, imErr(err)
 	}
-	if !existed {
-		if len(objIDs) > 0 {
-			_ = d.Objects.LinkAttachments(ctx, convID, op.Seq, objIDs)
+	// Link attachments AFTER the op exists (attachment_refs → conv_ops FK).
+	// Idempotent across retries (ON CONFLICT) and the error is surfaced so
+	// a failed link makes the client resend rather than silently dropping
+	// the attachment grant. 附件引用须在 op 落库后关联；幂等可重试且
+	// 失败显式报错——不再静默丢附件授权。
+	if len(objIDs) > 0 {
+		if err := d.Objects.LinkAttachments(ctx, convID, op.Seq, objIDs); err != nil {
+			return nil, huma.Error500InternalServerError("attachment link failed / 附件关联失败")
 		}
+	}
+	if !existed {
 		d.notifyMembers(ctx, convID, op.Seq, u.ID)
 	}
 	status := http.StatusOK
@@ -422,14 +429,13 @@ func (d *Deps) editMessage(ctx context.Context, in *struct {
 		return nil, err
 	}
 	convID, _ := uuid.Parse(in.ID)
-	seq, err := d.IM.EditMessage(ctx, u.ID, convID, in.Seq, in.Body.Markdown)
+	op, err := d.IM.EditMessage(ctx, u.ID, convID, in.Seq, in.Body.Markdown)
 	if err != nil {
 		return nil, imErr(err)
 	}
-	d.notifyMembers(ctx, convID, seq, u.ID)
-	return &struct{ Body apitypes.OpEvent }{
-		Body: apitypes.OpEvent{OpSeq: seq, Kind: apitypes.OpEdit, TargetSeq: in.Seq},
-	}, nil
+	d.notifyMembers(ctx, convID, op.Seq, u.ID)
+	op.ActorName = u.DisplayName
+	return &struct{ Body apitypes.OpEvent }{Body: *opEvent(op)}, nil
 }
 
 func (d *Deps) recallMessage(ctx context.Context, in *struct {
@@ -443,14 +449,13 @@ func (d *Deps) recallMessage(ctx context.Context, in *struct {
 		return nil, err
 	}
 	convID, _ := uuid.Parse(in.ID)
-	seq, err := d.IM.RecallMessage(ctx, u.ID, convID, in.Seq)
+	op, err := d.IM.RecallMessage(ctx, u.ID, convID, in.Seq)
 	if err != nil {
 		return nil, imErr(err)
 	}
-	d.notifyMembers(ctx, convID, seq, u.ID)
-	return &struct{ Body apitypes.OpEvent }{
-		Body: apitypes.OpEvent{OpSeq: seq, Kind: apitypes.OpRecall, TargetSeq: in.Seq},
-	}, nil
+	d.notifyMembers(ctx, convID, op.Seq, u.ID)
+	op.ActorName = u.DisplayName
+	return &struct{ Body apitypes.OpEvent }{Body: *opEvent(op)}, nil
 }
 
 // enrichReactions attaches the CURRENT aggregate ("reactions_full") onto each
@@ -500,19 +505,29 @@ func (d *Deps) reactMessage(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, huma.Error400BadRequest("bad conversation id")
 	}
-	seq, err := d.IM.ReactMessage(ctx, u.ID, convID, in.Seq, in.Body.Emoji, in.Body.Add)
+	op, err := d.IM.ReactMessage(ctx, u.ID, convID, in.Seq, in.Body.Emoji, in.Body.Add)
 	if err != nil {
 		return nil, imErr(err)
 	}
-	e := &apitypes.OpEvent{
-		OpSeq: seq, Kind: apitypes.OpReaction, TargetSeq: in.Seq,
-		ActorID: u.ID.String(), ActorName: u.DisplayName,
+	var e *apitypes.OpEvent
+	if op != nil {
+		op.ActorName = u.DisplayName
+		e = opEvent(op)
+	} else {
+		// Idempotent no-op — echo the target so the client can update UI.
+		e = &apitypes.OpEvent{
+			Kind: apitypes.OpReaction, TargetSeq: in.Seq,
+			ActorID: u.ID.String(), ActorName: u.DisplayName,
+		}
 	}
 	if agg, err := d.IM.ReactionsFor(ctx, convID, []int64{in.Seq}); err == nil {
-		e.Payload = map[string]any{"reactions_full": agg[in.Seq]}
+		if e.Payload == nil {
+			e.Payload = map[string]any{}
+		}
+		e.Payload["reactions_full"] = agg[in.Seq]
 	}
-	if seq > 0 {
-		d.notifyMembers(ctx, convID, seq, u.ID)
+	if op != nil {
+		d.notifyMembers(ctx, convID, op.Seq, u.ID)
 	}
 	return &struct{ Body apitypes.OpEvent }{Body: *e}, nil
 }
@@ -597,7 +612,7 @@ func (d *Deps) addMembers(ctx context.Context, in *struct {
 		return nil, imErr(err)
 	}
 	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "im.member.add", convID.String(),
-		map[string]any{"count": len(ids)}, clientIP(in.XForwardedFor))
+		map[string]any{"count": len(ids)}, clientIPCtx(ctx))
 	return &struct{}{}, nil
 }
 

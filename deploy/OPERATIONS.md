@@ -44,15 +44,16 @@ Wails3 产出 `bin/wittychat.exe`（已验证 11.4MB）。
 
 ## OnlyOffice 在线编辑
 
-附件「在线编辑」→ `/office/open` 校验登录+ACL → 302 到签名 `/office/edit` 页（24h 有效）→ 编辑器经 DocsAPI 拉 `/api/v1/office/file`（容器专用签名 URL）→ 保存时文档服务 POST `/api/v1/office/callback`（JWT 校验）→ 服务端回拉成稿并原位替换对象字节，所有引用（消息/邮件附件）即见新版。
+附件「在线编辑」→ `/office/open`（或 `GET /api/v1/objects/{id}/office-url`）校验登录+ACL → 302 到签名 `/office/edit` 页（15min 有效，每次打开复核账号状态与 ACL）→ 编辑器经 DocsAPI 拉 `/api/v1/office/file`（容器专用签名 URL，8h）→ 保存时文档服务 POST `/api/v1/office/callback`（JWT 校验 + key 绑定 obj + 复核写权限）→ 服务端回拉成稿并原位替换对象字节，所有引用（消息/邮件附件）即见新版。
 
 | 环境变量 | 作用 |
 |---|---|
 | `WITTYCHAT_ONLYOFFICE_URL` | 浏览器可达的文档服务地址（api.js 加载源）；不设 = 功能关闭 |
-| `WITTYCHAT_ONLYOFFICE_JWT_SECRET` | 与容器 `JWT_SECRET` 一致；编辑配置与回调都靠它 |
+| `WITTYCHAT_ONLYOFFICE_JWT_SECRET` | 与容器 `JWT_SECRET` 一致；编辑配置与回调都靠它。**必填**——未配置时 office 整体禁用（保存回调覆盖对象字节，公开默认密钥等于放伪造） |
+| `WITTYCHAT_ONLYOFFICE_AUTODETECT` | `=1` 时在 URL 未设的情况下探测 `localhost:8180/healthcheck`（开发便利开关，默认关） |
 | `WITTYCHAT_ONLYOFFICE_CALLBACK_BASE` | 文档容器回访本服务的基址。本地 Docker Desktop：`http://host.docker.internal:8080`（默认）；compose 同网：`http://server:8080` |
 | `WITTYCHAT_ONLYOFFICE_INTERNAL_URL` | 本服务回拉成稿的基址。默认同 `ONLYOFFICE_URL`；compose 内：`http://onlyoffice` |
 
-- 本地开发：`docker compose -f deploy/docker-compose.dev.yml up -d onlyoffice`，服务端加 `WITTYCHAT_ONLYOFFICE_URL=http://localhost:8180 WITTYCHAT_ONLYOFFICE_JWT_SECRET=wittychat-office-dev`
+- 本地开发：`docker compose -f deploy/docker-compose.dev.yml up -d onlyoffice`，服务端加 `WITTYCHAT_ONLYOFFICE_URL=http://localhost:8180 WITTYCHAT_ONLYOFFICE_JWT_SECRET=wittychat-office-dev`（或以 `WITTYCHAT_ONLYOFFICE_AUTODETECT=1` 代替 URL 显式指定）
 - 文档 key 随字节 sha 滚动——保存后下次打开必拉新稿；同 key 多人打开 = 协同编辑
-- 编辑保存为原位替换（不增版本），历史版本功能属后续项
+- 编辑保存保留上一版到 `object_versions`（审计保留期可还原/审计）；超限版本由 worker 定期清理

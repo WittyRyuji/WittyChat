@@ -113,10 +113,12 @@ func (d *Deps) officeCanEdit(ctx context.Context, objID, uid uuid.UUID) bool {
 
 // signedEditURL mints the self-contained edit page URL for (obj,user) —
 // capability is the signature itself, no cookie/session needed in the
-// external browser tab. TTL covers a working day of editing.
+// external browser tab. Short TTL: the page only bootstraps the editor;
+// ACL is re-checked on every load and every save callback anyway.
+// 短时签名：页面只引导编辑器加载；每次打开与保存回调都复核权限。
 func (d *Deps) signedEditURL(objID, uid uuid.UUID) string {
 	sub := fmt.Sprintf("office|%s|%s", objID, uid)
-	exp, sig := d.Signer.SignSubject(sub, 24*time.Hour)
+	exp, sig := d.Signer.SignSubject(sub, 15*time.Minute)
 	return fmt.Sprintf("%s/office/edit?obj=%s&u=%s&exp=%d&sig=%s",
 		strings.TrimRight(d.PublicURL, "/"), objID, uid, exp, sig)
 }
@@ -210,7 +212,9 @@ func (d *Deps) officeEdit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// File feed + callback are scoped for the docs container, not the user.
-	fexp, fsig := d.Signer.SignSubject("office-file|"+objID.String(), 24*time.Hour)
+	// One working session max — the container re-fetches /office/edit for a
+	// fresh signature whenever it reloads. 供文档容器使用，非用户会话。
+	fexp, fsig := d.Signer.SignSubject("office-file|"+objID.String(), 8*time.Hour)
 	cb := strings.TrimRight(d.Office.CallbackBase, "/")
 	fileURL := fmt.Sprintf("%s/api/v1/office/file?obj=%s&exp=%d&sig=%s", cb, objID, fexp, fsig)
 	callbackURL := fmt.Sprintf("%s/api/v1/office/callback?obj=%s", cb, objID)

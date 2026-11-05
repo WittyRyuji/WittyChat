@@ -49,7 +49,7 @@ export default function SlideEditor({
   useEffect(() => {
     if (synced && isOwner && slides.length === 0) {
       const m = new Y.Map<string>();
-      m.set("title", "第 1 页");
+      m.set("title", ""); // empty → shown as 第 N 页 placeholder / 空标题显示为占位
       m.set("body", "");
       ydoc.transact(() => slides.push([m]));
     }
@@ -96,7 +96,7 @@ export default function SlideEditor({
   const addSlide = (after?: number) => {
     ydoc.transact(() => {
       const m = new Y.Map<string>();
-      m.set("title", `第 ${slides.length + 1} 页`);
+      m.set("title", ""); // empty title → 第 N 页 placeholder / 空标题占位显示
       m.set("body", "");
       if (after === undefined) slides.push([m]);
       else slides.insert(after + 1, [m]);
@@ -151,7 +151,7 @@ export default function SlideEditor({
             onClick={() => goto(i)}
           >
             <span className="thumb-num">{i + 1}</span>
-            <span className="thumb-title">{s.title || "（无标题）"}</span>
+            <span className="thumb-title">{s.title || `第 ${i + 1} 页`}</span>
             {peersOn[i]?.length ? (
               <span className="thumb-peers">{peersOn[i].map((n) => n[0]).join("")}</span>
             ) : null}
@@ -198,7 +198,7 @@ export default function SlideEditor({
             <input
               className="slide-title"
               value={data[curIdx]?.title ?? ""}
-              placeholder="标题"
+              placeholder={`第 ${curIdx + 1} 页`}
               onChange={(e) => setField(curIdx, "title", e.target.value)}
             />
             <textarea

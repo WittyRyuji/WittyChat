@@ -3,7 +3,16 @@
 //
 // 邮件视图：文件夹 | 列表 | 阅读 + 写信弹窗。
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, api2, isOfficeFile, type MailFolder, type MailMessage, mailApi } from "./api";
+import {
+  api,
+  api2,
+  downloadExternal,
+  isOfficeFile,
+  type MailFolder,
+  type MailMessage,
+  mailApi,
+  officeOpenExternal,
+} from "./api";
 import {
   IconArchive,
   IconDraft,
@@ -14,6 +23,7 @@ import {
   IconTrash,
 } from "./icons";
 import { Md } from "./md";
+import { ObjImg } from "./objimg";
 import { prefGet, prefSet } from "./prefs";
 
 const TRUST_KEY = "pref.mail.trusted";
@@ -433,30 +443,28 @@ export function Mail() {
                 {open.attachments.map((a) => (
                   <span key={a.object_id} className="mail-attach-item">
                     {a.mime.startsWith("image/") && showImages && (
-                      <img
-                        className="mail-attach-img"
-                        src={api2.downloadURL(a.object_id)}
-                        alt={a.name}
-                      />
+                      <ObjImg className="mail-attach-img" id={a.object_id} alt={a.name} />
                     )}
                     <a
                       href={api2.downloadURL(a.object_id)}
-                      target="_blank"
                       rel="noreferrer"
                       download={a.name}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        downloadExternal(a.object_id).catch(() => {});
+                      }}
                     >
                       📎 {a.name}
                     </a>
                     {officeOn && isOfficeFile(a.name) && (
-                      <a
+                      <button
+                        type="button"
                         className="att-edit"
-                        href={api2.officeEditURL(a.object_id)}
-                        target="_blank"
-                        rel="noreferrer"
                         title="邮件附件是不可变记录，只读打开"
+                        onClick={() => officeOpenExternal(a.object_id).catch(() => {})}
                       >
                         在线查看
-                      </a>
+                      </button>
                     )}
                   </span>
                 ))}

@@ -14,8 +14,8 @@ import (
 )
 
 // RenameConv renames a group (owner/admin). Emits a 'rename' op.
-func (s *Store) RenameConv(ctx context.Context, actor, convID uuid.UUID, title string) (int64, error) {
-	var seq int64
+func (s *Store) RenameConv(ctx context.Context, actor, convID uuid.UUID, title string) (*Op, error) {
+	var op *Op
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		c, role, err := s.requireMember(ctx, tx, convID, actor)
 		if err != nil {
@@ -28,17 +28,18 @@ func (s *Store) RenameConv(ctx context.Context, actor, convID uuid.UUID, title s
 			`UPDATE conversations SET title=$2 WHERE id=$1`, convID, title); err != nil {
 			return err
 		}
-		seq, err = s.appendOpTx(ctx, tx, convID, actor, OpRename,
+		o, err := s.appendOpTx(ctx, tx, convID, actor, OpRename,
 			nil, 0, "", map[string]any{"title": title})
+		op = o
 		return err
 	})
-	return seq, err
+	return op, err
 }
 
 // TransferOwner hands ownership to another member (owner only).
 // Old owner keeps 'admin' role; emits a 'transfer' op.
-func (s *Store) TransferOwner(ctx context.Context, actor, convID, target uuid.UUID) (int64, error) {
-	var seq int64
+func (s *Store) TransferOwner(ctx context.Context, actor, convID, target uuid.UUID) (*Op, error) {
+	var op *Op
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		c, role, err := s.requireMember(ctx, tx, convID, actor)
 		if err != nil {
@@ -64,19 +65,20 @@ func (s *Store) TransferOwner(ctx context.Context, actor, convID, target uuid.UU
 			convID, target); err != nil {
 			return err
 		}
-		seq, err = s.appendOpTx(ctx, tx, convID, actor, OpTransfer,
+		o, err := s.appendOpTx(ctx, tx, convID, actor, OpTransfer,
 			nil, 0, "", map[string]any{"from": actor.String(), "to": target.String()})
+		op = o
 		return err
 	})
-	return seq, err
+	return op, err
 }
 
 // SetMemberRole promotes/demotes a member to admin|member (owner only).
-func (s *Store) SetMemberRole(ctx context.Context, actor, convID, target uuid.UUID, role string) (int64, error) {
+func (s *Store) SetMemberRole(ctx context.Context, actor, convID, target uuid.UUID, role string) (*Op, error) {
 	if role != RoleAdmin && role != RoleMember {
-		return 0, ErrNoPermission
+		return nil, ErrNoPermission
 	}
-	var seq int64
+	var op *Op
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		c, my, err := s.requireMember(ctx, tx, convID, actor)
 		if err != nil {
@@ -96,11 +98,12 @@ func (s *Store) SetMemberRole(ctx context.Context, actor, convID, target uuid.UU
 			convID, target, role); err != nil {
 			return err
 		}
-		seq, err = s.appendOpTx(ctx, tx, convID, actor, OpRoleChange,
+		o, err := s.appendOpTx(ctx, tx, convID, actor, OpRoleChange,
 			nil, 0, "", map[string]any{"user_id": target.String(), "role": role})
+		op = o
 		return err
 	})
-	return seq, err
+	return op, err
 }
 
 // PublicGroup is a searchable public conversation.
@@ -140,8 +143,9 @@ func (s *Store) SearchPublicGroups(ctx context.Context, userID uuid.UUID, q stri
 }
 
 // JoinPublicGroup adds the caller to a public group (no admin needed).
-func (s *Store) JoinPublicGroup(ctx context.Context, convID, user uuid.UUID) (int64, error) {
-	var seq int64 = -1
+func (s *Store) JoinPublicGroup(ctx context.Context, convID, user uuid.UUID) (*Op, error) {
+	var op *Op // nil → already a member (no-op) / 已是成员时为空
+
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		var kind string
 		var pub bool
@@ -163,11 +167,12 @@ func (s *Store) JoinPublicGroup(ctx context.Context, convID, user uuid.UUID) (in
 		if tag.RowsAffected() == 0 {
 			return nil // already a member — no op
 		}
-		seq, err = s.appendOpTx(ctx, tx, convID, user, OpMemberAdd,
+		o, err := s.appendOpTx(ctx, tx, convID, user, OpMemberAdd,
 			nil, 0, "", map[string]any{"user_id": user.String(), "via": "public_join"})
+		op = o
 		return err
 	})
-	return seq, err
+	return op, err
 }
 
 // MessageHit is one search result.

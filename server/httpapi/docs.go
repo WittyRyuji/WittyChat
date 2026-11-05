@@ -27,6 +27,7 @@ func registerDocs(mux *http.ServeMux, d *Deps) {
 	mux.HandleFunc("GET /api/v1/docs/{id}", d.getDoc)
 	mux.HandleFunc("POST /api/v1/docs/{id}/rename", d.renameDoc)
 	mux.HandleFunc("POST /api/v1/docs/{id}/share", d.shareDoc)
+	mux.HandleFunc("POST /api/v1/docs/{id}/unshare", d.unshareDoc)
 	mux.HandleFunc("DELETE /api/v1/docs/{id}", d.deleteDoc)
 	mux.HandleFunc("GET /api/v1/conversations/{id}/docs", d.convDocs)
 	mux.HandleFunc("GET /ws/doc/{id}", d.docWS)
@@ -35,7 +36,7 @@ func registerDocs(mux *http.ServeMux, d *Deps) {
 func (d *Deps) docAudit(r *http.Request, uid uuid.UUID, action string, docID uuid.UUID, detail any) {
 	if d.Audit != nil {
 		d.Audit.Log(r.Context(), &uid, audit.ActorUser, action, docID.String(), detail,
-			clientIP(r.Header.Get("X-Forwarded-For")))
+			clientIPCtx(r.Context()))
 	}
 }
 
@@ -117,6 +118,43 @@ func (d *Deps) shareDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.docAudit(r, uid, "doc.share", docID, map[string]any{"conv_id": in.ConvID})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// unshareDoc — POST /docs/{id}/unshare {conv_id}: revoke a conv's access
+// granted by an earlier share. Manager-only; live sockets of members who
+// lose access get dropped by the periodic doc revalidation.
+// 撤销分享：收回先前分享授予的会话访问权。仅管理者；失权成员的在线
+// 连接由文档周期性复核断开。
+func (d *Deps) unshareDoc(w http.ResponseWriter, r *http.Request) {
+	uid, err := d.bearerUser(r)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	docID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	var in struct {
+		ConvID uuid.UUID `json:"conv_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.ConvID == uuid.Nil {
+		http.Error(w, "conv_id required", http.StatusBadRequest)
+		return
+	}
+	ctx := r.Context()
+	if !d.Docs.CanManage(ctx, docID, uid) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if err := d.Docs.Unshare(ctx, docID, in.ConvID); err != nil {
+		http.Error(w, "failed", http.StatusInternalServerError)
+		return
+	}
+	d.docRevalidateDoc(ctx, docID) // drop sockets whose access just ended / 断开已失权连接
+	d.docAudit(r, uid, "doc.unshare", docID, map[string]any{"conv_id": in.ConvID})
 	w.WriteHeader(http.StatusNoContent)
 }
 

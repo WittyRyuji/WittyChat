@@ -243,6 +243,7 @@ func (s *Store) AddMembers(ctx context.Context, actor, convID uuid.UUID, userIDs
 				nil, 0, "", map[string]any{"user_id": uid.String()}); err != nil {
 				return err
 			}
+
 		}
 		return nil
 	})
