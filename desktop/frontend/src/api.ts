@@ -484,7 +484,11 @@ export function newClientMsgId(): string {
 // feed <img> with the returned Blob via URL.createObjectURL.
 // 带会话头取字节（URL 不含 token）；返回 Blob 供 createObjectURL 给 <img>。
 export async function authBlob(path: string): Promise<Blob> {
-  const res = await fetch(API_BASE + path, {
+  // Callers pass api2.*URL() values which are already absolute inside the
+  // Wails shell — re-prefixing produced an unparsable doubled origin and
+  // every chat/sticker/mail image failed. / 调用方传入的 api2.*URL 已含
+  // API_BASE——再拼一次会得到非法双源地址，壳内图片全部加载失败。
+  const res = await fetch(/^https?:\/\//i.test(path) ? path : API_BASE + path, {
     headers: { Authorization: `Bearer ${getToken()}` },
   });
   if (!res.ok) throw new Error(`fetch ${res.status}`);

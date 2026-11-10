@@ -1054,6 +1054,7 @@ export function Chat({
                                           id={a.id}
                                           kind={a.mime === "image/gif" ? "full" : "thumb"}
                                           alt={a.name}
+                                          ctx="att"
                                         />
                                       </button>
                                     ) : (
@@ -1089,16 +1090,6 @@ export function Chat({
                                   isDm={active.kind === "dm"}
                                 />
                               )}
-                              {!o.recalled && (
-                                <button
-                                  type="button"
-                                  className="rx-add"
-                                  title="点赞"
-                                  onClick={() => reactEmoji(o, "👍")}
-                                >
-                                  👍
-                                </button>
-                              )}
                             </div>
                             {!o.recalled && (
                               <div className="rx-zone">
@@ -1121,6 +1112,14 @@ export function Chat({
                           </div>
                           {!o.recalled && (
                             <div className="msg-tools">
+                              <button
+                                type="button"
+                                className="rx-add"
+                                title="点赞"
+                                onClick={() => reactEmoji(o, "👍")}
+                              >
+                                👍
+                              </button>
                               <button type="button" className="ghost" onClick={() => setQuote(o)}>
                                 引用
                               </button>
@@ -1297,6 +1296,7 @@ export function Chat({
                                     id={s.id}
                                     kind={s.mime === "image/gif" ? "full" : "thumb"}
                                     alt={s.name}
+                                    ctx="stk"
                                   />
                                 </button>
                                 <button

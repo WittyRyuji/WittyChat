@@ -443,7 +443,12 @@ export function Mail() {
                 {open.attachments.map((a) => (
                   <span key={a.object_id} className="mail-attach-item">
                     {a.mime.startsWith("image/") && showImages && (
-                      <ObjImg className="mail-attach-img" id={a.object_id} alt={a.name} />
+                      <ObjImg
+                        className="mail-attach-img"
+                        id={a.object_id}
+                        alt={a.name}
+                        ctx="mail"
+                      />
                     )}
                     <a
                       href={api2.downloadURL(a.object_id)}

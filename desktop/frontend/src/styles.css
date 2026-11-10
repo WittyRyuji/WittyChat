@@ -603,6 +603,12 @@ button {
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.45;
+  /* Clamp to the bubble so an unbreakable line (long code/pre, wide
+     table) can't stretch the bubble past the column — .md pre scrolls
+     instead. / 不宽于气泡——长代码行等不可断内容不再把气泡撑出列宽，
+     代码块自己出横向滚动条。 */
+  max-width: 100%;
+  box-sizing: border-box;
 }
 .msg.mine .msg-body {
   background: #2b4a7c;
@@ -673,6 +679,12 @@ button {
   opacity: 0;
   transition: opacity 0.15s;
   margin-top: 2px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.msg.mine .msg-tools {
+  justify-content: flex-end;
 }
 .msg:hover .msg-tools {
   opacity: 1;
@@ -732,21 +744,16 @@ button {
 .rx-pill.mine .rx-n {
   color: var(--accent);
 }
+/* The add button lives in the hover tools row — its old corner spot
+   covered short bubbles' text (a single emoji was nearly fully hidden).
+   悬停 👍 在工具行里——原骑角位置会盖住短消息正文（单 emoji 几乎全挡）。 */
 .rx-add {
-  position: absolute;
-  right: -8px;
-  bottom: 0;
   min-width: 26px;
   justify-content: center;
-  opacity: 0;
-  transition: opacity 0.12s;
 }
-.msg:hover .rx-add {
-  opacity: 1;
-}
-/* When pills exist the standalone 👍 would sit on top of them — the pill
-   itself is the toggle, so hide the add-button. 有回应时 pill 即切换钮。 */
-.msg-body-wrap:has(.rx-pill) .rx-add {
+/* When pills exist the standalone 👍 is redundant — the pill itself is
+   the toggle, so hide the add-button. 有回应时 pill 即切换钮。 */
+.msg:has(.rx-pill) .rx-add {
   display: none;
 }
 
@@ -1339,15 +1346,16 @@ button {
   display: inline-block;
   min-width: 48px;
   min-height: 36px;
+  border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--bg3);
+  box-sizing: border-box;
 }
 .obj-ph-err {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px dashed var(--line);
-  box-sizing: border-box;
+  border-style: dashed;
   padding: 6px;
   font-size: 11px;
   color: var(--dim);
@@ -1357,7 +1365,6 @@ button {
 .att-img .obj-ph {
   width: 120px;
   height: 90px;
-  border: 1px solid var(--line);
 }
 .stk-img .obj-ph {
   width: 100%;
