@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -331,6 +330,14 @@ func (d *Deps) adminSettingsSet(ctx context.Context, in *struct {
 		return nil, err
 	}
 	for k, v := range in.Body.Settings {
+		// Bounded numeric keys reject out-of-range values — a typo must
+		// not be able to disable retention or the doc cap. / 有界数值键
+		// 拒绝越界值——手滑不能关掉保留期或文档上限。
+		if f, ok := v.(float64); ok {
+			if err := settings.ValidateInt(k, int64(f)); err != nil {
+				return nil, huma.Error400BadRequest(err.Error())
+			}
+		}
 		if err := d.Settings.Set(ctx, k, v, admin.ID); err != nil {
 			return nil, err
 		}
@@ -355,7 +362,7 @@ func (d *Deps) adminAuditExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.Audit.Log(r.Context(), &admin.ID, audit.ActorAdmin, "admin.audit.export", "", nil,
-		net.ParseIP(r.Header.Get("X-Forwarded-For")))
+		clientIPCtx(r.Context()))
 	rows, err := d.Pool.Query(r.Context(),
 		`SELECT id, actor_id, actor_kind, action, target, detail, ip, created_at
 		 FROM audit_events ORDER BY id`)

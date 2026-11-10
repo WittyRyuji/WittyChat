@@ -421,16 +421,22 @@ const POLICY_FIELDS: {
 	{ key: "security.min_password", label: "密码最小长度", kind: "int" },
 	{
 		key: "security.lock_threshold",
-		label: "登录失败锁定阈值(次)",
+		label: "登录失败限速阈值(次)",
 		kind: "int",
 	},
-	{ key: "security.lock_minutes", label: "锁定时长(分钟)", kind: "int" },
+	{
+		key: "security.lock_minutes",
+		label: "同IP失败锁定时长(分钟)",
+		kind: "int",
+	},
 	{ key: "im.message_max_chars", label: "消息字数上限(≤5000)", kind: "int" },
 	{ key: "im.recall_timeout_sec", label: "撤回时限(秒)", kind: "int" },
 	{ key: "im.read_receipts", label: "已读回执", kind: "bool" },
 	{ key: "im.at_all", label: "@所有人权限(all/admin)", kind: "str" },
 	{ key: "storage.upload_max_mb", label: "附件上限(MB)", kind: "int" },
 	{ key: "storage.quota_bytes", label: "工作区配额(字节,0=不限)", kind: "int" },
+	{ key: "docs.log_max_mb", label: "协作文档日志上限(MB)", kind: "int" },
+	{ key: "audit.retention_days", label: "审计/版本保留天数", kind: "int" },
 ];
 
 function Security() {

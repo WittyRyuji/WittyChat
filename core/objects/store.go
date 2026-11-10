@@ -153,36 +153,79 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 		Name: name, Size: n, SHA256: sum, Mime: mime, Location: "local", Status: "ready",
 	}
 	dst := s.path(obj.ID, sum)
-	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
-		return nil, false, err
-	}
-	if err := os.Rename(tmpPath, dst); err != nil {
-		return nil, false, err
-	}
+	rel, _ := filepath.Rel(s.dataDir, dst)
 	var convArg any // uuid.Nil → NULL (non-conv objects: mail/avatar/…)
 	if convID != uuid.Nil {
 		obj.ConvID = &convID
 		convArg = convID
 	}
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		// Serialize reference creation vs. reference-aware deletion on the
+		// storage key — a GC can't unlink the file between our rename and
+		// our segment insert, and it can't delete a key we're about to
+		// reference. / 按存储 key 串行化"建引用"与"查引用后删除"——
+		// GC 无法在落盘与插引用之间删文件，也不会删我们正要引用的 key。
+		if _, err := tx.Exec(ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, rel); err != nil {
+			return err
+		}
+		// Double-checked dedup inside the lock: a concurrent identical
+		// upload that passed the outside check commits first → reuse its
+		// row instead of dying on the unique index and deleting the file
+		// it just published. / 锁内去重复查：并发同内容上传若已先提交，
+		// 复用其行——而不是撞唯一索引后误删它刚发布的文件。
+		err := tx.QueryRow(ctx,
+			`SELECT id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, location, status, created_at
+			 FROM objects WHERE sha256=$1 AND owner_user=$2 AND conv_id IS NOT DISTINCT FROM $3::uuid
+			   AND status<>'deleted' LIMIT 1`, sum[:], owner, nilUUID(convID)).
+			Scan(&existing.ID, &existing.Owner, &existing.ConvID, &existing.Purpose, &existing.Name,
+				&existing.Size, &sha, &existing.Mime, &existing.Location, &existing.Status, &existing.CreatedAt)
+		if err == nil {
+			copy(existing.SHA256[:], sha)
+			return errDedup
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
+			return err
+		}
+		// Publish the bytes idempotently: same sha ⇒ same content, so an
+		// existing file is already correct — never overwrite or remove it.
+		// 幂等发布字节：同 sha 即同内容，已存在的文件就是对的——不覆盖不删除。
+		if _, err := os.Stat(dst); errors.Is(err, os.ErrNotExist) {
+			if err := os.Rename(tmpPath, dst); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO objects (id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, location, status)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'local','ready')`,
 			obj.ID, owner, convArg, purpose, name, n, sum[:], mime); err != nil {
 			return err
 		}
-		rel, _ := filepath.Rel(s.dataDir, dst)
-		_, err := tx.Exec(ctx,
+		_, err = tx.Exec(ctx,
 			`INSERT INTO object_segments (object_id, seg_index, size_bytes, storage_key) VALUES ($1,0,$2,$3)`,
 			obj.ID, n, rel)
 		return err
 	})
 	if err != nil {
-		_ = os.Remove(dst)
+		if errors.Is(err, errDedup) {
+			return &existing, true, nil
+		}
+		// Rolled back after the rename? Drop our bytes ONLY if nothing
+		// else references the key — another object may legitimately share
+		// it. / 落盘后回滚：仅当无人引用该 key 才删——文件可能是共享的。
+		_ = s.dropKeyIfOrphaned(ctx, rel, "local")
 		return nil, false, err
 	}
 	return obj, false, nil
 }
+
+// errDedup marks "an identical row was committed by a racing upload"
+// inside the advisory-locked Put transaction. / 标记锁内去重命中：
+// 并发相同上传已提交，复用其行。
+var errDedup = errors.New("dedup: committed by racing upload")
 
 // ReplaceBytes streams new content into the store and re-points an
 // existing object at it — the in-place "save" path for office editing.
@@ -224,17 +267,27 @@ func (s *Store) ReplaceBytes(ctx context.Context, id uuid.UUID, r io.Reader, mim
 	var sum [32]byte
 	copy(sum[:], h.Sum(nil))
 	dst := s.path(o.ID, sum)
-	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
-		return nil, err
-	}
-	if err := os.Rename(tmpPath, dst); err != nil {
-		return nil, err
-	}
 	rel, _ := filepath.Rel(s.dataDir, dst)
 	if mime == "" {
 		mime = o.Mime
 	}
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		// Same serialization as Put: the file may share its storage key
+		// with another object of identical content — cleanup must consult
+		// references, never the sha alone. / 与 Put 同一串行域：该存储
+		// key 可能被同内容对象共享——清理必须查引用而非按 sha 直删。
+		if _, err := tx.Exec(ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, rel); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
+			return err
+		}
+		if _, err := os.Stat(dst); errors.Is(err, os.ErrNotExist) {
+			if err := os.Rename(tmpPath, dst); err != nil {
+				return err
+			}
+		}
 		// Snapshot the current version before re-pointing, with the full
 		// segment list so old bytes stay restorable/GC-able. 先记录旧版本，
 		// 含全部分段，旧字节才可恢复、GC 才能删对文件。
@@ -273,7 +326,11 @@ func (s *Store) ReplaceBytes(ctx context.Context, id uuid.UUID, r io.Reader, mim
 		return err
 	})
 	if err != nil {
-		_ = os.Remove(dst)
+		// Rolled back (e.g. sha collision on the scoped unique index):
+		// remove our file only when unreferenced — an identical-content
+		// object may share the same storage key. / 回滚（如唯一索引
+		// 冲突）：仅当 key 无引用才删文件——同内容对象可能共享它。
+		_ = s.dropKeyIfOrphaned(ctx, rel, "local")
 		return nil, err
 	}
 	_ = os.Remove(s.ThumbPath(id)) // stale preview must not survive the edit / 旧缩略图不留
@@ -522,12 +579,54 @@ func (s *Store) AdminPurge(ctx context.Context, owner uuid.UUID, from, to time.T
 	return deleted, err
 }
 
-// RemoveFiles deletes an object's payload + thumbnail best-effort.
-func (s *Store) RemoveFiles(o *Object) {
-	_ = os.Remove(s.path(o.ID, o.SHA256))
-	_ = os.Remove(s.legacyPath(o.SHA256))
+// RemoveFiles deletes a (soft-)deleted object's payload bytes and
+// thumbnails. Payload keys go through the reference check — another live
+// object or retained version with identical content keeps its shared
+// file. Objects with no segment rows (aborted uploads) fall back to the
+// path derived from their id+sha. The legacy hash-only file is removed
+// only when nothing references the sha at all.
+// RemoveFiles 删除（已软删）对象的负载字节与缩略图。负载 key 走引用
+// 检查——同内容的在用对象或保留版本共享的文件保留。无分段行的对象
+// （中断的上传）回退用 id+sha 推路径。旧哈希布局文件仅在该 sha 完全
+// 无引用时才删。
+func (s *Store) RemoveFiles(ctx context.Context, o *Object) {
+	var keys []string
+	rows, err := s.pool.Query(ctx,
+		`SELECT storage_key FROM object_segments WHERE object_id=$1`, o.ID)
+	if err == nil {
+		for rows.Next() {
+			var k string
+			if rows.Scan(&k) == nil && k != "" {
+				keys = append(keys, k)
+			}
+		}
+		rows.Close()
+	}
+	if len(keys) == 0 && o.Location != "s3" {
+		rel, _ := filepath.Rel(s.dataDir, s.path(o.ID, o.SHA256))
+		keys = append(keys, rel)
+	}
+	for _, k := range keys {
+		_ = s.dropKeyIfOrphaned(ctx, k, o.Location)
+	}
+	if !s.shaReferenced(ctx, o.SHA256) {
+		_ = os.Remove(s.legacyPath(o.SHA256))
+	}
 	_ = os.Remove(s.ThumbPath(o.ID))
 	_ = os.Remove(s.ThumbPathLegacy(o.ID))
+}
+
+// shaReferenced reports whether any live object or retained version uses
+// this content hash — the conservative guard before removing a file from
+// the legacy hash-only layout (no per-key record exists for it).
+// 判断该内容哈希是否仍被在用对象或保留版本引用——删除旧哈希布局文件前
+// 的保守兜底（旧布局没有按 key 的记录可查）。
+func (s *Store) shaReferenced(ctx context.Context, sha [32]byte) bool {
+	var ok bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM objects WHERE sha256=$1 AND status<>'deleted')
+		OR EXISTS(SELECT 1 FROM object_versions WHERE sha256=$1)`, sha[:]).Scan(&ok)
+	return err == nil && ok
 }
 
 // nilUUID maps uuid.Nil → nil for optional :uuid params.

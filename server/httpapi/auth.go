@@ -5,6 +5,10 @@ package httpapi
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -87,20 +91,28 @@ func registerAuth(api huma.API, d *Deps) {
 type Headers struct {
 	Authorization string `header:"Authorization"`
 	XForwardedFor string `header:"X-Forwarded-For"`
+	Cookie        string `header:"Cookie"`
+}
+
+// loginOut carries the Set-Cookie for the known-device marker.
+// loginOut 额外带 Set-Cookie 写"已知设备"标记。
+type loginOut struct {
+	Body      apitypes.LoginResponse
+	SetCookie string `header:"Set-Cookie"`
 }
 
 func (d *Deps) login(ctx context.Context, in *struct {
 	Headers
 	Body apitypes.LoginRequest
 },
-) (*struct{ Body apitypes.LoginResponse }, error) {
+) (*loginOut, error) {
 	ip := clientIPCtx(ctx)
-	// Throttle on two keys: email+IP (stops one source hammering many
-	// accounts) and email alone (stops distributed attempts at one
-	// account — a spoofed/rotated XFF can't dodge it). The email is
-	// normalized so case variants share one counter.
-	// 双键限速：账号+IP 防单源横扫多账号，仅账号防分布式打同一账号
-	// （伪造 XFF 绕不过）；邮箱归一化避免大小写变体绕过。
+	// Throttle on two keys: email+IP (stops one source hammering one
+	// account — per-IP-per-account hard limit) and email alone (stops
+	// distributed attempts at one account — a spoofed/rotated XFF can't
+	// dodge it). The email is normalized so case variants share one
+	// counter. 双键限速：账号+IP 防单源对同一账号刷猜（硬锁），仅账号
+	// 防分布式打同一账号（伪造 XFF 绕不过）；邮箱归一化防大小写变体。
 	email := strings.ToLower(strings.TrimSpace(in.Body.Email))
 	ipStr := "?"
 	if ip != nil {
@@ -116,24 +128,39 @@ func (d *Deps) login(ctx context.Context, in *struct {
 	d.Limiter.Configure(th, 5*time.Minute, lm)
 	d.AcctLimiter.Configure(th*2, 5*time.Minute, lm)
 
-	// The email+IP key still hard-locks (429); the account-wide key only
-	// slows — an attacker spraying one account must not be able to lock
-	// its real owner out. / 账号+IP 键仍硬锁；仅账号键只减速——分布式
-	// 攻击不能借此把真实属主锁在门外。
-	if !d.Limiter.Allow(key) {
-		return nil, huma.Error429TooManyRequests("too many failed attempts, try later / 失败过多，稍后再试")
-	}
-	if delay := d.AcctLimiter.Penalty(acctKey); delay > 0 {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(delay):
+	// A device that has logged in as this account before skips the queue:
+	// an attacker spraying the account slows only themselves and fresh
+	// devices, never the owner's own machine. The cookie is account-bound
+	// HMAC — not a credential, it only skips the delay; the password is
+	// still verified. / 曾登录过本账号的设备跳过排队：泼水的攻击者只拖
+	// 住自己和新设备，拖不住属主本机。cookie 是按账号的 HMAC——不是凭证，
+	// 只豁免延迟，密码照常验证。
+	known := d.knownDevice(in.Cookie, email)
+	if !known {
+		// Atomic check+count: concurrent bursts can't slip past the
+		// threshold between check and record. / 原子检查+计数：并发突发
+		// 不会在"查"与"记"之间溜过阈值。
+		if !d.Limiter.Attempt(key) {
+			return nil, huma.Error429TooManyRequests("too many failed attempts, try later / 失败过多，稍后再试")
+		}
+		// Account-wide serialization: concurrent guesses queue up with a
+		// growing gap instead of verifying in parallel. / 账号级串行：
+		// 并发猜测按渐增间隔排队，不能并行验证。
+		wait, ok := d.AcctLimiter.Schedule(acctKey, 20*time.Second)
+		if !ok {
+			return nil, huma.Error429TooManyRequests("too many failed attempts, try later / 失败过多，稍后再试")
+		}
+		if wait > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(wait):
+			}
 		}
 	}
 
 	u, err := d.Store.UserByEmail(ctx, email)
 	if err != nil {
-		d.Limiter.Fail(key)
 		d.AcctLimiter.Fail(acctKey)
 		return nil, huma.Error401Unauthorized("invalid credentials")
 	}
@@ -144,21 +171,22 @@ func (d *Deps) login(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, err
 	}
-	ok, _ := auth.VerifyPassword(in.Body.Password, hash)
+	ok, err := d.verifyPassword(ctx, in.Body.Password, hash)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
-		d.Limiter.Fail(key)
 		d.AcctLimiter.Fail(acctKey)
 		d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.login.fail", u.Email, nil, ip)
 		return nil, huma.Error401Unauthorized("invalid credentials")
 	}
 	if totpEnabled {
 		if in.Body.TOTP == "" {
-			return &struct{ Body apitypes.LoginResponse }{
+			return &loginOut{
 				Body: apitypes.LoginResponse{RequiresTOTP: true},
 			}, nil
 		}
 		if !d.Store.TOTPVerify(ctx, u.ID, in.Body.TOTP, d.SecretKey) {
-			d.Limiter.Fail(key)
 			d.AcctLimiter.Fail(acctKey)
 			return nil, huma.Error401Unauthorized("invalid totp code")
 		}
@@ -168,17 +196,53 @@ func (d *Deps) login(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, err
 	}
+	// Reset only this ip+email pair — a success proves THIS source. The
+	// account key keeps its failure count: an owner's login must not
+	// hand a distributed sprayer a fresh counter every time.
+	// 只清这个 ip+账号键——成功只证明本来源可信。账号键的失败计数保留：
+	// 属主登录不能把分布式攻击攒的计数清零。
 	d.Limiter.Reset(key)
-	d.AcctLimiter.Reset(acctKey)
 	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.login", u.Email, nil, ip)
 
-	return &struct{ Body apitypes.LoginResponse }{
+	return &loginOut{
 		Body: apitypes.LoginResponse{
 			SessionToken: token,
 			User:         publicUser(u),
 			ExpiresAt:    sess.ExpiresAt,
 		},
+		SetCookie: d.kdCookie(email),
 	}, nil
+}
+
+// kdToken — account-bound HMAC marking a device that logged in before.
+// kdToken：按账号的 HMAC，标记曾经登录成功的设备。
+func (d *Deps) kdToken(email string) string {
+	mac := hmac.New(sha256.New, d.SecretKey)
+	_, _ = mac.Write([]byte("wc-kd|" + email))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// knownDevice reports whether the Cookie header carries this account's
+// kd marker (constant-time compare). / Cookie 头里是否带着本账号的
+// 已知设备标记（常数时间比较）。
+func (d *Deps) knownDevice(cookieHeader, email string) bool {
+	want := d.kdToken(email)
+	for _, part := range strings.Split(cookieHeader, ";") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(part), "wc_kd="); ok {
+			return subtle.ConstantTimeCompare([]byte(v), []byte(want)) == 1
+		}
+	}
+	return false
+}
+
+// kdCookie renders the Set-Cookie value (HttpOnly, not a credential).
+// 生成 Set-Cookie 值（HttpOnly，不是凭证）。
+func (d *Deps) kdCookie(email string) string {
+	c := "wc_kd=" + d.kdToken(email) + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"
+	if strings.HasPrefix(d.PublicURL, "https://") {
+		c += "; Secure"
+	}
+	return c
 }
 
 func (d *Deps) logout(ctx context.Context, in *struct {
@@ -236,7 +300,7 @@ func (d *Deps) activate(ctx context.Context, in *struct {
 	if min := int(d.Settings.Int(ctx, settings.KeySecurityMinPass, settings.DefMinPassword)); utf8.RuneCountInString(in.Body.Password) < min {
 		return nil, huma.Error400BadRequest(fmt.Sprintf("password too short: at least %d chars / 密码至少 %d 位", min, min))
 	}
-	phc, err := auth.HashPassword(in.Body.Password)
+	phc, err := d.hashPassword(ctx, in.Body.Password)
 	if err != nil {
 		return nil, err
 	}
@@ -378,7 +442,10 @@ func (d *Deps) totpDisable(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, err
 	}
-	ok, _ := auth.VerifyPassword(in.Body.Password, hash)
+	ok, err := d.verifyPassword(ctx, in.Body.Password, hash)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return nil, huma.Error403Forbidden("wrong password / 密码错误")
 	}

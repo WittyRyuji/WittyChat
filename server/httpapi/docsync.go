@@ -42,10 +42,28 @@ const (
 	syncStep2 = 1
 	syncUpd   = 2
 
-	// Frame cap must exceed a full doc state: docs default to a 100 MB log,
-	// so a whole-state SyncStep2 can approach that. 帧上限须大于整文档态：
-	// 文档日志默认 100 MB，全量同步帧会逼近这个量级。
-	docMaxMsg = 128 << 20 // 128 MiB
+	// docMsgCeiling is the absolute frame cap — the per-conn read limit
+	// (from docs.log_max_mb + headroom) never exceeds it, and frame
+	// parsing uses it as the sanity bound. / 帧绝对顶：每连接读上限
+	// （docs.log_max_mb+余量）不越过它，帧解析也以此为界。
+	docMsgCeiling = 1 << 30 // 1 GiB
+
+	// docReadFloor keeps the protocol alive even under a tiny
+	// docs.log_max_mb setting. / 文档上限设得很小时协议仍可用的下限。
+	docReadFloor = 4 << 20 // 4 MiB
+
+	// awMaxPayload bounds a single awareness payload — cursor/presence
+	// state is normally a few hundred bytes; anything larger is memory
+	// pressure, not presence. / 单条 awareness 载荷上限——光标/在场态
+	// 通常几百字节，更大的只是内存压力不是状态。
+	awMaxPayload = 32 << 10 // 32 KiB
+
+	// docFullClientID is the reserved awareness client the relay itself
+	// owns — it carries {"docFull":true} so stock y-websocket clients
+	// learn "log at cap" through standard protocol. Real Yjs clientIDs
+	// are random 53-bit ints. / 中继自用的保留 awareness 客户端 id——
+	// 携带 {"docFull":true}，原版客户端走标准协议即可获知"写满"。
+	docFullClientID = 0
 )
 
 // emptyYjsUpdate is a valid zero-content Yjs update (0 structs, 0
@@ -97,7 +115,7 @@ func getVarBytes(r *bytes.Reader) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if n > docMaxMsg || uint64(r.Len()) < n { //nolint:gosec // Len() is never negative
+	if n > docMsgCeiling || uint64(r.Len()) < n { //nolint:gosec // Len() is never negative
 		return nil, errors.New("varbytes out of range")
 	}
 	b := make([]byte, n)
@@ -130,6 +148,25 @@ func awarenessRemove(clientID, clock uint64) []byte {
 	putVarUint(&p, clock)
 	putVarBytes(&p, []byte("null"))
 	return awarenessFrame(p.Bytes())
+}
+
+// docFullAwareness builds the relay-owned state {"docFull":true} under
+// the reserved clientID — the standard-awareness way to tell every
+// editor the update log hit the workspace cap. / 构造中继自有的
+// {"docFull":true} 状态——用标准 awareness 告知各编辑器"日志写满"。
+func docFullAwareness(clock uint64) []byte {
+	var p bytes.Buffer
+	putVarUint(&p, 1)
+	putVarUint(&p, docFullClientID)
+	putVarUint(&p, clock)
+	putVarBytes(&p, []byte(`{"docFull":true}`))
+	return awarenessFrame(p.Bytes())
+}
+
+// docFullRemove removes the pseudo state once the log is under the cap
+// again. / 日志回到上限内后清除伪状态。
+func docFullRemove(clock uint64) []byte {
+	return awarenessRemove(docFullClientID, clock)
 }
 
 // awarenessClients extracts (clientID, clock) pairs — needed to emit

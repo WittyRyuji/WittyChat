@@ -8,6 +8,7 @@ package settings
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -43,6 +44,38 @@ const (
 	DefDocsLogMaxMB    = int64(100)
 	DefAuditRetention  = int64(180)
 )
+
+// IntBounds bounds numeric policy keys. Admin writes outside the range
+// are rejected — a 0 or negative value must not silently disable a
+// safeguard (e.g. retention=0 would purge ALL version history at the
+// next GC pass). Unlisted keys are unrestricted (strings, bools,
+// free-form values like logo ids). / 数值策略键取值范围。超范围的后台
+// 写入被拒绝——0 或负值不能悄悄关掉防护（retention=0 会在下一次 GC
+// 清空全部历史版本）。未列出的键不受约束（字符串、布尔、logo id 等）。
+var IntBounds = map[string][2]int64{
+	KeyIMMessageMaxChars: {1, MaxMessageCharsCap},
+	KeyIMRecallTimeout:   {10, 3600},
+	KeySecurityMinPass:   {4, 256},
+	KeySecurityLockN:     {1, 100},
+	KeySecurityLockMin:   {1, 1440},
+	KeyDocsLogMaxMB:      {1, 8192},
+	KeyAuditRetention:    {1, 36500},
+	KeyStorageQuota:      {0, 1 << 50},
+	KeyStorageUploadMax:  {1, 2048},
+}
+
+// ValidateInt checks a numeric policy value against IntBounds.
+// 按 IntBounds 校验数值型策略值。
+func ValidateInt(key string, v int64) error {
+	b, ok := IntBounds[key]
+	if !ok {
+		return nil
+	}
+	if v < b[0] || v > b[1] {
+		return fmt.Errorf("setting %s out of range [%d, %d] / 设置 %s 超出范围 [%d, %d]", key, b[0], b[1], key, b[0], b[1])
+	}
+	return nil
+}
 
 type Store struct {
 	pool *pgxpool.Pool

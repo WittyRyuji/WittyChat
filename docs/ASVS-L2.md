@@ -5,11 +5,11 @@ P0 范围内的自查记录；每项标注实现位置。
 ## V2 认证 (Authentication)
 
 - [x] Argon2id 密码散列（PHC 格式，内存/迭代参数内嵌）— `core/auth/password.go`
-- [x] 登录限速 + 账户锁定 — `core/auth/limiter.go`
+- [x] 登录限速：同IP+账号硬锁、按账号渐进延迟、原子预留防并发竞态、Argon2并发上限 — `core/auth/limiter.go`
 - [x] TOTP（RFC 6238），secret 用 AES-256-GCM 加密入库 — `core/auth/totp.go`
 - [x] 激活链接一次性、72h 过期、哈希存储 — `core/auth/store.go`
 - [x] 会话 30 天闲置过期、改密全踢（cred_version）— `core/auth/sessions.go`
-- [x] 密码最低 8 位 + 复杂度校验 — `core/auth`
+- [x] 密码最低 15 字符（可后台配置） — `core/auth`
 
 ## V3 会话管理 (Session)
 

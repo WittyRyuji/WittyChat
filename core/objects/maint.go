@@ -70,10 +70,10 @@ func (s *Store) ScanObject(ctx context.Context, id uuid.UUID, sc Scanner) (strin
 	}
 	if det != "" {
 		_, _ = s.pool.Exec(ctx, `UPDATE objects SET status='deleted' WHERE id=$1`, id)
-		if o.Location == "local" {
-			_ = os.Remove(s.path(o.ID, o.SHA256))
-			_ = os.Remove(s.legacyPath(o.SHA256))
-		}
+		// Reference-aware cleanup: quarantining an infected object must
+		// not unlink a file another clean object shares. / 引用感知清理：
+		// 隔离感染对象不能连累共享同文件的干净对象。
+		s.RemoveFiles(ctx, o)
 		log.Printf("objects: QUARANTINE %s (%s) — %s", id, o.Name, det)
 	}
 	return det, nil
@@ -135,7 +135,7 @@ func (s *Store) EnqueueVerifyAll(ctx context.Context) (int, error) {
 func (s *Store) OrphanGC(ctx context.Context) (int, error) {
 	cutoff := time.Now().Add(-7 * 24 * time.Hour)
 	rows, err := s.pool.Query(ctx,
-		`SELECT o.id, o.location FROM objects o
+		`SELECT o.id, o.sha256, o.location FROM objects o
 		 WHERE o.status<>'deleted' AND o.created_at < $1
 		   AND (o.status='pending'
 		        OR (COALESCE(o.purpose,'') IN ('attachment','chat','mail','hr')
@@ -156,29 +156,18 @@ func (s *Store) OrphanGC(ctx context.Context) (int, error) {
 	for rows.Next() {
 		var id uuid.UUID
 		var loc string
-		if err := rows.Scan(&id, &loc); err != nil {
+		var sha []byte
+		if err := rows.Scan(&id, &sha, &loc); err != nil {
 			return n, err
 		}
 		if _, err := s.pool.Exec(ctx,
 			`UPDATE objects SET status='deleted' WHERE id=$1`, id); err == nil {
-			// Delete bytes by recorded key only when nothing else still
-			// points at them — a same-content object's file is shared.
-			// 仅在无其它引用时按记录的 key 删字节——同内容对象共享文件。
-			var keys []string
-			kr, kerr := s.pool.Query(ctx,
-				`SELECT storage_key FROM object_segments WHERE object_id=$1`, id)
-			if kerr == nil {
-				for kr.Next() {
-					var k string
-					if kr.Scan(&k) == nil {
-						keys = append(keys, k)
-					}
-				}
-				kr.Close()
-			}
-			for _, k := range keys {
-				_ = s.dropKeyIfOrphaned(ctx, k, loc)
-			}
+			// Reference-aware cleanup — the file may be shared with a
+			// same-content live object. / 引用感知清理——文件可能与同内容
+			// 在用对象共享。
+			o := &Object{ID: id, Location: loc}
+			copy(o.SHA256[:], sha)
+			s.RemoveFiles(ctx, o)
 			n++
 		}
 	}
@@ -223,13 +212,6 @@ func (s *Store) MigrateCold(ctx context.Context, older time.Duration, limit int)
 			continue
 		}
 		key := s.s3.key(c.sha)
-		_, err = s.s3.client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String(s.s3.cfg.Bucket), Key: aws.String(key), Body: f,
-		})
-		_ = f.Close()
-		if err != nil {
-			return n, fmt.Errorf("s3 put %s: %w", c.id, err)
-		}
 		var localKeys []string
 		lr, lerr := s.pool.Query(ctx,
 			`SELECT storage_key FROM object_segments WHERE object_id=$1`, c.id)
@@ -242,15 +224,26 @@ func (s *Store) MigrateCold(ctx context.Context, older time.Duration, limit int)
 			}
 			lr.Close()
 		}
-		// Update row + segment atomically, then remove the local file
-		// only when no other object/version still points at it.
-		// 原子换位置后按引用计数删本地文件——同内容对象可能还在用。
+		// Upload + re-point inside the advisory-locked section: a GC must
+		// not be able to delete the fresh S3 object between PutObject and
+		// the segment update that references it. Rollback on upload error
+		// keeps everything local. / 上传与改引用同处锁段：GC 不能在
+		// PutObject 与建引用之间删掉刚上传的 S3 对象；上传失败回滚则维持本地。
 		err = func() error {
 			tx, err := s.pool.Begin(ctx)
 			if err != nil {
 				return err
 			}
 			defer func() { _ = tx.Rollback(ctx) }()
+			if _, err := tx.Exec(ctx,
+				`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, key); err != nil {
+				return err
+			}
+			if _, err := s.s3.client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(s.s3.cfg.Bucket), Key: aws.String(key), Body: f,
+			}); err != nil {
+				return fmt.Errorf("s3 put %s: %w", c.id, err)
+			}
 			if _, err := tx.Exec(ctx,
 				`UPDATE objects SET location='s3' WHERE id=$1`, c.id); err != nil {
 				return err
@@ -261,9 +254,12 @@ func (s *Store) MigrateCold(ctx context.Context, older time.Duration, limit int)
 			}
 			return tx.Commit(ctx)
 		}()
+		_ = f.Close()
 		if err != nil {
 			return n, err
 		}
+		// Local file leaves only when no other object/version still points
+		// at its key. / 本地文件仅当无其它对象/版本引用其 key 时才删。
 		for _, lk := range localKeys {
 			_ = s.dropKeyIfOrphaned(ctx, lk, "local")
 		}
@@ -278,9 +274,9 @@ func (s *Store) MigrateCold(ctx context.Context, older time.Duration, limit int)
 // objects — delete a file only when this returns false, never by sha alone.
 // 判断存储 key（本地相对路径或 S3 key）是否仍被未删除对象的分段或保留版本
 // 引用。内容寻址文件在对象间共享——仅当返回 false 才可删除，绝不按 sha 直删。
-func (s *Store) keyReferenced(ctx context.Context, key string) (bool, error) {
+func (s *Store) keyReferenced(ctx context.Context, q Querier, key string) (bool, error) {
 	var ok bool
-	err := s.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		SELECT EXISTS(
 			SELECT 1 FROM object_segments g
 			JOIN objects o ON o.id = g.object_id AND o.status <> 'deleted'
@@ -315,10 +311,32 @@ func segmentKeys(storageKey string, segments []byte) []string {
 }
 
 // dropKeyIfOrphaned removes the stored bytes for `key` once nothing
-// references it — local file under dataDir or S3 object.
+// references it — local file under dataDir or S3 object. The reference
+// check and the delete run while holding a session-scoped advisory lock
+// on the key, and writers that create a reference take the matching
+// transaction-scoped lock — so the check can't go stale mid-delete.
 // 无任何引用后移除 key 对应字节：本地文件（dataDir 下）或 S3 对象。
+// 查引用与删文件在 key 的会话级 advisory lock 内进行，建引用的写入方
+// 持同一 key 的事务级锁——检查不会在删除中途过期。
 func (s *Store) dropKeyIfOrphaned(ctx context.Context, key, loc string) error {
-	refs, err := s.keyReferenced(ctx, key)
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx,
+		`SELECT pg_advisory_lock(hashtextextended($1, 0))`, key); err != nil {
+		return err
+	}
+	defer func() {
+		// Fresh context: the caller's may already be canceled — the lock
+		// is session-scoped and must be released explicitly.
+		// 用新 ctx：调用方的可能已取消——会话级锁必须显式释放。
+		ctx2, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(ctx2, `SELECT pg_advisory_unlock(hashtextextended($1, 0))`, key)
+	}()
+	refs, err := s.keyReferenced(ctx, conn, key)
 	if err != nil || refs {
 		return err
 	}

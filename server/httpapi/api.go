@@ -58,6 +58,11 @@ type Deps struct {
 	// 数值设置约 10 秒缓存——热路径（按键级日志上限）不能每帧打库。
 	setMu      sync.Mutex
 	settingVal map[string]cachedSetting
+
+	// verifySem bounds concurrent argon2 runs — each verification holds
+	// ~64 MiB, so unbounded concurrency is a memory-exhaustion vector.
+	// 限制并发 argon2 验证——每次占约 64 MiB，并发不限就是耗内存缺口。
+	verifySem chan struct{}
 }
 
 type cachedSetting struct {
@@ -81,8 +86,41 @@ func (d *Deps) settingInt(ctx context.Context, key string, def int64) int64 {
 	return v
 }
 
+// acquireVerify takes one slot of the argon2 semaphore (ctx-aware).
+// 取 argon2 信号量一个名额（随请求 ctx 取消）。
+func (d *Deps) acquireVerify(ctx context.Context) error {
+	select {
+	case d.verifySem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// verifyPassword/hashPassword run argon2 (~64 MiB each) under the
+// bounded semaphore so login spray can't exhaust memory.
+// 在受限信号量下跑 argon2（单次约 64 MiB），登录刷量耗不爆内存。
+func (d *Deps) verifyPassword(ctx context.Context, pw, phc string) (bool, error) {
+	if err := d.acquireVerify(ctx); err != nil {
+		return false, err
+	}
+	defer func() { <-d.verifySem }()
+	return auth.VerifyPassword(pw, phc)
+}
+
+func (d *Deps) hashPassword(ctx context.Context, pw string) (string, error) {
+	if err := d.acquireVerify(ctx); err != nil {
+		return "", err
+	}
+	defer func() { <-d.verifySem }()
+	return auth.HashPassword(pw)
+}
+
 // New builds the root handler: API routes + HTML pages + healthz.
 func New(d *Deps) http.Handler {
+	if d.verifySem == nil {
+		d.verifySem = make(chan struct{}, 4)
+	}
 	mux := http.NewServeMux()
 	api := humago.New(mux, huma.DefaultConfig("WittyChat API", "0.1.0"))
 

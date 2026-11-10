@@ -2093,6 +2093,13 @@ button.avatar .avatar-img {
 .doc-conn.on {
   color: #00b96b;
 }
+.doc-full-banner {
+  padding: 8px 14px;
+  background: #fff7e6;
+  border-bottom: 1px solid #ffe7ba;
+  color: #ad6800;
+  font-size: 12px;
+}
 .doc-peers {
   display: flex;
   flex-shrink: 0;

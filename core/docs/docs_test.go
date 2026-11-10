@@ -113,7 +113,7 @@ func TestCompactThresholdAndArchive(t *testing.T) {
 	if err != nil || len(ups) != 10 || maxSeq == 0 {
 		t.Fatalf("log after appends: n=%d max=%d err=%v", len(ups), maxSeq, err)
 	}
-	done, err := s.CompactIfLarge(ctx, d.ID, []byte("early-snap"), maxSeq)
+	done, err := s.CompactIfLarge(ctx, d.ID, []byte("early-snap"), maxSeq, 0, false)
 	if err != nil || done {
 		t.Fatalf("compact below threshold: done=%v err=%v", done, err)
 	}
@@ -129,7 +129,7 @@ func TestCompactThresholdAndArchive(t *testing.T) {
 		}
 	}
 	_, maxSeq, _ = s.LoadUpdates(ctx, d.ID, 0)
-	done, err = s.CompactIfLarge(ctx, d.ID, []byte("SNAP"), maxSeq)
+	done, err = s.CompactIfLarge(ctx, d.ID, []byte("SNAP"), maxSeq, 0, false)
 	if err != nil || !done {
 		t.Fatalf("compact: done=%v err=%v", done, err)
 	}
@@ -162,6 +162,38 @@ func TestUpdateLogCap(t *testing.T) {
 	}
 	if err := s.AppendUpdate(ctx, d.ID, []byte("x"), 8); !errors.Is(err, ErrLogFull) {
 		t.Fatalf("over-cap append: want ErrLogFull, got %v", err)
+	}
+}
+
+// A short-but-over-cap log must compact despite the row threshold —
+// otherwise a doc at docs.log_max_mb can never recover.
+// 行少但字节超上限的日志必须可压实——否则到顶的文档永远无法恢复。
+func TestCompactOverCapFewRows(t *testing.T) {
+	s, _, ctx, mk := testEnv(t)
+	owner := mk()
+	d, err := s.Create(ctx, owner, "fat-doc", "doc", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	big := make([]byte, 512)
+	if err := s.AppendUpdate(ctx, d.ID, big, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendUpdate(ctx, d.ID, big, 0); err != nil {
+		t.Fatal(err)
+	}
+	_, maxSeq, err := s.LoadUpdates(ctx, d.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 2 rows < compactMinRows but log_bytes (1024) >= minBytes (512).
+	done, err := s.CompactIfLarge(ctx, d.ID, []byte("SNAP"), maxSeq, 512, false)
+	if err != nil || !done {
+		t.Fatalf("compact over-cap short log: done=%v err=%v", done, err)
+	}
+	ups, _, _ := s.LoadUpdates(ctx, d.ID, 0)
+	if len(ups) != 1 || string(ups[0]) != "SNAP" {
+		t.Fatalf("post-compact log: n=%d", len(ups))
 	}
 }
 

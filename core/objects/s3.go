@@ -192,34 +192,49 @@ func (s *Store) CompleteMultipart(ctx context.Context, objID, userID uuid.UUID,
 	}
 	copy(obj.SHA256[:], sha)
 	key := s.s3.key(obj.SHA256)
-	if _, err := s.s3.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
-		Bucket:          aws.String(s.s3.cfg.Bucket),
-		Key:             aws.String(key),
-		UploadId:        aws.String(s3UpID),
-		MultipartUpload: &s3types.CompletedMultipartUpload{Parts: etags},
-	}); err != nil {
-		return nil, fmt.Errorf("s3 complete: %w", err)
-	}
-	// Verify the assembled object's size matches declaration.
-	head, err := s.s3.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(s.s3.cfg.Bucket), Key: aws.String(key),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("s3 head: %w", err)
-	}
-	if aws.ToInt64(head.ContentLength) != obj.Size {
-		return nil, fmt.Errorf("size mismatch: declared %d got %d", obj.Size, aws.ToInt64(head.ContentLength))
-	}
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		// Hold the key's advisory lock across assemble + reference insert
+		// so a GC can't delete the fresh object before the segment row
+		// exists. / 持 key 的 advisory lock 覆盖组装与建引用——GC 不能
+		// 在分段行建立前删掉新对象。
 		if _, err := tx.Exec(ctx,
-			`UPDATE objects SET status='ready' WHERE id=$1`, objID); err != nil {
+			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, key); err != nil {
 			return err
+		}
+		if _, err := s.s3.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+			Bucket:          aws.String(s.s3.cfg.Bucket),
+			Key:             aws.String(key),
+			UploadId:        aws.String(s3UpID),
+			MultipartUpload: &s3types.CompletedMultipartUpload{Parts: etags},
+		}); err != nil {
+			return fmt.Errorf("s3 complete: %w", err)
+		}
+		// Verify the assembled object's size matches declaration.
+		head, err := s.s3.client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(s.s3.cfg.Bucket), Key: aws.String(key),
+		})
+		if err != nil {
+			return fmt.Errorf("s3 head: %w", err)
+		}
+		if aws.ToInt64(head.ContentLength) != obj.Size {
+			return fmt.Errorf("size mismatch: declared %d got %d", obj.Size, aws.ToInt64(head.ContentLength))
+		}
+		// status='pending' guard: a purge/GC may have soft-deleted the row
+		// mid-upload — completing must not resurrect it.
+		// 只从 pending 转 ready：上传途中被清理的对象不能复活。
+		tag, err := tx.Exec(ctx,
+			`UPDATE objects SET status='ready' WHERE id=$1 AND status='pending'`, objID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE upload_sessions SET state='done' WHERE object_id=$1`, objID); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx,
+		_, err = tx.Exec(ctx,
 			`INSERT INTO object_segments (object_id, seg_index, size_bytes, storage_key)
 			 VALUES ($1,0,$2,$3)`, objID, obj.Size, key)
 		return err

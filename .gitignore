@@ -39,3 +39,4 @@ server/adminui/dist
 server*.exe
 server*.exe*
 *.syso
+logs_*.txt

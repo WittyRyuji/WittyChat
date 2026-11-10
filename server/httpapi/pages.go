@@ -141,7 +141,7 @@ func registerPages(mux *http.ServeMux, d *Deps) {
 			_ = tpl.Execute(w, data)
 			return
 		}
-		phc, err := auth.HashPassword(pw)
+		phc, err := d.hashPassword(r.Context(), pw)
 		if err != nil {
 			http.Error(w, "internal", http.StatusInternalServerError)
 			return
@@ -319,7 +319,7 @@ func registerSetup(mux *http.ServeMux, d *Deps) {
 			renderSetup(w, data)
 			return
 		}
-		phc, err := auth.HashPassword(pw)
+		phc, err := d.hashPassword(r.Context(), pw)
 		if err != nil || d.Store.SetPassword(r.Context(), u.ID, phc) != nil ||
 			d.Store.ActivateUser(r.Context(), u.ID) != nil {
 			http.Error(w, "internal", http.StatusInternalServerError)

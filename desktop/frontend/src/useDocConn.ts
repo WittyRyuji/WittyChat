@@ -18,6 +18,7 @@ export function useDocConn(docId: string) {
   const [peers, setPeers] = useState<PeerUser[]>([]);
   const [connected, setConnected] = useState(false);
   const [synced, setSynced] = useState(false);
+  const [docFull, setDocFull] = useState(false);
 
   const [{ ydoc, provider }] = useState(() => {
     const y = new Y.Doc();
@@ -54,13 +55,17 @@ export function useDocConn(docId: string) {
   useEffect(() => {
     const aw = provider.awareness;
     const onChange = () => {
-      const states = [...aw.getStates().values()] as { user?: PeerUser }[];
+      const states = [...aw.getStates().values()] as { user?: PeerUser; docFull?: boolean }[];
       setPeers(states.map((s) => s.user ?? {}).filter((u) => u.name));
+      // The relay marks "log at cap" as a pseudo awareness state —
+      // persisted edits are being rejected until the owner compacts.
+      // 中继以伪 awareness 状态标记"日志写满"——属主压实前编辑不落库。
+      setDocFull(states.some((s) => s.docFull === true));
     };
     aw.on("change", onChange);
     onChange();
     return () => aw.off("change", onChange);
   }, [provider]);
 
-  return { ydoc, provider, peers, connected, synced };
+  return { ydoc, provider, peers, connected, synced, docFull };
 }

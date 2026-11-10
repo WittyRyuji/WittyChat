@@ -39,6 +39,16 @@ type conn struct {
 	sessID uuid.UUID
 	ws     *websocket.Conn
 	send   chan Frame
+	cancel context.CancelFunc // unblocks the read loop on kick / 踢出时解除读循环阻塞
+}
+
+// kill tears the conn down without the close handshake: Close() waits up
+// to ~5s for the peer's close reply, which would stall the whole hub if
+// called under its lock. / 不走关闭握手直接拆连接：Close() 为等对端回应
+// 最长阻塞约 5 秒，持锁调用会卡住整个推送中枢。
+func (c *conn) kill() {
+	c.cancel()
+	_ = c.ws.CloseNow()
 }
 
 // Hub tracks online connections per user (multi-device) and fans out frames.
@@ -142,12 +152,20 @@ func (h *Hub) broadcastPresence(userID uuid.UUID, name string, online bool) {
 }
 
 // KickUser drops every live conn of a user — password change, account
-// deactivation, offboarding. 断开某用户的全部连接——改密、停用、离职。
+// deactivation, offboarding. Conns are collected under the lock but
+// closed after it is released: a dead peer's close handshake would
+// otherwise stall every broadcast for seconds.
+// 断开某用户的全部连接——改密、停用、离职。锁内只取连接快照，锁外关闭：
+// 僵死对端的关闭握手会把每次广播拖住数秒。
 func (h *Hub) KickUser(userID uuid.UUID) {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
+	var cs []*conn
 	for c := range h.conns[userID] {
-		_ = c.ws.Close(websocket.StatusPolicyViolation, "session revoked / 会话已吊销")
+		cs = append(cs, c)
+	}
+	h.mu.RUnlock()
+	for _, c := range cs {
+		c.kill()
 	}
 }
 
@@ -156,11 +174,15 @@ func (h *Hub) KickUser(userID uuid.UUID) {
 // 仅断开绑定某会话的连接——单设备登出不能把用户其它设备踢下线。
 func (h *Hub) KickSession(userID, sessID uuid.UUID) {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
+	var cs []*conn
 	for c := range h.conns[userID] {
 		if c.sessID == sessID {
-			_ = c.ws.Close(websocket.StatusPolicyViolation, "session revoked / 会话已吊销")
+			cs = append(cs, c)
 		}
+	}
+	h.mu.RUnlock()
+	for _, c := range cs {
+		c.kill()
 	}
 }
 
@@ -171,7 +193,8 @@ func (h *Hub) KickSession(userID, sessID uuid.UUID) {
 // revalidate 每约 20 秒复核一次；返回 false 即断开——已删会话或停用
 // 用户不能继续收推送。
 func (h *Hub) Serve(ctx context.Context, w *websocket.Conn, userID uuid.UUID, displayName string, sessID uuid.UUID, revalidate func(context.Context) bool) {
-	c := &conn{userID: userID, sessID: sessID, ws: w, send: make(chan Frame, 64)}
+	ctx, cancel := context.WithCancel(ctx)
+	c := &conn{userID: userID, sessID: sessID, ws: w, send: make(chan Frame, 64), cancel: cancel}
 
 	h.mu.Lock()
 	if h.conns[userID] == nil {
@@ -216,7 +239,7 @@ func (h *Hub) Serve(ctx context.Context, w *websocket.Conn, userID uuid.UUID, di
 					ok := revalidate(rctx)
 					cancel()
 					if !ok {
-						_ = w.Close(websocket.StatusPolicyViolation, "session revoked / 会话已吊销")
+						c.kill()
 						return
 					}
 				}

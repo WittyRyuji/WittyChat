@@ -240,3 +240,181 @@ func TestOrphanGCSharedFileKept(t *testing.T) {
 		t.Fatalf("o2 content %q want %q", got, same)
 	}
 }
+
+// Concurrent duplicate uploads (retry, double-click, two tabs) raced the
+// dedup check, died on the unique index, then deleted the shared file the
+// winner had just published — leaving the surviving row unreadable.
+// The advisory-locked Put must dedup or share cleanly every time.
+func TestPutConcurrentDuplicate(t *testing.T) {
+	s, ctx, mk := testEnv(t)
+	owner := mk()
+	content := "race-me-" + uuid.NewString()
+	for trial := 0; trial < 8; trial++ {
+		payload := content + fmt.Sprint(trial)
+		type res struct {
+			o   *Object
+			err error
+		}
+		ch := make(chan res, 2)
+		start := make(chan struct{})
+		put := func() {
+			<-start
+			o, _, err := s.Put(ctx, owner, uuid.Nil, "attach", "r.bin", "",
+				bytes.NewReader([]byte(payload)), 1<<20)
+			ch <- res{o, err}
+		}
+		go put()
+		go put()
+		close(start)
+		r1, r2 := <-ch, <-ch
+		if r1.err != nil || r2.err != nil {
+			t.Fatalf("trial %d: errs %v / %v", trial, r1.err, r2.err)
+		}
+		// Every returned object must be readable — the loser must not
+		// have unlinked the winner's shared file. / 两个返回对象都必须
+		// 可读——败者不得删掉胜者的共享文件。
+		for _, r := range []res{r1, r2} {
+			rc, err := s.Open(ctx, r.o)
+			if err != nil {
+				t.Fatalf("trial %d: open %s: %v", trial, r.o.ID, err)
+			}
+			got, _ := io.ReadAll(rc)
+			_ = rc.Close()
+			if string(got) != payload {
+				t.Fatalf("trial %d: content %q want %q", trial, got, payload)
+			}
+		}
+	}
+}
+
+// Two owners uploading identical bytes share the same-day file; both
+// rows must stay readable regardless of upload order.
+func TestPutSharedAcrossOwners(t *testing.T) {
+	s, ctx, mk := testEnv(t)
+	alice, bob := mk(), mk()
+	same := "shared-" + uuid.NewString()
+	oa, _, err := s.Put(ctx, alice, uuid.Nil, "attach", "a.bin", "", bytes.NewReader([]byte(same)), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ob, _, err := s.Put(ctx, bob, uuid.Nil, "attach", "b.bin", "", bytes.NewReader([]byte(same)), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range []*Object{oa, ob} {
+		rc, err := s.Open(ctx, o)
+		if err != nil {
+			t.Fatalf("open %s: %v", o.ID, err)
+		}
+		got, _ := io.ReadAll(rc)
+		_ = rc.Close()
+		if string(got) != same {
+			t.Fatalf("content %q want %q", got, same)
+		}
+	}
+}
+
+// ReplaceBytes onto content another object of the same owner already
+// holds hits the scoped unique index and rolls back — the failure path
+// must not delete the other object's shared file.
+func TestReplaceCollisionKeepsShared(t *testing.T) {
+	s, ctx, mk := testEnv(t)
+	owner := mk()
+	bContent := "B-content-" + uuid.NewString()
+	ox, _, err := s.Put(ctx, owner, uuid.Nil, "attach", "x.bin", "",
+		bytes.NewReader([]byte("A-content-"+uuid.NewString())), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oy, _, err := s.Put(ctx, owner, uuid.Nil, "attach", "y.bin", "",
+		bytes.NewReader([]byte(bContent)), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReplaceBytes(ctx, ox.ID, bytes.NewReader([]byte(bContent)),
+		"", 1<<20, &owner); err == nil {
+		t.Fatal("replace to an existing sha should fail on the unique index")
+	}
+	// Y's bytes must survive X's failed edit.
+	rc, err := s.Open(ctx, oy)
+	if err != nil {
+		t.Fatalf("y unreadable after x's failed replace: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if string(got) != bContent {
+		t.Fatalf("y content %q want %q", got, bContent)
+	}
+}
+
+// Admin purge of one owner's objects must not delete the file a
+// different owner's same-content object still uses.
+func TestAdminPurgeSharedFileKept(t *testing.T) {
+	s, ctx, mk := testEnv(t)
+	alice, bob := mk(), mk()
+	same := "purge-shared-" + uuid.NewString()
+	oa, _, err := s.Put(ctx, alice, uuid.Nil, "attach", "a.bin", "", bytes.NewReader([]byte(same)), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ob, _, err := s.Put(ctx, bob, uuid.Nil, "attach", "b.bin", "", bytes.NewReader([]byte(same)), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := s.AdminPurge(ctx, alice, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for i := range deleted {
+		if deleted[i].ID == oa.ID {
+			found = true
+		}
+		s.RemoveFiles(ctx, &deleted[i])
+	}
+	if !found {
+		t.Fatalf("purge did not return alice's object (deleted=%d)", len(deleted))
+	}
+	rc, err := s.Open(ctx, ob)
+	if err != nil {
+		t.Fatalf("bob's shared object unreadable after purge: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if string(got) != same {
+		t.Fatalf("bob content %q want %q", got, same)
+	}
+}
+
+// AV quarantine of an infected object must not unlink a file a clean
+// same-content object still references.
+type detectScanner struct{ hit string }
+
+func (d detectScanner) Scan(context.Context, string) (string, error) { return d.hit, nil }
+
+func TestScanSharedFileKept(t *testing.T) {
+	s, ctx, mk := testEnv(t)
+	alice, bob := mk(), mk()
+	same := "infected-" + uuid.NewString()
+	oa, _, err := s.Put(ctx, alice, uuid.Nil, "attach", "a.bin", "", bytes.NewReader([]byte(same)), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ob, _, err := s.Put(ctx, bob, uuid.Nil, "attach", "b.bin", "", bytes.NewReader([]byte(same)), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	det, err := s.ScanObject(ctx, oa.ID, detectScanner{hit: "EICAR-Test"})
+	if err != nil || det == "" {
+		t.Fatalf("scan: det=%q err=%v", det, err)
+	}
+	rc, err := s.Open(ctx, ob)
+	if err != nil {
+		t.Fatalf("bob's clean object unreadable after quarantine: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if string(got) != same {
+		t.Fatalf("bob content %q want %q", got, same)
+	}
+}

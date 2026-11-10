@@ -199,7 +199,7 @@ function DocEditorPane({
   onDeleted: () => void;
 }) {
   const [title, setTitle] = useState(doc.title);
-  const { ydoc, provider, peers, connected, synced } = useDocConn(doc.id);
+  const { ydoc, provider, peers, connected, synced, docFull } = useDocConn(doc.id);
   const user = useMemo(
     () => ({ name: me.display_name || me.email || me.id, color: cursorColor(me.id) }),
     [me]
@@ -257,6 +257,11 @@ function DocEditorPane({
           删除
         </button>
       </header>
+      {docFull && (
+        <div className="doc-full-banner">
+          文档存储已达上限，新的编辑不会被保存。请文档属主上线一次以自动压缩历史，或联系管理员调整上限。
+        </div>
+      )}
       {doc.kind === "sheet" ? (
         <SheetEditor ydoc={ydoc} provider={provider} me={me} />
       ) : doc.kind === "slide" ? (

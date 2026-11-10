@@ -299,26 +299,36 @@ func (s *Store) LoadUpdates(ctx context.Context, docID uuid.UUID, after int64) (
 }
 
 // CompactIfLarge replaces every update with seq <= upTo by one snapshot —
-// but only when the log is at least compactMinRows long, and the replaced
-// rows are archived (not deleted) for the audit retention window. The
-// caller restricts this to the doc owner's connection: a member must not
-// be able to swap the whole history (see the a460bd3 review).
-// 压缩：用一个快照替换 seq<=upTo 的全部 update——但仅当日志行数达到阈值，
-// 且被替换的行归档保留（不删除）至审计期。调用方限定只有属主连接可触发：
-// 普通成员不得整体改写历史（见 a460bd3 审查）。
-func (s *Store) CompactIfLarge(ctx context.Context, docID uuid.UUID, snapshot []byte, upTo int64) (bool, error) {
+// only when the log is at least compactMinRows long OR already at the
+// byte cap (a short-but-fat log must still compact, otherwise a doc over
+// docs.log_max_mb can never recover). Replaced rows are archived (not
+// deleted) for the audit retention window. The caller restricts this to
+// the doc owner's connection: a member must not be able to swap the
+// whole history (see the a460bd3 review).
+// 压缩：用一个快照替换 seq<=upTo 的全部 update——行数达阈值或日志已到
+// 字节上限时执行（行少但字节肥的日志也必须能压，否则超过
+// docs.log_max_mb 的文档永远无法恢复）。被替换的行归档保留至审计期。
+// 调用方限定只有属主连接可触发：普通成员不得整体改写历史（见 a460bd3 审查）。
+func (s *Store) CompactIfLarge(ctx context.Context, docID uuid.UUID, snapshot []byte, upTo, minBytes int64, force bool) (bool, error) {
 	if len(snapshot) == 0 || upTo <= 0 {
 		return false, nil
 	}
 	var done bool
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		var n int
+		var logBytes int64
 		if err := tx.QueryRow(ctx,
-			`SELECT count(*) FROM doc_updates WHERE doc_id=$1 AND seq <= $2`,
-			docID, upTo).Scan(&n); err != nil {
+			`SELECT (SELECT count(*) FROM doc_updates WHERE doc_id=$1 AND seq <= $2),
+			        COALESCE((SELECT log_bytes FROM docs WHERE id=$1), 0)`,
+			docID, upTo).Scan(&n, &logBytes); err != nil {
 			return err
 		}
-		if n < compactMinRows {
+		// force = the room saw ErrLogFull: log_bytes never actually reaches
+		// the cap (the tipping append rolls back), so a byte comparison
+		// alone would leave a "full" doc stuck forever. / force=房间见过
+		// ErrLogFull：log_bytes 永远到不了上限（越限的追加会回滚），只按
+		// 字节比较会让"写满"的文档永远卡死。
+		if !force && n < compactMinRows && (minBytes <= 0 || logBytes < minBytes) {
 			return nil
 		}
 		if _, err := tx.Exec(ctx,

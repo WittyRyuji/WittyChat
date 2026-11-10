@@ -30,6 +30,7 @@ type failRec struct {
 	count       int
 	first       time.Time
 	lockedUntil time.Time
+	nextSlot    time.Time // serialized attempt schedule (Schedule) / 串行化的尝试时点
 }
 
 // NewLimiter locks a key after maxFail failures inside the window.
@@ -71,47 +72,78 @@ func (l *Limiter) sweepLocked(now time.Time) {
 	}
 }
 
-// Allow reports whether an attempt may proceed.
-func (l *Limiter) Allow(key string) bool {
+// Attempt atomically checks the key AND counts the attempt under one
+// lock — the old check-then-count let concurrent requests all pass the
+// check before any failure was recorded, so a burst could verify far
+// more guesses than the threshold. false → key is locked (429).
+// Attempt 在同一把锁内完成"检查+计数"——原先先查后记，并发请求在计数
+// 落盘前全部放行，一波就能验证远超阈值的次数。false → 键已锁（429）。
+func (l *Limiter) Attempt(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
 	l.sweepLocked(now)
 	r, ok := l.fails[key]
-	if !ok {
-		return true
+	fresh := !ok || now.Sub(r.first) > l.window ||
+		(!r.lockedUntil.IsZero() && !now.Before(r.lockedUntil))
+	if fresh {
+		r = &failRec{first: now}
+		l.fails[key] = r
 	}
 	if now.Before(r.lockedUntil) {
 		return false
 	}
-	if now.Sub(r.first) > l.window {
-		delete(l.fails, key)
+	r.count++
+	if r.count > l.maxFail {
+		r.lockedUntil = now.Add(l.lock)
+		return false
 	}
 	return true
 }
 
-// Penalty returns a progressive delay for a key past its threshold —
-// a slowdown rather than a lockout, so spraying an account can't deny
-// service to its owner. 键超过阈值后的渐进延迟——减速而非硬锁定，
-// 泼水的攻击者无法借此拒绝真实用户登录。
-func (l *Limiter) Penalty(key string) time.Duration {
+// Schedule serializes attempts on a key with a gap that grows as
+// failures accumulate: each caller reserves the next slot atomically, so
+// N concurrent requests spread over N×gap instead of verifying in
+// parallel. Returns (wait, ok); ok=false means the queue is already past
+// maxWait — answer 429 instead of parking the request. A slowdown, not
+// a lockout: spraying an account can't deny its owner (who can also be
+// exempted upstream via a known-device cookie).
+// Schedule 按键串行化尝试，间隔随失败数增长：调用方原子地预订下一个
+// 时点，N 个并发请求被摊到 N×间隔上而非并行验证。返回（等待，可用）；
+// ok=false 表示队列已超出 maxWait——直接 429 而非挂起请求。这是减速
+// 不是锁定：泼水的攻击者不能把真实属主拒之门外（属主还可凭"已知设备"
+// cookie 在上游豁免）。
+func (l *Limiter) Schedule(key string, maxWait time.Duration) (time.Duration, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
 	l.sweepLocked(now)
 	r, ok := l.fails[key]
 	if !ok || now.Sub(r.first) > l.window {
-		return 0
+		r = &failRec{first: now}
+		l.fails[key] = r
 	}
-	over := r.count - l.maxFail + 1
-	if over <= 0 {
-		return 0
+	slot := now
+	if r.nextSlot.After(now) {
+		slot = r.nextSlot
 	}
-	d := time.Duration(over) * time.Second
-	if d > 15*time.Second {
-		d = 15 * time.Second
+	wait := slot.Sub(now)
+	if wait > maxWait {
+		return 0, false
 	}
-	return d
+	// Gap: a short floor serializes concurrent verifies; past the
+	// failure threshold each guess pays (count-maxFail) extra seconds.
+	// 间隔：短底限先把并发验证串起来；失败数越过后每次猜测多付
+	// (count-maxFail) 秒。
+	gap := 150 * time.Millisecond
+	if over := r.count - l.maxFail + 1; over > 0 {
+		gap = time.Duration(over) * time.Second
+		if gap > 15*time.Second {
+			gap = 15 * time.Second
+		}
+	}
+	r.nextSlot = slot.Add(gap)
+	return wait, true
 }
 
 // Fail records a failed attempt; returns whether the key is now locked.

@@ -33,6 +33,7 @@ import (
 	"time"
 	"wittychat/core/audit"
 	"wittychat/core/auth"
+	"wittychat/core/settings"
 
 	"github.com/google/uuid"
 )
@@ -435,8 +436,8 @@ func (d *Deps) officePull(ctx context.Context, objID uuid.UUID, docURL string, b
 	}
 	maxBytes := int64(32 << 20)
 	if d.Settings != nil {
-		if v := d.Settings.Int(ctx, "upload_max_mb", 0) << 20; int64(v) > maxBytes {
-			maxBytes = int64(v)
+		if v := d.Settings.Int(ctx, settings.KeyStorageUploadMax, 0) << 20; v > maxBytes {
+			maxBytes = v
 		}
 	}
 	mime := res.Header.Get("Content-Type")

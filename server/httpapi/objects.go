@@ -19,6 +19,7 @@ import (
 	"time"
 	"wittychat/core/audit"
 	"wittychat/core/objects"
+	"wittychat/core/settings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -88,8 +89,8 @@ func (d *Deps) uploadAttachment(w http.ResponseWriter, r *http.Request) {
 	var maxBytes int64 = objects.MaxDirectUpload
 	quotaBytes := int64(0)
 	if d.Settings != nil {
-		maxBytes = d.Settings.Int(r.Context(), "upload_max_mb", objects.MaxDirectUpload/(1<<20)) << 20
-		quotaBytes = d.Settings.Int(r.Context(), "storage_quota_mb", 0) << 20
+		maxBytes = d.Settings.Int(r.Context(), settings.KeyStorageUploadMax, settings.DefUploadMaxMB) << 20
+		quotaBytes = d.Settings.Int(r.Context(), settings.KeyStorageQuota, 0)
 	}
 	if quotaBytes > 0 {
 		used, err := d.Objects.UsedBytes(r.Context())
@@ -409,7 +410,10 @@ func (d *Deps) adminObjectsPurge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i := range deleted {
-		d.Objects.RemoveFiles(&deleted[i])
+		// Reference-aware cleanup — another live object may share the
+		// same storage key (identical content, same day). / 引用感知
+		// 清理——同内容的在用对象可能共享同一存储 key。
+		d.Objects.RemoveFiles(r.Context(), &deleted[i])
 	}
 	d.Audit.Log(r.Context(), &admin.ID, audit.ActorAdmin, "admin.objects.purge", req.Owner,
 		map[string]string{"day": req.Day, "count": fmt.Sprint(len(deleted))}, clientIPCtx(r.Context()))
@@ -449,8 +453,8 @@ func (d *Deps) uploadObject(w http.ResponseWriter, r *http.Request) {
 	var maxBytes int64 = objects.MaxDirectUpload
 	quotaBytes := int64(0)
 	if d.Settings != nil {
-		maxBytes = d.Settings.Int(r.Context(), "upload_max_mb", objects.MaxDirectUpload/(1<<20)) << 20
-		quotaBytes = d.Settings.Int(r.Context(), "storage_quota_mb", 0) << 20
+		maxBytes = d.Settings.Int(r.Context(), settings.KeyStorageUploadMax, settings.DefUploadMaxMB) << 20
+		quotaBytes = d.Settings.Int(r.Context(), settings.KeyStorageQuota, 0)
 	}
 	if quotaBytes > 0 {
 		if used, err := d.Objects.UsedBytes(r.Context()); err == nil && used >= quotaBytes {
@@ -622,7 +626,7 @@ func (d *Deps) storageQuota(w http.ResponseWriter, r *http.Request) {
 	}
 	quota := int64(0)
 	if d.Settings != nil {
-		quota = d.Settings.Int(r.Context(), "storage_quota_mb", 0) << 20
+		quota = d.Settings.Int(r.Context(), settings.KeyStorageQuota, 0)
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"used_bytes": used, "quota_bytes": quota})
 }
