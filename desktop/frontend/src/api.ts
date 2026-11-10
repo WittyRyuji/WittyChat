@@ -75,6 +75,7 @@ export interface WsFrame {
 }
 
 const TOKEN_KEY = "wittychat.token";
+const DEVICE_KEY = "wittychat.device";
 
 export function getToken(): string {
   return localStorage.getItem(TOKEN_KEY) ?? "";
@@ -82,6 +83,16 @@ export function getToken(): string {
 export function setToken(t: string) {
   if (t) localStorage.setItem(TOKEN_KEY, t);
   else localStorage.removeItem(TOKEN_KEY);
+}
+// Device token: server-issued marker that skips the account login queue.
+// Not a credential — dies with any password change/reset.
+// 设备令牌：服务端签发的标记，只豁免账号登录排队。非凭证——改密/重置即失效。
+export function getDeviceToken(): string {
+  return localStorage.getItem(DEVICE_KEY) ?? "";
+}
+export function setDeviceToken(t: string) {
+  if (t) localStorage.setItem(DEVICE_KEY, t);
+  else localStorage.removeItem(DEVICE_KEY);
 }
 
 // API base: "" in browser dev (vite proxy), backend origin inside Wails.
@@ -126,12 +137,34 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 }
 
 export const api = {
-  login: (email: string, password: string) =>
-    req<{ session_token: string; user: UserPublic; requires_totp?: boolean }>(
-      "POST",
-      "/api/v1/auth/login",
-      { email, password, device_name: "web", device_kind: "web" }
-    ),
+  login: async (email: string, password: string) => {
+    const res = await fetch(`${API_BASE}/api/v1/auth/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(getDeviceToken() ? { "X-WC-Device": getDeviceToken() } : {}),
+      },
+      body: JSON.stringify({ email, password, device_name: "web", device_kind: "web" }),
+    });
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try {
+        const err = await res.json();
+        if (err.detail) detail = err.detail;
+      } catch {
+        /* keep default */
+      }
+      throw new Error(detail);
+    }
+    const body = (await res.json()) as {
+      session_token: string;
+      device_token?: string;
+      user: UserPublic;
+      requires_totp?: boolean;
+    };
+    if (body.device_token) setDeviceToken(body.device_token);
+    return body;
+  },
   me: () => req<{ user: UserPublic }>("GET", "/api/v1/auth/me"),
   getPrefs: () => req<{ prefs: Record<string, unknown> }>("GET", "/api/v1/me/prefs"),
   mergePrefs: (patch: Record<string, unknown>) =>

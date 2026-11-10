@@ -259,7 +259,7 @@ function DocEditorPane({
       </header>
       {docFull && (
         <div className="doc-full-banner">
-          文档存储已达上限，新的编辑不会被保存。请文档属主上线一次以自动压缩历史，或联系管理员调整上限。
+          文档存储已达上限，新编辑暂存本机，属主上线压缩历史后自动同步。如需尽快恢复，请联系文档属主或管理员。
         </div>
       )}
       {doc.kind === "sheet" ? (

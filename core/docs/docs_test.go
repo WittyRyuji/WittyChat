@@ -105,7 +105,7 @@ func TestCompactThresholdAndArchive(t *testing.T) {
 	// (seq is a GLOBAL identity across docs — watermarks come from
 	// LoadUpdates' maxSeq, never a per-doc count.)
 	for i := 0; i < 10; i++ {
-		if err := s.AppendUpdate(ctx, d.ID, []byte(fmt.Sprintf("u%d", i)), 0); err != nil {
+		if _, err := s.AppendUpdate(ctx, d.ID, []byte(fmt.Sprintf("u%d", i)), 0); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -113,7 +113,7 @@ func TestCompactThresholdAndArchive(t *testing.T) {
 	if err != nil || len(ups) != 10 || maxSeq == 0 {
 		t.Fatalf("log after appends: n=%d max=%d err=%v", len(ups), maxSeq, err)
 	}
-	done, err := s.CompactIfLarge(ctx, d.ID, []byte("early-snap"), maxSeq, 0, false)
+	done, _, err := s.CompactIfLarge(ctx, d.ID, []byte("early-snap"), maxSeq, 0, false)
 	if err != nil || done {
 		t.Fatalf("compact below threshold: done=%v err=%v", done, err)
 	}
@@ -124,12 +124,12 @@ func TestCompactThresholdAndArchive(t *testing.T) {
 
 	// Past the threshold: rows <= watermark are archived, not lost.
 	for i := 10; i < 55; i++ {
-		if err := s.AppendUpdate(ctx, d.ID, []byte(fmt.Sprintf("u%d", i)), 0); err != nil {
+		if _, err := s.AppendUpdate(ctx, d.ID, []byte(fmt.Sprintf("u%d", i)), 0); err != nil {
 			t.Fatal(err)
 		}
 	}
 	_, maxSeq, _ = s.LoadUpdates(ctx, d.ID, 0)
-	done, err = s.CompactIfLarge(ctx, d.ID, []byte("SNAP"), maxSeq, 0, false)
+	done, _, err = s.CompactIfLarge(ctx, d.ID, []byte("SNAP"), maxSeq, 0, false)
 	if err != nil || !done {
 		t.Fatalf("compact: done=%v err=%v", done, err)
 	}
@@ -154,13 +154,13 @@ func TestUpdateLogCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AppendUpdate(ctx, d.ID, []byte("abcd"), 8); err != nil {
+	if _, err := s.AppendUpdate(ctx, d.ID, []byte("abcd"), 8); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AppendUpdate(ctx, d.ID, []byte("abcd"), 8); err != nil {
+	if _, err := s.AppendUpdate(ctx, d.ID, []byte("abcd"), 8); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AppendUpdate(ctx, d.ID, []byte("x"), 8); !errors.Is(err, ErrLogFull) {
+	if _, err := s.AppendUpdate(ctx, d.ID, []byte("x"), 8); !errors.Is(err, ErrLogFull) {
 		t.Fatalf("over-cap append: want ErrLogFull, got %v", err)
 	}
 }
@@ -176,10 +176,10 @@ func TestCompactOverCapFewRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	big := make([]byte, 512)
-	if err := s.AppendUpdate(ctx, d.ID, big, 0); err != nil {
+	if _, err := s.AppendUpdate(ctx, d.ID, big, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AppendUpdate(ctx, d.ID, big, 0); err != nil {
+	if _, err := s.AppendUpdate(ctx, d.ID, big, 0); err != nil {
 		t.Fatal(err)
 	}
 	_, maxSeq, err := s.LoadUpdates(ctx, d.ID, 0)
@@ -187,7 +187,7 @@ func TestCompactOverCapFewRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 2 rows < compactMinRows but log_bytes (1024) >= minBytes (512).
-	done, err := s.CompactIfLarge(ctx, d.ID, []byte("SNAP"), maxSeq, 512, false)
+	done, _, err := s.CompactIfLarge(ctx, d.ID, []byte("SNAP"), maxSeq, 512, false)
 	if err != nil || !done {
 		t.Fatalf("compact over-cap short log: done=%v err=%v", done, err)
 	}
@@ -213,7 +213,7 @@ func TestSoftDeleteHides(t *testing.T) {
 	if _, err := s.OwnerOf(ctx, d.ID); err == nil {
 		t.Fatal("OwnerOf resolved a deleted doc")
 	}
-	if err := s.AppendUpdate(ctx, d.ID, []byte("x"), 0); !errors.Is(err, ErrNotFound) {
+	if _, err := s.AppendUpdate(ctx, d.ID, []byte("x"), 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("append to deleted doc: want ErrNotFound, got %v", err)
 	}
 }

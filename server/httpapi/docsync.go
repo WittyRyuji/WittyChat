@@ -169,6 +169,47 @@ func docFullRemove(clock uint64) []byte {
 	return awarenessRemove(docFullClientID, clock)
 }
 
+// awarenessStripReserved drops entries carrying the relay-owned
+// docFullClientID and re-encodes the rest. Members must not be able to
+// fake the doc-full banner, and their periodic queryAwareness replies
+// echo the pseudo state back — without filtering, a conn dying would
+// broadcast a removal for an id it never owned. Returns nil when nothing
+// but reserved entries (or garbage) remains. / 剥掉携带中继保留 id 的
+// 条目并重编码其余：成员不能伪造写满横幅；周期 queryAwareness 的应答会
+// 把伪状态回显——不过滤的话连接断开就会替它广播移除。只剩保留条目或
+// 垃圾时返回 nil。
+func awarenessStripReserved(b []byte) []byte {
+	r := bytes.NewReader(b)
+	n, err := getVarUint(r)
+	if err != nil {
+		return nil
+	}
+	var tmp bytes.Buffer
+	kept := uint64(0)
+	for ; n > 0; n-- {
+		id, e1 := getVarUint(r)
+		clock, e2 := getVarUint(r)
+		st, e3 := getVarBytes(r)
+		if e1 != nil || e2 != nil || e3 != nil {
+			return nil
+		}
+		if id == docFullClientID {
+			continue
+		}
+		putVarUint(&tmp, id)
+		putVarUint(&tmp, clock)
+		putVarBytes(&tmp, st)
+		kept++
+	}
+	if kept == 0 {
+		return nil
+	}
+	var out bytes.Buffer
+	putVarUint(&out, kept)
+	out.Write(tmp.Bytes())
+	return out.Bytes()
+}
+
 // awarenessClients extracts (clientID, clock) pairs — needed to emit
 // removal notices when a conn drops. 取客户端 id 供断线广播移除。
 func awarenessClients(b []byte) map[uint64]uint64 {

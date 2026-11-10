@@ -6,8 +6,12 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -183,6 +187,70 @@ func (s *Store) PasswordAuth(ctx context.Context, id uuid.UUID) (hash string, to
 		err = ErrUserNotFound
 	}
 	return
+}
+
+// ---------- known devices / 已知设备 ----------
+//
+// A device token only skips the account-wide login queue — it is NOT a
+// credential and does not bypass the password check or the per-source
+// hard lock. Each row binds one random token (stored hashed) to the
+// credentials.version at issue, so a password change/reset kills every
+// outstanding marker. 设备令牌只豁免账号级登录排队——不是凭证，不绕过
+// 密码校验与按来源硬锁。每行绑定一个随机令牌（存哈希）与签发时的凭证
+// 版本——改密/重置即全部作废。
+
+// knownDeviceMax per user; knownDeviceTTL after which unused markers die.
+const (
+	knownDeviceMax = 32
+	knownDeviceTTL = "90 days"
+)
+
+// IssueDevice mints a fresh device token for uid and stores its hash with
+// the current cred version; old markers past the cap/TTL are pruned in
+// the same tx. The raw token is returned once — only its hash persists.
+// 为 uid 签发新设备令牌：哈希+凭证版本入库，同事务修剪超额/过期标记。
+// 明文令牌只返回一次，不落库。
+func (s *Store) IssueDevice(ctx context.Context, uid uuid.UUID, credVersion int) (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	tok := "kd1." + base64.RawURLEncoding.EncodeToString(raw)
+	h := sha256.Sum256([]byte(tok))
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO known_devices (user_id, token_hash, cred_version)
+			 VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, uid, h[:], credVersion); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx,
+			`DELETE FROM known_devices WHERE user_id=$1 AND (
+			   last_seen_at < now() - $2::interval
+			   OR ctid NOT IN (SELECT ctid FROM known_devices WHERE user_id=$1
+			                   ORDER BY last_seen_at DESC LIMIT $3))`,
+			uid, knownDeviceTTL, knownDeviceMax)
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	return tok, nil
+}
+
+// KnownDevice reports whether tok is a live marker for uid — the hash
+// must exist AND carry the current cred version. last_seen slides so
+// active devices don't age out. 校验设备令牌：哈希须存在且凭证版本仍
+// 为当前值；顺手滑动 last_seen 防活跃设备过期。
+func (s *Store) KnownDevice(ctx context.Context, uid uuid.UUID, tok string, credVersion int) bool {
+	if !strings.HasPrefix(tok, "kd1.") {
+		return false
+	}
+	h := sha256.Sum256([]byte(tok))
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE known_devices SET last_seen_at=now()
+		 WHERE user_id=$1 AND token_hash=$2 AND cred_version=$3`,
+		uid, h[:], credVersion)
+	return err == nil && tag.RowsAffected() == 1
 }
 
 // UpdateProfile patches display_name and/or avatar (nil = keep).

@@ -94,3 +94,38 @@ func TestScheduleGapGrowsWithFailures(t *testing.T) {
 		t.Fatalf("gap did not grow with failures: %v → %v", w1, w2)
 	}
 }
+
+// Sweep is amortized — crossing the key threshold doesn't make every call
+// walk the whole map (the old per-call full scan was quadratic under
+// attacker-filled keys). / 清扫摊销——越过键数阈值不再让每次调用都扫全表
+// （旧的逐调用全扫在攻击者灌键下是平方级）。
+func TestSweepAmortized(t *testing.T) {
+	l := NewLimiter(5)
+	for i := 0; i < limiterSweepAt+50; i++ {
+		l.fails[string(rune('a'+i%26))+string(rune(i))] = &failRec{first: time.Now().Add(-time.Hour)}
+	}
+	l.sweptAt = time.Now() // pretend a sweep just ran / 假装刚扫过
+	start := time.Now()
+	for i := 0; i < 1000; i++ {
+		l.Attempt("newkey")
+	}
+	if d := time.Since(start); d > 200*time.Millisecond {
+		t.Fatalf("1000 attempts took %v — per-call sweep not amortized", d)
+	}
+}
+
+// Hard cap: a fresh key always gets tracked — one arbitrary record is
+// evicted instead of letting the map grow unbounded.
+// 硬上限：新键总能登记——逐出一条任意记录腾位，而不是放任表无限增长。
+func TestHardCapEvicts(t *testing.T) {
+	l := NewLimiter(5)
+	for i := 0; i < limiterHardCap; i++ {
+		l.fails[string(rune(i))] = &failRec{first: time.Now()}
+	}
+	if !l.Attempt("fresh-key") {
+		t.Fatal("fresh key rejected at cap")
+	}
+	if len(l.fails) > limiterHardCap {
+		t.Fatalf("map grew past cap: %d", len(l.fails))
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 	"wittychat/core/docs"
 	"wittychat/core/settings"
@@ -23,12 +24,47 @@ import (
 // 保活兼权限复核周期，须小于 y-websocket 客户端 30s 静默看门狗。
 const docRevalidateEvery = 20 * time.Second
 
+// docFullRenewEvery keeps the relay-owned {"docFull":true} awareness
+// state alive — remote awareness states expire client-side after ~30s,
+// so a one-shot notice would silently un-banner a still-full doc.
+// 伪 awareness 续约周期——远端 awareness 状态约 30s 后在客户端过期，
+// 单次通知会让仍写满的文档悄悄失去横幅。
+const docFullRenewEvery = 15 * time.Second
+
+// docMaxConnsPerUser bounds one user's sockets per doc — a member could
+// otherwise open unbounded conns and multiply the big-frame memory
+// pressure. Generous for multi-tab use. / 单用户单文档连接上限——否则
+// 成员可无限开 socket 放大帧内存压力。对多标签页留了余量。
+const docMaxConnsPerUser = 8
+
+// docInFlightCap bounds the total bytes of frames currently being read
+// or handled across ALL doc conns. A conn whose frame pushes the total
+// over the budget is killed — bounding concurrent big-frame spikes while
+// letting normal-size sync proceed. / 全局在途帧字节预算——超限连接被
+// 断开，把并发大帧尖峰压进预算内。
+const docInFlightCap = 512 << 20 // 512 MiB
+
+// docOutQueueCap bounds each conn's durable outbound queue (frame refs,
+// not copies) and docOutBytesCap the queued bytes a slow consumer may
+// pin — past it the conn is dead weight and gets dropped.
+// 每连接持久出站队列上限（帧引用非拷贝）与慢消费者可积压的字节上限——
+// 超过即视为僵死连接断开。
+const (
+	docOutQueueCap = 64
+	docOutBytesCap = 64 << 20 // 64 MiB
+)
+
+var docInFlight atomic.Int64 // bytes being processed by doc read loops
+
 type docRoom struct {
-	mu        sync.Mutex
-	conns     map[*docConn]struct{}
-	dead      bool   // removed from docRooms; joiners must fetch a fresh room
-	full      bool   // log at the workspace cap — members see the banner / 日志已到工作区上限
-	fullClock uint64 // awareness clock of the pseudo "doc full" state / 伪状态的 awareness 时钟
+	mu         sync.Mutex
+	conns      map[*docConn]struct{}
+	dead       bool   // removed from docRooms; joiners must fetch a fresh room
+	full       bool   // log at the workspace cap — updates rejected until compacted / 日志到工作区上限
+	fullClock  uint64 // awareness clock of the pseudo "doc full" state / 伪状态的 awareness 时钟
+	fullPulled bool   // owner already pulled this full-episode — resists the full→compact→full loop / 本轮已满拉过属主——防写满↔压实死循环
+	sv         []byte // maintained state vector of the persisted log / 已落库日志的状态向量
+	svInit     bool   // sv was loaded from the DB at least once / sv 已从库里加载过
 }
 
 type docConn struct {
@@ -45,6 +81,8 @@ type docConn struct {
 	readLimit    int64              // per-conn frame cap from docs.log_max_mb / 按文档上限的帧上限
 	awSend       chan []byte        // latest-wins awareness queue (1 deep) / awareness 队列（留最新一帧）
 	awDropLogged bool               // log oversized-awareness drop once per conn / 超限 awareness 每连接只记一次
+	outQ         chan []byte        // durable outbound frames; full → conn dies / 持久出站队列
+	outBytes     atomic.Int64       // bytes pinned by outQ (kill watermark) / outQ 积压字节水位
 }
 
 var docRooms sync.Map // uuid.UUID → *docRoom
@@ -181,6 +219,7 @@ func (d *Deps) docWS(w http.ResponseWriter, r *http.Request) {
 	c := &docConn{
 		ws: ws, docID: docID, uid: sess.UserID, owner: owner, token: token, cancel: cancel,
 		awIDs: map[uint64]uint64{}, readLimit: limit, awSend: make(chan []byte, 1),
+		outQ: make(chan []byte, docOutQueueCap),
 	}
 	d.docServe(ctx, c)
 }
@@ -190,6 +229,77 @@ func (c *docConn) write(ctx context.Context, frame []byte) error {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
 	return c.ws.Write(ctx, websocket.MessageBinary, frame)
+}
+
+// enqueue queues a durable frame for this conn's writer goroutine.
+// Nonblocking: a conn whose queue (or pinned bytes) is full can't keep
+// up — it gets killed so one dead peer can't stall or pin the room.
+// false means the conn is being dropped. / 持久帧进连接出站队列，非
+// 阻塞：队列（或积压字节）满说明对端跟不上——断开它，免得一个僵死
+// 对端拖住/占住整个房间。
+func (c *docConn) enqueue(f []byte) bool {
+	if c.outBytes.Load() > docOutBytesCap {
+		return false
+	}
+	select {
+	case c.outQ <- f:
+		c.outBytes.Add(int64(len(f)))
+		return true
+	default:
+		return false
+	}
+}
+
+// sendAwareness latest-wins: drop the queued stale frame and keep the
+// newest — presence is ephemeral; an old cursor position is worse than
+// none. / 真·留最新：顶掉队列里的旧帧放新帧——在场态是暂态，旧光标
+// 比没有更糟。
+func (c *docConn) sendAwareness(f []byte) {
+	select {
+	case c.awSend <- f:
+		return
+	default:
+	}
+	select {
+	case <-c.awSend:
+	default:
+	}
+	select {
+	case c.awSend <- f:
+	default:
+	}
+}
+
+// writerLoop drains both outbound queues — durable frames first (they
+// matter), awareness opportunistically. One goroutine per conn so a slow
+// peer never serializes the room. / 出站写循环——持久帧优先、awareness
+// 顺带写。每连接一个 goroutine，慢对端不再串行拖住全房间。
+func (c *docConn) writerLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case f := <-c.outQ:
+			c.outBytes.Add(-int64(len(f)))
+			wctx, wc := context.WithTimeout(ctx, 10*time.Second)
+			_ = c.write(wctx, f)
+			wc()
+		default:
+			select {
+			case <-ctx.Done():
+				return
+			case f := <-c.outQ:
+				c.outBytes.Add(-int64(len(f)))
+				wctx, wc := context.WithTimeout(ctx, 10*time.Second)
+				_ = c.write(wctx, f)
+				wc()
+			case f := <-c.awSend:
+				wctx, wc := context.WithTimeout(ctx, 3*time.Second)
+				_ = c.write(wctx, f)
+				wc()
+			}
+		}
+	}
 }
 
 func (d *Deps) docServe(ctx context.Context, c *docConn) {
@@ -202,23 +312,20 @@ func (d *Deps) docServe(ctx context.Context, c *docConn) {
 		_ = c.ws.Close(websocket.StatusPolicyViolation, "closed")
 	}()
 
-	// Awareness fan-out runs off the read loop: latest-wins queue so a
-	// dead peer can't stall cursor updates for the whole room (sync
-	// frames stay on the serial path — they're durable).
-	// awareness 扇出走独立队列：留最新一帧，僵死对端不会拖住全房间的
-	// 光标更新（sync 帧必须可靠，仍走串行路径）。
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case f := <-c.awSend:
-				wctx, wcancel := context.WithTimeout(ctx, 3*time.Second)
-				_ = c.write(wctx, f)
-				wcancel()
-			}
+	// One user can't flood the doc with sockets — over the cap the new
+	// conn is refused before it costs replay bandwidth.
+	// 单用户连接数封顶——超限的新连接在耗费回放带宽前就被拒。
+	room.mu.Lock()
+	own := 0
+	for p := range room.conns {
+		if p != c && p.uid == c.uid {
+			own++
 		}
-	}()
+	}
+	room.mu.Unlock()
+	if own >= docMaxConnsPerUser {
+		return
+	}
 
 	// Replay stored updates: one SyncStep2 frame per update (empty
 	// SyncStep2 when the log is empty so the client finishes its
@@ -236,10 +343,56 @@ func (d *Deps) docServe(ctx context.Context, c *docConn) {
 			return
 		}
 	}
-	// Ask the client for its state — empty state vector pulls its full
-	// doc; the reply (this conn's first SyncStep2) compacts the log.
-	_ = c.write(ctx, syncFrame(syncStep1, emptyStateVector))
-	snapshotPending := true
+
+	// The room's maintained state vector tells clients exactly what the
+	// server holds: members answer Step1(sv) with only their diff, so a
+	// reconnect no longer re-appends the whole doc. The owner gets the
+	// empty vector ONLY when a compaction snapshot is actually wanted
+	// (log ≥ compactMinRows, room full, or a near-cap log after
+	// restart) — every other join costs just a diff. Load it once per
+	// room (lazy), refreshed on every append.
+	// 房间维护的状态向量告诉客户端服务端持有的精确范围：成员对
+	// Step1(sv) 只回差量，重连不再把整篇文档追加回来。属主只在真正需要
+	// 压缩快照时（行数达标、房间写满、或重启后日志逼近上限）才收空
+	// 向量——其余连接只花一个差量。每房间惰性加载一次，随追加刷新。
+	room.mu.Lock()
+	needSV := !room.svInit
+	full := room.full
+	room.mu.Unlock()
+	var sv []byte
+	var logBytes, nRows int64
+	if needSV {
+		var lerr error
+		var nsv []byte
+		nsv, logBytes, nRows, lerr = d.Docs.LoadDocHead(ctx, c.docID)
+		if lerr == nil {
+			room.mu.Lock()
+			if !room.svInit {
+				room.sv, room.svInit = nsv, true
+			}
+			sv = room.sv
+			room.mu.Unlock()
+		}
+	} else {
+		room.mu.Lock()
+		sv = room.sv
+		room.mu.Unlock()
+	}
+	maxB := d.docMaxLogBytes(ctx)
+	nearCap := maxB > 0 && logBytes > 0 && logBytes+maxB/8 >= maxB
+	pull := sv
+	if len(pull) == 0 {
+		pull = emptyStateVector
+	}
+	if c.uid == c.owner && (full || nearCap || nRows >= docs.CompactMinRows || len(sv) == 0) {
+		// Pull the full state: it becomes the compaction snapshot
+		// (coverage-checked at apply time — a diff is never compacted).
+		// 拉全量态——落库前做覆盖校验，差量绝不被当成快照压实。
+		pull = emptyStateVector
+	}
+	if err := c.write(ctx, syncFrame(syncStep1, pull)); err != nil {
+		return
+	}
 
 	// Keepalive + access re-check (see docRevalidateEvery).
 	// 保活 + 权限复核。
@@ -262,12 +415,17 @@ func (d *Deps) docServe(ctx context.Context, c *docConn) {
 		}
 	}()
 
-	// Replay peers' latest awareness so presence shows up instantly
-	// instead of waiting for their next cursor move. Also surface a
-	// "doc full" state the room already knows about (or the DB reports —
-	// e.g. a fresh room after a restart). / 回放对端最新 awareness 让
-	// 在线状态即时可见；房间已知（或库里已是）"写满"状态也一并下发——
-	// 例如重启后刚建的新房间。
+	// Outbound writer starts only now — anything queued during replay
+	// flushes after the handshake, preserving replay order.
+	// 出站写协程此刻才启动——回放期间排队的帧在握手后按序发出。
+	go c.writerLoop(ctx)
+
+	// Replay peers' latest awareness so presence shows up instantly.
+	// Surface "doc full" when the room knows it (or the DB hints at a
+	// stuck log after a restart — informational only; the honest signal
+	// is a runtime ErrLogFull). / 回放对端最新 awareness 让在线状态
+	// 即时可见；房间已知（或库中日志逼近上限——仅提示，真实信号是
+	// 运行时 ErrLogFull）"写满"也一并下发。
 	room.mu.Lock()
 	var awFrames [][]byte
 	for peer := range room.conns {
@@ -282,14 +440,8 @@ func (d *Deps) docServe(ctx context.Context, c *docConn) {
 			return
 		}
 	}
-	if !full && d.docIsFull(ctx, c.docID) {
-		room.mu.Lock()
-		if !room.full {
-			room.full = true
-			room.fullClock++
-		}
-		full, fullClock = room.full, room.fullClock
-		room.mu.Unlock()
+	if !full && nearCap {
+		_ = c.write(ctx, docFullAwareness(fullClock+1))
 	}
 	if full {
 		if err := c.write(ctx, docFullAwareness(fullClock)); err != nil {
@@ -302,124 +454,189 @@ func (d *Deps) docServe(ctx context.Context, c *docConn) {
 		if err != nil {
 			return
 		}
-		if mt != websocket.MessageBinary || len(raw) == 0 || int64(len(raw)) > c.readLimit {
-			continue
+		if docInFlight.Add(int64(len(raw))) > docInFlightCap {
+			log.Printf("docsync %s: in-flight frame budget exceeded — dropping conn", c.docID)
+			return
 		}
-		r := bytes.NewReader(raw)
-		mtype, err := getVarUint(r)
+		d.docHandleFrame(ctx, room, c, mt, raw)
+		docInFlight.Add(-int64(len(raw)))
+	}
+}
+
+// docHandleFrame processes one websocket message. Split from the read
+// loop so the in-flight accounting stays single-line.
+// 处理一条 ws 消息（从读循环拆出，便于在途字节记账）。
+func (d *Deps) docHandleFrame(ctx context.Context, room *docRoom, c *docConn, mt websocket.MessageType, raw []byte) {
+	if mt != websocket.MessageBinary || len(raw) == 0 || int64(len(raw)) > c.readLimit {
+		return
+	}
+	r := bytes.NewReader(raw)
+	mtype, err := getVarUint(r)
+	if err != nil {
+		return
+	}
+	switch mtype {
+	case msgSync:
+		sub, err := getVarUint(r)
 		if err != nil {
-			continue
+			return
 		}
-		switch mtype {
-		case msgSync:
-			sub, err := getVarUint(r)
+		data, err := getVarBytes(r)
+		if err != nil {
+			return
+		}
+		switch sub {
+		case syncStep1:
+			// Client asks for what it misses. The join already sent
+			// everything up to c.replayedTo (frames arrive in order),
+			// so only the delta since then is due — answering with
+			// the whole log again doubled every connect's traffic.
+			// 客户端请求补差。连接建立时已按序下发到水位，此处只补增量——
+			// 此前每次连接都把全量日志重复下发了一遍。
+			log2, maxSeq, err := d.Docs.LoadUpdates(ctx, c.docID, c.replayedTo)
 			if err != nil {
-				continue
+				c.cancel()
+				return
 			}
-			data, err := getVarBytes(r)
-			if err != nil {
-				continue
-			}
-			switch sub {
-			case syncStep1:
-				// Client asks for what it misses. The join already sent
-				// everything up to c.replayedTo (frames arrive in order),
-				// so only the delta since then is due — answering with
-				// the whole log again doubled every connect's traffic.
-				// 客户端请求补差。连接建立时已按序下发到水位，此处只补增量——
-				// 此前每次连接都把全量日志重复下发了一遍。
-				log2, maxSeq, err := d.Docs.LoadUpdates(ctx, c.docID, c.replayedTo)
-				if err != nil {
+			for _, u := range log2 {
+				if !c.enqueue(syncFrame(syncStep2, u)) {
+					c.cancel()
 					return
 				}
-				for _, u := range log2 {
-					if err := c.write(ctx, syncFrame(syncStep2, u)); err != nil {
-						return
-					}
+			}
+			if len(log2) == 0 {
+				if !c.enqueue(syncFrame(syncStep2, emptyYjsUpdate)) {
+					c.cancel()
+					return
 				}
-				if len(log2) == 0 {
-					_ = c.write(ctx, syncFrame(syncStep2, emptyYjsUpdate))
-				}
-				if maxSeq > c.replayedTo {
-					c.replayedTo = maxSeq
-				}
-			case syncUpd, syncStep2:
-				if len(data) == 0 || bytes.Equal(data, emptyYjsUpdate) {
-					if sub == syncStep2 {
-						snapshotPending = false
-					}
-					continue
-				}
-				var perr error
-				if sub == syncStep2 && snapshotPending && c.replayedTo > 0 && c.uid == c.owner {
-					// Owner's full state after the replay → compact (large
-					// logs only, replaced rows archived). Members' first
-					// SyncStep2 is treated as an ordinary update so no one
-					// but the owner can rewrite the whole history. force
-					// when the room is marked full — log_bytes can't reach
-					// the cap through appends (the tipping write rolls
-					// back), so a full doc below the byte threshold would
-					// otherwise be stuck. / 属主回放后的全量态→压缩（大
-					// 日志或已超字节上限，旧行归档）。房间已标记写满时强制
-					// 执行——log_bytes 到不了字节上限（越限写会回滚），
-					// 否则低于阈值的"满"文档会永久卡死。
-					room.mu.Lock()
-					force := room.full
-					room.mu.Unlock()
-					var done bool
-					done, perr = d.Docs.CompactIfLarge(ctx, c.docID, data, c.replayedTo, d.docMaxLogBytes(ctx), force)
-					if perr == nil && !done {
-						perr = d.Docs.AppendUpdate(ctx, c.docID, data, d.docMaxLogBytes(ctx))
-					}
-				} else {
-					perr = d.Docs.AppendUpdate(ctx, c.docID, data, d.docMaxLogBytes(ctx))
-				}
-				if sub == syncStep2 {
-					snapshotPending = false
-				}
-				if perr != nil {
+			}
+			if maxSeq > c.replayedTo {
+				c.replayedTo = maxSeq
+			}
+		case syncUpd, syncStep2:
+			if len(data) == 0 || bytes.Equal(data, emptyYjsUpdate) {
+				return
+			}
+			// While the room is full every update is refused — a
+			// persisted-but-unbroadcastable write would wedge the
+			// sender's later edits as pending structs (divergence).
+			// The only writable path left is the owner's compaction
+			// snapshot. / 房间写满期间所有更新一律拒收——落库却不能
+			// 广播的写会把发送者后续编辑卡成悬挂结构（分叉）。唯一可写
+			// 路径只剩属主的压缩快照。
+			room.mu.Lock()
+			roomFull := room.full
+			svNow := room.sv
+			room.mu.Unlock()
+			// A SyncStep2 covering the maintained vector is a full-state
+			// push — only those may compact. A diff (answering
+			// Step1(sv)) flows through the ordinary append path; an
+			// owner spoofing Step2 can't rewrite history as a diff.
+			// 覆盖维护向量的 SyncStep2 才是全量态——只有它能压实；差量
+			// （应答 Step1(sv)）走普通追加；属主伪造 Step2 也无法把
+			// 差量写成历史。
+			ownerSnap := sub == syncStep2 && c.uid == c.owner &&
+				c.replayedTo > 0 &&
+				(len(svNow) == 0 || docs.UpdateCoversSV(data, svNow))
+			if roomFull && !ownerSnap {
+				return
+			}
+			var sv []byte
+			var perr error
+			compacted := false
+			if ownerSnap {
+				// Owner's full state → compact (large logs only,
+				// replaced rows archived). force when the room is marked
+				// full; if the plain append tips the cap the snapshot
+				// itself is forced through compaction — one push
+				// unstucks the doc. / 属主全量态→压缩（仅大日志/写满时
+				// 强制；若普通追加越限则当场强制压缩——一次推送即解卡）。
+				var done bool
+				done, sv, perr = d.Docs.CompactIfLarge(ctx, c.docID, data, c.replayedTo, d.docMaxLogBytes(ctx), roomFull)
+				if perr == nil && !done {
+					sv, perr = d.Docs.AppendUpdate(ctx, c.docID, data, d.docMaxLogBytes(ctx))
 					if errors.Is(perr, docs.ErrLogFull) {
-						// Over the workspace cap: do NOT relay what was
-						// never persisted — peers would trust an edit the
-						// store dropped. Mark the room full and notify
-						// everyone; the owner's next snapshot compacts
-						// the log back under the cap.
-						// 超过工作区上限：未落库的更新绝不转发——否则对端
-						// 会信任一条被丢弃的编辑。标记房间写满并通知所有人；
-						// 属主下次快照会把日志压回上限内。
-						d.docSetFull(c.docID, room)
-						continue
+						done, sv, perr = d.Docs.CompactIfLarge(ctx, c.docID, data, c.replayedTo, d.docMaxLogBytes(ctx), true)
 					}
-					return // doc deleted or DB down: stop relaying / 文档已删或库不可用
 				}
-				d.docClearFull(c.docID, room)
-				d.docBroadcast(c.docID, c, raw, false)
-			}
-		case msgAwareness:
-			data, err := getVarBytes(r)
-			if err != nil {
-				continue
-			}
-			if len(data) > awMaxPayload {
-				// Awareness is ephemeral and normally a few hundred
-				// bytes — a giant frame is just memory pressure. Drop it
-				// (log once per conn) instead of relaying/retaining it.
-				// awareness 是暂态的，正常只有几百字节——超大帧纯属内存
-				// 压力。丢弃（每连接只记一次）而非转发/留存。
-				if !c.awDropLogged {
-					log.Printf("docsync %s: oversized awareness dropped (%d B)", c.docID, len(data))
-					c.awDropLogged = true
+				compacted = done
+			} else {
+				// A Step2 replying to our pull a beat late echoes ranges
+				// the log just persisted (e.g. the join-pull raced the
+				// client's first edit). Pure duplication → skip, don't
+				// bloat the log. / Step2 应答迟到一拍会把刚落库的区间
+				// 又推回来——纯重复，跳过不写。
+				if len(svNow) > 0 && docs.UpdateFullyInSV(data, svNow) {
+					return
 				}
-				continue
+				sv, perr = d.Docs.AppendUpdate(ctx, c.docID, data, d.docMaxLogBytes(ctx))
 			}
-			for id, clock := range awarenessClients(data) {
-				c.awIDs[id] = clock
+			if perr != nil {
+				if errors.Is(perr, docs.ErrLogFull) {
+					// Over the workspace cap: do NOT relay what was
+					// never persisted — peers would trust an edit the
+					// store dropped. Mark the room full (sticky) and
+					// notify; the owner's snapshot unwedges it.
+					// 超过工作区上限：未落库的更新绝不转发——对端会信任
+					// 一条被丢弃的编辑。标记房间写满（粘滞）并通知；
+					// 属主快照会解开。
+					d.docSetFull(c.docID, room)
+					return
+				}
+				c.cancel() // doc deleted or DB down / 文档已删或库不可用
+				return
 			}
 			room.mu.Lock()
-			c.awLast = data
+			room.sv = sv
+			if !compacted {
+				// A real append landed → the doc can grow again; the next
+				// overflow earns a fresh owner pull. / 普通追加成功说明
+				// 文档又能涨了，下次写满重新允许拉属主。
+				room.fullPulled = false
+			}
 			room.mu.Unlock()
-			d.docBroadcast(c.docID, c, raw, true)
+			if compacted {
+				d.docClearFull(c.docID, room)
+				return // snapshot consumed — not an update to relay / 快照已消费，不再转发
+			}
+			d.docBroadcast(c.docID, c, raw, false)
 		}
+	case msgAwareness:
+		data, err := getVarBytes(r)
+		if err != nil {
+			return
+		}
+		if len(data) > awMaxPayload {
+			// Awareness is ephemeral and normally a few hundred
+			// bytes — a giant frame is just memory pressure. Drop it
+			// (log once per conn) instead of relaying/retaining it.
+			// awareness 是暂态的，正常只有几百字节——超大帧纯属内存
+			// 压力。丢弃（每连接只记一次）而非转发/留存。
+			if !c.awDropLogged {
+				log.Printf("docsync %s: oversized awareness dropped (%d B)", c.docID, len(data))
+				c.awDropLogged = true
+			}
+			return
+		}
+		// The relay owns clientID 0 ({docFull} state) — strip forged or
+		// echoed entries so a member can't fake the banner or get it
+		// removed when their conn dies. / 保留 clientID 0 归中继所有——
+		// 剥掉伪造/回显条目：成员不能伪造横幅，断线也不会误删它。
+		data = awarenessStripReserved(data)
+		if data == nil {
+			return
+		}
+		for id, clock := range awarenessClients(data) {
+			c.awIDs[id] = clock
+		}
+		room.mu.Lock()
+		c.awLast = data
+		room.mu.Unlock()
+		// Relay the STRIPPED frame (raw carries the forged entry).
+		var w bytes.Buffer
+		putVarUint(&w, msgAwareness)
+		putVarBytes(&w, data)
+		d.docBroadcast(c.docID, c, w.Bytes(), true)
 	}
 }
 
@@ -452,33 +669,12 @@ func (d *Deps) docReadLimit(ctx context.Context) int64 {
 	return lim
 }
 
-// docIsFull reports whether the doc's log is effectively at the workspace
-// cap — checked once per join so a freshly-created room (e.g. after a
-// restart) still shows the banner. "Effectively" = within 1/8 of the cap:
-// log_bytes can never reach the cap through appends (the tipping write
-// rolls back), so the honest signal is runtime ErrLogFull; this margin
-// catches the stuck state, and any append that still succeeds clears the
-// flag on its own. / 判断文档日志是否"实际"到达上限——每次加入查一次，
-// 重启后新建房间也能显示横幅。"实际"=距上限 1/8 以内：log_bytes 永远
-// 到不了上限（越限写会回滚），真实信号是运行时的 ErrLogFull；这个余量
-// 能识别卡死态，而仍能成功的追加会自行清除标记。
-func (d *Deps) docIsFull(ctx context.Context, docID uuid.UUID) bool {
-	maxB := d.docMaxLogBytes(ctx)
-	if maxB <= 0 {
-		return false
-	}
-	var lb int64
-	err := d.Pool.QueryRow(ctx,
-		`SELECT COALESCE(log_bytes,0) FROM docs WHERE id=$1`, docID).Scan(&lb)
-	return err == nil && lb+maxB/8 >= maxB
-}
-
 // docSetFull marks the room full and notifies every conn — a pseudo
 // awareness state (clientID 0, {"docFull":true}) the stock y-websocket
-// client accepts without any protocol extension. State transitions only,
-// so a spammy writer can't flood the room. / 标记房间写满并通知所有
-// 连接——伪 awareness 状态（clientID 0），原版 y-websocket 客户端原生
-// 可解，不需协议扩展。只在状态翻转时广播，刷写的客户端泛不了洪。
+// client accepts without any protocol extension. Sticky until owner
+// compaction; a 15s renewal keeps it past the client's 30s remote-state
+// expiry. / 标记房间写满并通知所有连接——伪 awareness 状态（clientID 0），
+// 原版客户端原生可解。粘滞到属主压缩；15s 续约防客户端 30s 远端过期。
 func (d *Deps) docSetFull(docID uuid.UUID, room *docRoom) {
 	room.mu.Lock()
 	if room.full {
@@ -491,11 +687,55 @@ func (d *Deps) docSetFull(docID uuid.UUID, room *docRoom) {
 	room.mu.Unlock()
 	log.Printf("docsync %s: log at cap — updates rejected until owner compaction", docID)
 	d.docBroadcast(docID, nil, docFullAwareness(clock), false)
+	go d.docFullRenew(docID, room)
+	// Pull the owner's full state NOW if one is connected — the empty
+	// vector makes its client answer with a snapshot, which compacts and
+	// clears the flag without waiting for a reconnect. Once per full
+	// episode: if a post-compact diff overflows again, re-pulling would
+	// snapshot an unchanged owner doc forever (archive churn). The flag
+	// resets only when a normal append lands — i.e. the doc truly made
+	// progress. / 若属主在线立刻拉全量，当场压满清标，不必等重连。
+	// 每个写满周期只拉一次：压实后的差量再超限说明属主快照不会再变，
+	// 反复拉取只会空转归档。标志仅在普通追加成功后复位——即文档真正
+	// 取得进展时。
+	room.mu.Lock()
+	pulled := room.fullPulled
+	room.fullPulled = true
+	room.mu.Unlock()
+	if pulled {
+		return
+	}
+	for _, c := range docRoomConns(docID) {
+		if c.uid == c.owner && !c.enqueue(syncFrame(syncStep1, emptyStateVector)) {
+			c.cancel()
+		}
+	}
 }
 
-// docClearFull lifts the full mark after an update persisted again
-// (owner compacted the log). Broadcasts the removal once.
-// 成功落库后解除写满标记（属主已把日志压回上限内），一次性广播清除。
+// docFullRenew re-broadcasts the pseudo state while the room stays full
+// so the banner survives the client's awareness expiry.
+// 写满期间周期性重广播伪状态，横幅不再随 awareness 过期消失。
+func (d *Deps) docFullRenew(docID uuid.UUID, room *docRoom) {
+	t := time.NewTicker(docFullRenewEvery)
+	defer t.Stop()
+	for range t.C {
+		room.mu.Lock()
+		if !room.full || room.dead {
+			room.mu.Unlock()
+			return
+		}
+		room.fullClock++
+		clock := room.fullClock
+		room.mu.Unlock()
+		d.docBroadcast(docID, nil, docFullAwareness(clock), true)
+	}
+}
+
+// docClearFull lifts the full mark after the owner's compaction made
+// room again — removal broadcast, then a fresh Step1(sv) pull so members
+// whose edits were rejected while full resend their diff. / 属主压缩腾出
+// 空间后解除写满——广播移除，并向各连接下发 Step1(sv)，让写满期间被拒
+// 的编辑以差量补回。
 func (d *Deps) docClearFull(docID uuid.UUID, room *docRoom) {
 	room.mu.Lock()
 	if !room.full {
@@ -505,30 +745,36 @@ func (d *Deps) docClearFull(docID uuid.UUID, room *docRoom) {
 	room.full = false
 	room.fullClock++
 	clock := room.fullClock
+	sv := room.sv
+	if len(sv) == 0 {
+		sv = emptyStateVector
+	}
 	room.mu.Unlock()
 	d.docBroadcast(docID, nil, docFullRemove(clock), false)
+	for _, c := range docRoomConns(docID) {
+		if !c.enqueue(syncFrame(syncStep1, sv)) {
+			c.cancel()
+		}
+	}
 }
 
 // docBroadcast sends a frame to every conn in the room except src.
 // Ephemeral frames (cursor/presence awareness) go through each conn's
-// latest-wins queue; durable frames get a fresh per-conn write timeout
-// so one dead peer can't eat everyone else's budget.
-// 向房间内除 src 外的每个连接发帧。暂态帧（光标/在场）走各连接"留
-// 最新"队列；持久帧逐连接独立超时——一个僵死对端不会吃掉别人的预算。
+// latest-wins queue; durable frames queue per conn — a full queue means
+// a dead peer, which is dropped instead of stalling everyone.
+// 向房间内除 src 外的每个连接发帧。暂态帧走"留最新"队列；持久帧逐
+// 连接入队——队列满=僵死对端，断开它而不是拖住所有人。
 func (d *Deps) docBroadcast(docID uuid.UUID, src *docConn, frame []byte, ephemeral bool) {
 	for _, c := range docRoomConns(docID) {
 		if c == src {
 			continue
 		}
 		if ephemeral {
-			select {
-			case c.awSend <- frame:
-			default: // slow consumer keeps only the newest state / 慢消费者只留最新态
-			}
+			c.sendAwareness(frame)
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_ = c.write(ctx, frame)
-		cancel()
+		if !c.enqueue(frame) {
+			c.cancel()
+		}
 	}
 }

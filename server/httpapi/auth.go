@@ -5,12 +5,9 @@ package httpapi
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -92,13 +89,55 @@ type Headers struct {
 	Authorization string `header:"Authorization"`
 	XForwardedFor string `header:"X-Forwarded-For"`
 	Cookie        string `header:"Cookie"`
+	XWCDevice     string `header:"X-WC-Device"`
 }
 
 // loginOut carries the Set-Cookie for the known-device marker.
 // loginOut 额外带 Set-Cookie 写"已知设备"标记。
 type loginOut struct {
 	Body      apitypes.LoginResponse
-	SetCookie string `header:"Set-Cookie"`
+	SetCookie *string `header:"Set-Cookie"`
+}
+
+// dummyPHC is a valid argon2id string (same cost params) verified against
+// when the email doesn't exist — equalizing response timing so account
+// enumeration can't ride the fast-path. 有效格式的 argon2id 串（同成本
+// 参数），邮箱不存在时拿它做校验——抹平时序，账号枚举蹭不到快路径。
+const dummyPHC = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHRzYWx0c2FsdHNhbHQ$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+// limitIPKey normalizes a client IP for throttle keys: IPv6 collapses to
+// its /64 — providers hand whole prefixes, so per-address keys rotate
+// for free without it. 限速键的 IP 归一化：IPv6 归并到 /64——运营商
+// 按前缀分配，不合并的话换地址零成本绕过。
+func limitIPKey(ip net.IP) string {
+	if ip == nil {
+		return "?"
+	}
+	if ip.To4() == nil {
+		if v := ip.To16(); v != nil {
+			return "net6:" + v.Mask(net.CIDRMask(64, 128)).String()
+		}
+	}
+	return ip.String()
+}
+
+// kdFromRequest reads the device marker from the X-WC-Device header
+// (desktop/API clients) or the wc_kd cookie (web). 读取设备标记：
+// 桌面/API 走请求头，网页走 cookie。
+func kdFromRequest(in *struct {
+	Headers
+	Body apitypes.LoginRequest
+},
+) string {
+	if in.XWCDevice != "" {
+		return in.XWCDevice
+	}
+	for _, part := range strings.Split(in.Cookie, ";") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(part), "wc_kd="); ok {
+			return v
+		}
+	}
+	return ""
 }
 
 func (d *Deps) login(ctx context.Context, in *struct {
@@ -108,44 +147,49 @@ func (d *Deps) login(ctx context.Context, in *struct {
 ) (*loginOut, error) {
 	ip := clientIPCtx(ctx)
 	// Throttle on two keys: email+IP (stops one source hammering one
-	// account — per-IP-per-account hard limit) and email alone (stops
-	// distributed attempts at one account — a spoofed/rotated XFF can't
-	// dodge it). The email is normalized so case variants share one
-	// counter. 双键限速：账号+IP 防单源对同一账号刷猜（硬锁），仅账号
-	// 防分布式打同一账号（伪造 XFF 绕不过）；邮箱归一化防大小写变体。
+	// account — per-IP-per-account hard limit, IPv6 folded to /64) and
+	// email alone (distributed attempts at one account — a rotated XFF
+	// can't dodge it). 双键限速：账号+来源防单源刷猜（硬锁，IPv6 按
+	// /64 归并），仅账号防分布式打同一账号（换 IP 绕不过）。
 	email := strings.ToLower(strings.TrimSpace(in.Body.Email))
-	ipStr := "?"
-	if ip != nil {
-		ipStr = ip.String()
-	}
-	key := email + "|" + ipStr
+	key := email + "|" + limitIPKey(ip)
 	acctKey := email + "|*"
 
 	// Policy from workspace settings so admin changes take effect without
-	// a restart. / 每次登录读取 security.lock_* 设置，改动即时生效。
+	// a restart. The account window is long — the old 5-minute reset let
+	// a sprayer keep a steady ~37 guesses/5min forever; a day-long decay
+	// makes sustained spraying progressively slower instead.
+	// 每次登录读取 security.lock_* 设置，改动即时生效。账号窗口拉长——
+	// 原先 5 分钟清零让喷洒者永远保持 ~37 次/5 分的稳定速率；按天衰减
+	// 让持续喷洒越喷越慢。
 	th := int(d.Settings.Int(ctx, settings.KeySecurityLockN, settings.DefLockThreshold))
 	lm := time.Duration(d.Settings.Int(ctx, settings.KeySecurityLockMin, settings.DefLockMinutes)) * time.Minute
 	d.Limiter.Configure(th, 5*time.Minute, lm)
-	d.AcctLimiter.Configure(th*2, 5*time.Minute, lm)
+	d.AcctLimiter.Configure(th*2, 24*time.Hour, lm)
 
-	// A device that has logged in as this account before skips the queue:
-	// an attacker spraying the account slows only themselves and fresh
-	// devices, never the owner's own machine. The cookie is account-bound
-	// HMAC — not a credential, it only skips the delay; the password is
-	// still verified. / 曾登录过本账号的设备跳过排队：泼水的攻击者只拖
-	// 住自己和新设备，拖不住属主本机。cookie 是按账号的 HMAC——不是凭证，
-	// 只豁免延迟，密码照常验证。
-	known := d.knownDevice(in.Cookie, email)
-	if !known {
-		// Atomic check+count: concurrent bursts can't slip past the
-		// threshold between check and record. / 原子检查+计数：并发突发
-		// 不会在"查"与"记"之间溜过阈值。
-		if !d.Limiter.Attempt(key) {
-			return nil, huma.Error429TooManyRequests("too many failed attempts, try later / 失败过多，稍后再试")
-		}
-		// Account-wide serialization: concurrent guesses queue up with a
-		// growing gap instead of verifying in parallel. / 账号级串行：
-		// 并发猜测按渐增间隔排队，不能并行验证。
+	// Atomic check+count — always, known device or not: the device marker
+	// only skips the ACCOUNT queue, never the per-source hard lock, so a
+	// leaked marker can't multiply guesses beyond what one source could
+	// do anyway. / 原子检查+计数——无论是否已知设备：设备标记只豁免账号
+	// 排队，从不豁免按来源硬锁——标记泄露也不能放大单源可猜次数。
+	if !d.Limiter.Attempt(key) {
+		return nil, huma.Error429TooManyRequests("too many failed attempts, try later / 失败过多，稍后再试")
+	}
+
+	u, err := d.Store.UserByEmail(ctx, email)
+	if err != nil {
+		d.AcctLimiter.Fail(acctKey)
+		_, _ = d.verifyPassword(ctx, in.Body.Password, dummyPHC) // timing parity
+		return nil, huma.Error401Unauthorized("invalid credentials")
+	}
+	hash, totpEnabled, credVersion, err := d.Store.PasswordAuth(ctx, u.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	// A previously-issued device token skips the account queue (and only
+	// that). 已签发的设备令牌只跳过账号排队。
+	if !d.Store.KnownDevice(ctx, u.ID, kdFromRequest(in), credVersion) {
 		wait, ok := d.AcctLimiter.Schedule(acctKey, 20*time.Second)
 		if !ok {
 			return nil, huma.Error429TooManyRequests("too many failed attempts, try later / 失败过多，稍后再试")
@@ -159,18 +203,6 @@ func (d *Deps) login(ctx context.Context, in *struct {
 		}
 	}
 
-	u, err := d.Store.UserByEmail(ctx, email)
-	if err != nil {
-		d.AcctLimiter.Fail(acctKey)
-		return nil, huma.Error401Unauthorized("invalid credentials")
-	}
-	if u.Status != auth.StatusActive {
-		return nil, huma.Error403Forbidden("account not active / 账号未激活或已停用")
-	}
-	hash, totpEnabled, credVersion, err := d.Store.PasswordAuth(ctx, u.ID)
-	if err != nil {
-		return nil, err
-	}
 	ok, err := d.verifyPassword(ctx, in.Body.Password, hash)
 	if err != nil {
 		return nil, err
@@ -179,6 +211,13 @@ func (d *Deps) login(ctx context.Context, in *struct {
 		d.AcctLimiter.Fail(acctKey)
 		d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.login.fail", u.Email, nil, ip)
 		return nil, huma.Error401Unauthorized("invalid credentials")
+	}
+	// Status checked only after the password verifies — answering 403
+	// up front let anyone probe account existence/state without the
+	// password. / 账号状态放到密码校验之后才查——前置 403 让任何人
+	// 不用密码就能探测账号是否存在/已激活。
+	if u.Status != auth.StatusActive {
+		return nil, huma.Error403Forbidden("account not active / 账号未激活或已停用")
 	}
 	if totpEnabled {
 		if in.Body.TOTP == "" {
@@ -204,45 +243,24 @@ func (d *Deps) login(ctx context.Context, in *struct {
 	d.Limiter.Reset(key)
 	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.login", u.Email, nil, ip)
 
+	devTok, _ := d.Store.IssueDevice(ctx, u.ID, credVersion)
+	var setCookie *string
+	if devTok != "" {
+		c := "wc_kd=" + devTok + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=7776000"
+		if strings.HasPrefix(d.PublicURL, "https://") {
+			c += "; Secure"
+		}
+		setCookie = &c
+	}
 	return &loginOut{
 		Body: apitypes.LoginResponse{
 			SessionToken: token,
+			DeviceToken:  devTok,
 			User:         publicUser(u),
 			ExpiresAt:    sess.ExpiresAt,
 		},
-		SetCookie: d.kdCookie(email),
+		SetCookie: setCookie,
 	}, nil
-}
-
-// kdToken — account-bound HMAC marking a device that logged in before.
-// kdToken：按账号的 HMAC，标记曾经登录成功的设备。
-func (d *Deps) kdToken(email string) string {
-	mac := hmac.New(sha256.New, d.SecretKey)
-	_, _ = mac.Write([]byte("wc-kd|" + email))
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-}
-
-// knownDevice reports whether the Cookie header carries this account's
-// kd marker (constant-time compare). / Cookie 头里是否带着本账号的
-// 已知设备标记（常数时间比较）。
-func (d *Deps) knownDevice(cookieHeader, email string) bool {
-	want := d.kdToken(email)
-	for _, part := range strings.Split(cookieHeader, ";") {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(part), "wc_kd="); ok {
-			return subtle.ConstantTimeCompare([]byte(v), []byte(want)) == 1
-		}
-	}
-	return false
-}
-
-// kdCookie renders the Set-Cookie value (HttpOnly, not a credential).
-// 生成 Set-Cookie 值（HttpOnly，不是凭证）。
-func (d *Deps) kdCookie(email string) string {
-	c := "wc_kd=" + d.kdToken(email) + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"
-	if strings.HasPrefix(d.PublicURL, "https://") {
-		c += "; Secure"
-	}
-	return c
 }
 
 func (d *Deps) logout(ctx context.Context, in *struct {

@@ -55,10 +55,10 @@ const (
 var IntBounds = map[string][2]int64{
 	KeyIMMessageMaxChars: {1, MaxMessageCharsCap},
 	KeyIMRecallTimeout:   {10, 3600},
-	KeySecurityMinPass:   {4, 256},
+	KeySecurityMinPass:   {8, 256},
 	KeySecurityLockN:     {1, 100},
 	KeySecurityLockMin:   {1, 1440},
-	KeyDocsLogMaxMB:      {1, 8192},
+	KeyDocsLogMaxMB:      {0, 1024}, // 0 = unlimited / 0=不限
 	KeyAuditRetention:    {1, 36500},
 	KeyStorageQuota:      {0, 1 << 50},
 	KeyStorageUploadMax:  {1, 2048},
@@ -90,7 +90,13 @@ func (s *Store) get(ctx context.Context, key string) (json.RawMessage, bool) {
 	return v, err == nil
 }
 
-// Int returns the setting as int64, or def when absent/invalid.
+// Int returns the setting as int64, or def when absent/invalid. Values
+// outside IntBounds also fall back to def — a poisoned value written
+// before bounds existed (e.g. retention=0, which would purge ALL history
+// at the next GC) can't take effect through any reader.
+// 读数值设置；缺失/非法时回落默认。超出 IntBounds 的存量值同样回落——
+// 边界生效前写入的毒值（如 retention=0，下次 GC 会清空全部历史）无法
+// 经由任何读取路径生效。
 func (s *Store) Int(ctx context.Context, key string, def int64) int64 {
 	raw, ok := s.get(ctx, key)
 	if !ok {
@@ -98,13 +104,17 @@ func (s *Store) Int(ctx context.Context, key string, def int64) int64 {
 	}
 	var v int64
 	if err := json.Unmarshal(raw, &v); err == nil {
-		return v
+	} else {
+		var f float64
+		if json.Unmarshal(raw, &f) != nil {
+			return def
+		}
+		v = int64(f)
 	}
-	var f float64
-	if json.Unmarshal(raw, &f) == nil {
-		return int64(f)
+	if ValidateInt(key, v) != nil {
+		return def
 	}
-	return def
+	return v
 }
 
 func (s *Store) Bool(ctx context.Context, key string, def bool) bool {

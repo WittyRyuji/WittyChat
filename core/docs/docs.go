@@ -27,10 +27,12 @@ var (
 	ErrLogFull  = errors.New("docs: update log over the workspace cap")
 )
 
-// compactMinRows is the smallest log worth compacting — below it the
-// rewrite cost buys nothing and only adds risk.
-// 日志少于此行数不压缩——重写代价换不来收益，只引入风险。
-const compactMinRows = 50
+// CompactMinRows is the smallest log worth compacting — below it the
+// rewrite cost buys nothing and only adds risk. Exported: the relay
+// consults it when deciding whether to pull an owner snapshot.
+// 日志少于此行数不压缩——重写代价换不来收益，只引入风险。导出供中继
+// 决定是否拉取属主快照。
+const CompactMinRows = 50
 
 // MaxTitleRunes caps doc titles. 标题长度上限。
 const MaxTitleRunes = 200
@@ -246,13 +248,20 @@ func (s *Store) Rename(ctx context.Context, docID uuid.UUID, title string) error
 	return err
 }
 
-// AppendUpdate persists one Yjs update blob and bumps updated_at. Log
-// growth is bounded by Compact (owner snapshots) and capped by
-// maxLogBytes (docs.log_max_mb) so a member can't fill the DB.
-// 追加一条 Yjs update；日志由属主快照压缩收敛，并受 maxLogBytes
-// （docs.log_max_mb）限制，成员无法无限写库。
-func (s *Store) AppendUpdate(ctx context.Context, docID uuid.UUID, data []byte, maxLogBytes int64) error {
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+// AppendUpdate persists one Yjs update blob, bumps updated_at, and folds
+// the update's clock ranges into docs.sv — the vector the relay sends as
+// SyncStep1 so clients answer with just their missing diff. Returns the
+// post-write sv (nil when the update can't be parsed or sv was already
+// unknown — the owner's next snapshot rebuilds it). Log growth is bounded
+// by Compact (owner snapshots) and capped by maxLogBytes
+// (docs.log_max_mb) so a member can't fill the DB.
+// 追加一条 Yjs update，并把其时钟区间并入 docs.sv——中继以此向量下发
+// SyncStep1，客户端只回缺失差量。返回写入后的 sv（解析失败或本就未知
+// 时为 nil，属主下次快照会重建）。日志由属主快照压缩收敛，并受
+// maxLogBytes（docs.log_max_mb）限制，成员无法无限写库。
+func (s *Store) AppendUpdate(ctx context.Context, docID uuid.UUID, data []byte, maxLogBytes int64) ([]byte, error) {
+	var sv []byte
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		// One UPDATE takes the doc row lock (serializing appends for this
 		// doc), bumps the running log_bytes total in the same write, and
 		// hands it back — the cap check costs O(1) instead of a full-log
@@ -261,8 +270,8 @@ func (s *Store) AppendUpdate(ctx context.Context, docID uuid.UUID, data []byte, 
 		var logBytes int64
 		if err := tx.QueryRow(ctx,
 			`UPDATE docs SET log_bytes = log_bytes + $2, updated_at = now()
-			 WHERE id=$1 AND deleted_at IS NULL RETURNING log_bytes`,
-			docID, int64(len(data))).Scan(&logBytes); err != nil {
+			 WHERE id=$1 AND deleted_at IS NULL RETURNING log_bytes, sv`,
+			docID, int64(len(data))).Scan(&logBytes, &sv); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
@@ -271,9 +280,102 @@ func (s *Store) AppendUpdate(ctx context.Context, docID uuid.UUID, data []byte, 
 		if maxLogBytes > 0 && logBytes > maxLogBytes {
 			return ErrLogFull
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO doc_updates (doc_id, data) VALUES ($1,$2)`, docID, data)
+		if ranges, perr := ParseUpdateRanges(data); perr == nil {
+			// NULL/old-empty sv means no history vector yet — merge onto
+			// an empty map so a fresh doc starts tracking immediately.
+			// 旧向量为空表示还没有历史——在空图上合并，新文档立即开始维护。
+			m := make(map[uint64]uint64, len(ranges))
+			ok := true
+			if len(sv) > 0 {
+				dm, derr := DecodeSV(sv)
+				if derr != nil {
+					ok = false
+				} else {
+					m = dm
+				}
+			}
+			if ok {
+				MergeSV(m, ranges)
+				sv = EncodeSV(m)
+			} else {
+				sv = nil // corrupt stored vector — rebuilt later via snapshot / 库中向量损坏，等快照重建
+			}
+		} else {
+			// Unknown/undecodable → sv=nil: the relay falls back to the
+			// empty-vector pull until a snapshot rebuilds it.
+			// 未知/不可解析→sv=nil：中继回退空向量拉取，等快照重建。
+			sv = nil
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO doc_updates (doc_id, data) VALUES ($1,$2)`, docID, data); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE docs SET sv=$2 WHERE id=$1`, docID, sv)
 		return err
 	})
+	return sv, err
+}
+
+// LoadDocHead returns the doc's maintained state vector, log_bytes, and
+// live row count — one row, read on every doc-conn join.
+// 读文档的状态向量、日志字节数与当前行数。
+func (s *Store) LoadDocHead(ctx context.Context, docID uuid.UUID) (sv []byte, logBytes, nRows int64, err error) {
+	err = s.pool.QueryRow(ctx,
+		`SELECT sv, COALESCE(log_bytes,0),
+		        (SELECT count(*) FROM doc_updates u WHERE u.doc_id=d.id)
+		 FROM docs d WHERE d.id=$1 AND deleted_at IS NULL`,
+		docID).Scan(&sv, &logBytes, &nRows)
+	return sv, logBytes, nRows, err
+}
+
+// UpdateCoversSV reports whether an update's clock ranges fully cover a
+// state vector — i.e. it is a full-state push rather than a diff. Used to
+// decide whether an owner's SyncStep2 is safe to compact with: a diff
+// (answering Step1(sv)) must never be written as the whole history.
+// 判断 update 的时钟区间是否完整覆盖一个状态向量——即它是全量态而非
+// 差量。用于判定属主 SyncStep2 能否安全压实：差量绝不能整体改写历史。
+func UpdateCoversSV(data, sv []byte) bool {
+	ranges, err := ParseUpdateRanges(data)
+	if err != nil {
+		return false
+	}
+	m, err := DecodeSV(sv)
+	if err != nil {
+		return false
+	}
+	for c, clock := range m {
+		rg, ok := ranges[c]
+		if !ok || rg.Start != 0 || rg.End < clock {
+			return false
+		}
+	}
+	return true
+}
+
+// UpdateFullyInSV reports whether every struct range in the update is
+// already covered by the state vector — pure duplication. A client that
+// answers Step1(sv) a beat late echoes back ranges the log already holds
+// (its own just-appended edit); appending those again only bloats the
+// log. Updates with no struct ranges (delete-set only) return false so
+// they still flow through.
+// 判断 update 的所有结构区间是否都已被状态向量覆盖——纯重复。迟到一拍
+// 的 Step2 应答会把刚落库的编辑又推回来，再 append 只是浪费日志空间。
+// 没有结构区间的 update（纯删除集）返回 false，照常放行。
+func UpdateFullyInSV(data, sv []byte) bool {
+	ranges, err := ParseUpdateRanges(data)
+	if err != nil || len(ranges) == 0 {
+		return false
+	}
+	m, err := DecodeSV(sv)
+	if err != nil {
+		return false
+	}
+	for c, rg := range ranges {
+		if rg.End > m[c] {
+			return false
+		}
+	}
+	return true
 }
 
 // LoadUpdates replays the log after `after` seq (0 = full log); maxSeq is
@@ -309,11 +411,12 @@ func (s *Store) LoadUpdates(ctx context.Context, docID uuid.UUID, after int64) (
 // 字节上限时执行（行少但字节肥的日志也必须能压，否则超过
 // docs.log_max_mb 的文档永远无法恢复）。被替换的行归档保留至审计期。
 // 调用方限定只有属主连接可触发：普通成员不得整体改写历史（见 a460bd3 审查）。
-func (s *Store) CompactIfLarge(ctx context.Context, docID uuid.UUID, snapshot []byte, upTo, minBytes int64, force bool) (bool, error) {
+func (s *Store) CompactIfLarge(ctx context.Context, docID uuid.UUID, snapshot []byte, upTo, minBytes int64, force bool) (bool, []byte, error) {
 	if len(snapshot) == 0 || upTo <= 0 {
-		return false, nil
+		return false, nil, nil
 	}
 	var done bool
+	var sv []byte
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		var n int
 		var logBytes int64
@@ -328,7 +431,7 @@ func (s *Store) CompactIfLarge(ctx context.Context, docID uuid.UUID, snapshot []
 		// alone would leave a "full" doc stuck forever. / force=房间见过
 		// ErrLogFull：log_bytes 永远到不了上限（越限的追加会回滚），只按
 		// 字节比较会让"写满"的文档永远卡死。
-		if !force && n < compactMinRows && (minBytes <= 0 || logBytes < minBytes) {
+		if !force && n < CompactMinRows && (minBytes <= 0 || logBytes < minBytes) {
 			return nil
 		}
 		if _, err := tx.Exec(ctx,
@@ -346,17 +449,50 @@ func (s *Store) CompactIfLarge(ctx context.Context, docID uuid.UUID, snapshot []
 			return err
 		}
 		// Recompute the byte counter over what remains (snapshot + any
-		// rows past upTo). / 重算剩余日志字节数（快照 + upTo 之后的行）。
+		// rows past upTo); the maintained vector becomes the snapshot's
+		// coverage plus whatever already-arrived rows follow the
+		// watermark. / 重算剩余日志字节数；状态向量=快照覆盖 ∪ 水位后
+		// 已到达的行。
+		if ranges, perr := ParseUpdateRanges(snapshot); perr == nil {
+			m := make(map[uint64]uint64, len(ranges))
+			for c, rg := range ranges {
+				if rg.Start == 0 {
+					m[c] = rg.End
+				}
+			}
+			tail, terr := tx.Query(ctx,
+				`SELECT data FROM doc_updates WHERE doc_id=$1 AND seq>$2 ORDER BY seq`,
+				docID, upTo)
+			if terr != nil {
+				return terr
+			}
+			for tail.Next() {
+				var row []byte
+				if terr = tail.Scan(&row); terr != nil {
+					tail.Close()
+					return terr
+				}
+				if rg, perr2 := ParseUpdateRanges(row); perr2 == nil {
+					MergeSV(m, rg)
+				}
+			}
+			tail.Close()
+			if terr = tail.Err(); terr != nil {
+				return terr
+			}
+			sv = EncodeSV(m)
+		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE docs SET log_bytes = (
-				SELECT COALESCE(SUM(LENGTH(u.data)),0) FROM doc_updates u WHERE u.doc_id=$1)
-			 WHERE id=$1`, docID); err != nil {
+				SELECT COALESCE(SUM(LENGTH(u.data)),0) FROM doc_updates u WHERE u.doc_id=$1),
+			    sv = $2
+			 WHERE id=$1`, docID, sv); err != nil {
 			return err
 		}
 		done = true
 		return nil
 	})
-	return done, err
+	return done, sv, err
 }
 
 // OwnerOf returns the doc's owner id (for owner-only compaction).

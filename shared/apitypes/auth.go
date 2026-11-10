@@ -35,6 +35,7 @@ type UpdateMeRequest struct {
 
 type LoginResponse struct {
 	SessionToken string      `json:"session_token,omitempty"`
+	DeviceToken  string      `json:"device_token,omitempty"`
 	RequiresTOTP bool        `json:"requires_totp,omitempty"`
 	User         *UserPublic `json:"user,omitempty"`
 	ExpiresAt    time.Time   `json:"expires_at,omitempty"`
