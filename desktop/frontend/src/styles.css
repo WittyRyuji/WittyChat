@@ -515,6 +515,11 @@ button {
 .msg-body-wrap {
   position: relative;
   display: inline-block;
+  /* Anchor floor for .rx-zone/.rx-add: near-empty messages (whitespace
+     body, failed attachment) used to collapse this to ~0 wide, sliding
+     the reaction pills left under the avatar. / 反应锚点下限——近空消息
+     （纯空白正文、附件渲染失败）曾把它压到≈0 宽，点赞就会滑到头像下。 */
+  min-width: 44px;
 }
 .read-badge {
   position: absolute;
@@ -673,6 +678,12 @@ button {
   bottom: -9px;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  /* Never wider than the bubble wrap: extra pills wrap to a second line
+     instead of reaching left over the read badge at -11px. /
+     不宽于气泡容器——多的 pill 换行而不是左伸盖住 -11px 处的已读点。 */
+  flex-wrap: wrap;
+  max-width: 100%;
   gap: 4px;
   z-index: 6;
 }
