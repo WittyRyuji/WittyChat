@@ -1029,83 +1029,67 @@ export function Chat({
                             </div>
                           )}
                           <div className="msg-body-wrap">
-                            {(o.recalled || !isPlaceholder) && (
-                              <div className={`msg-body ${o.recalled ? "recalled" : ""}`}>
-                                {o.recalled ? "消息已撤回" : <Md text={o.body ?? ""} />}
-                              </div>
-                            )}
-                            {!o.recalled && atts.length > 0 && (
-                              <div
-                                className={`atts${
-                                  atts.length === 1 && isPlaceholder ? " stk-msg" : ""
-                                }`}
-                              >
-                                {atts.map((a) =>
-                                  a.mime?.startsWith("image/") ? (
-                                    <button
-                                      type="button"
-                                      key={a.id}
-                                      className="att-img"
-                                      title={`${a.name} · 点击查看大图`}
-                                      onClick={() => openViewerBlob(a.id, a.name)}
-                                    >
-                                      <ObjImg
-                                        id={a.id}
-                                        kind={a.mime === "image/gif" ? "full" : "thumb"}
-                                        alt={a.name}
-                                      />
-                                    </button>
-                                  ) : (
-                                    <span key={a.id} className="att-file">
+                            <div className="msg-bubble">
+                              {(o.recalled || !isPlaceholder) && (
+                                <div className={`msg-body ${o.recalled ? "recalled" : ""}`}>
+                                  {o.recalled ? "消息已撤回" : <Md text={o.body ?? ""} />}
+                                </div>
+                              )}
+                              {!o.recalled && atts.length > 0 && (
+                                <div
+                                  className={`atts${
+                                    atts.length === 1 && isPlaceholder ? " stk-msg" : ""
+                                  }`}
+                                >
+                                  {atts.map((a) =>
+                                    a.mime?.startsWith("image/") ? (
                                       <button
                                         type="button"
-                                        className="att"
-                                        title="下载"
-                                        onClick={() => saveBlob(a.id, a.name)}
+                                        key={a.id}
+                                        className="att-img"
+                                        title={`${a.name} · 点击查看大图`}
+                                        onClick={() => openViewerBlob(a.id, a.name)}
                                       >
-                                        📎 {a.name}
-                                        <span className="att-size">{fmtSize(a.size)}</span>
+                                        <ObjImg
+                                          id={a.id}
+                                          kind={a.mime === "image/gif" ? "full" : "thumb"}
+                                          alt={a.name}
+                                        />
                                       </button>
-                                      {officeOn && isOfficeFile(a.name) && (
+                                    ) : (
+                                      <span key={a.id} className="att-file">
                                         <button
                                           type="button"
-                                          className="att-edit"
-                                          onClick={() => officeOpen(a.id)}
+                                          className="att"
+                                          title="下载"
+                                          onClick={() => saveBlob(a.id, a.name)}
                                         >
-                                          在线编辑
+                                          📎 {a.name}
+                                          <span className="att-size">{fmtSize(a.size)}</span>
                                         </button>
-                                      )}
-                                    </span>
-                                  )
-                                )}
-                              </div>
-                            )}
-                            {mine && !o.recalled && (
-                              <ReadBadge
-                                seq={o.op_seq}
-                                members={members[activeId] ?? []}
-                                meId={me.id}
-                                isDm={active.kind === "dm"}
-                              />
-                            )}
-                            {!o.recalled && (
-                              <>
-                                <div className="rx-zone">
-                                  {rxGroupsOf(o).map((r) => (
-                                    <button
-                                      type="button"
-                                      key={r.emoji}
-                                      className={`rx-pill${
-                                        r.users.some((u) => u.id === me.id) ? " mine" : ""
-                                      }`}
-                                      title={r.users.map((u) => u.name).join("、")}
-                                      onClick={() => reactEmoji(o, r.emoji)}
-                                    >
-                                      {r.emoji}
-                                      <span className="rx-n">{r.users.length}</span>
-                                    </button>
-                                  ))}
+                                        {officeOn && isOfficeFile(a.name) && (
+                                          <button
+                                            type="button"
+                                            className="att-edit"
+                                            onClick={() => officeOpen(a.id)}
+                                          >
+                                            在线编辑
+                                          </button>
+                                        )}
+                                      </span>
+                                    )
+                                  )}
                                 </div>
+                              )}
+                              {mine && !o.recalled && (
+                                <ReadBadge
+                                  seq={o.op_seq}
+                                  members={members[activeId] ?? []}
+                                  meId={me.id}
+                                  isDm={active.kind === "dm"}
+                                />
+                              )}
+                              {!o.recalled && (
                                 <button
                                   type="button"
                                   className="rx-add"
@@ -1114,7 +1098,25 @@ export function Chat({
                                 >
                                   👍
                                 </button>
-                              </>
+                              )}
+                            </div>
+                            {!o.recalled && (
+                              <div className="rx-zone">
+                                {rxGroupsOf(o).map((r) => (
+                                  <button
+                                    type="button"
+                                    key={r.emoji}
+                                    className={`rx-pill${
+                                      r.users.some((u) => u.id === me.id) ? " mine" : ""
+                                    }`}
+                                    title={r.users.map((u) => u.name).join("、")}
+                                    onClick={() => reactEmoji(o, r.emoji)}
+                                  >
+                                    {r.emoji}
+                                    <span className="rx-n">{r.users.length}</span>
+                                  </button>
+                                ))}
+                              </div>
                             )}
                           </div>
                           {!o.recalled && (

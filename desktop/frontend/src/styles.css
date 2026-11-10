@@ -514,12 +514,26 @@ button {
 /* read-receipt circle / 已读回执圈(飞书式):贴气泡左下角 */
 .msg-body-wrap {
   position: relative;
-  display: inline-block;
-  /* Anchor floor for .rx-zone/.rx-add: near-empty messages (whitespace
-     body, failed attachment) used to collapse this to ~0 wide, sliding
-     the reaction pills left under the avatar. / 反应锚点下限——近空消息
-     （纯空白正文、附件渲染失败）曾把它压到≈0 宽，点赞就会滑到头像下。 */
-  min-width: 44px;
+  /* Column flex: .msg-bubble shrink-wraps the visible bubble; .rx-zone is
+     a normal-flow row beneath it. / 纵向 flex：.msg-bubble 收缩贴合气泡，
+     .rx-zone 是气泡下方的正常排版行。 */
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  max-width: 100%;
+  vertical-align: top;
+}
+/* Own messages right-align the bubble when the pill row widens the wrap.
+   自己的消息：pill 行比气泡宽时气泡仍靠右。 */
+.msg.mine .msg-body-wrap {
+  align-items: flex-end;
+}
+/* Positioning anchor for .read-badge / .rx-add — hugs exactly the bubble,
+   so the badge stays flush even when reactions widen the wrap. /
+   .read-badge/.rx-add 的定位基准——收缩贴合气泡，pill 撑宽容器时点仍贴泡。 */
+.msg-bubble {
+  position: relative;
+  max-width: 100%;
 }
 .read-badge {
   position: absolute;
@@ -669,23 +683,23 @@ button {
 
 /* reaction zone — like button + pills at the bubble's lower-right corner.
    点赞区：气泡右下角（👍 按钮悬停出现，有回应时 pill 常驻）。
-   👍 straddles the corner edge; pills hang below the bottom edge and the
-   tools row is pushed out of their way when they exist.
-   👍 骑在气泡右下角边上；pill 挂底边之下，存在时把操作行往下挤。 */
+   👍 straddles the corner edge; pills sit on a normal-flow row under the
+   bubble, right-aligned — nothing can cover the bubble text, the read
+   badge, or slide under the avatar, even when the pills out-width the
+   bubble. 👍 骑在气泡右下角边上；pill 在气泡下一行右对齐——不会压正文/
+   已读点，比气泡宽也只向右/左自然延伸，绝不进头像区。 */
 .rx-zone {
-  position: absolute;
-  right: 0;
-  bottom: -9px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  /* Never wider than the bubble wrap: extra pills wrap to a second line
-     instead of reaching left over the read badge at -11px. /
-     不宽于气泡容器——多的 pill 换行而不是左伸盖住 -11px 处的已读点。 */
+  align-self: flex-end;
   flex-wrap: wrap;
   max-width: 100%;
+  margin-top: 3px;
   gap: 4px;
-  z-index: 6;
+}
+.rx-zone:empty {
+  display: none;
 }
 .rx-pill,
 .rx-add {
@@ -730,13 +744,9 @@ button {
 .msg:hover .rx-add {
   opacity: 1;
 }
-/* pills occupy the strip under the bubble — keep the tools row clear. */
-.msg:has(.rx-pill) .msg-tools {
-  margin-top: 13px;
-}
 /* When pills exist the standalone 👍 would sit on top of them — the pill
    itself is the toggle, so hide the add-button. 有回应时 pill 即切换钮。 */
-.rx-zone:has(.rx-pill) + .rx-add {
+.msg-body-wrap:has(.rx-pill) .rx-add {
   display: none;
 }
 
@@ -1320,6 +1330,38 @@ button {
   border: 1px solid var(--line);
   object-fit: cover;
   display: block;
+}
+/* Object-image loading/failure placeholder — sized per context so a
+   pending or failed fetch never collapses the bubble (the reaction row
+   used to land under the avatar on a 0-wide wrap). /
+   对象图加载中/失败的占位——按场景定尺寸，加载期间气泡不塌缩。 */
+.obj-ph {
+  display: inline-block;
+  min-width: 48px;
+  min-height: 36px;
+  border-radius: 8px;
+  background: var(--bg3);
+}
+.obj-ph-err {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--line);
+  box-sizing: border-box;
+  padding: 6px;
+  font-size: 11px;
+  color: var(--dim);
+  text-align: center;
+  cursor: pointer;
+}
+.att-img .obj-ph {
+  width: 120px;
+  height: 90px;
+  border: 1px solid var(--line);
+}
+.stk-img .obj-ph {
+  width: 100%;
+  height: 100%;
 }
 
 .att-name {

@@ -10,11 +10,19 @@ import { api2, authBlob } from "./api";
 
 // useObjectBlob resolves an object to a blob: URL (thumb first, full
 // bytes as fallback for not-yet-generated thumbnails). Revoked on
-// unmount or when id/kind changes. thumb 未生成时回退完整字节。
-export function useObjectBlob(id: string, kind: "thumb" | "full" = "thumb"): string | null {
+// unmount or when id/kind changes. retry() refetches after failure.
+// thumb 未生成时回退完整字节；retry() 失败后重取。
+export function useObjectBlob(
+  id: string,
+  kind: "thumb" | "full" = "thumb"
+): { url: string | null; failed: boolean; retry: () => void } {
   const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [tick, setTick] = useState(0);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: tick is the retry trigger — bumping it re-runs the fetch / tick 是重试触发器，变化即重取
   useEffect(() => {
     setUrl(null);
+    setFailed(false);
     let dead = false;
     let blob = "";
     const paths =
@@ -31,13 +39,14 @@ export function useObjectBlob(id: string, kind: "thumb" | "full" = "thumb"): str
           /* next candidate / 下一路径重试 */
         }
       }
+      if (!dead) setFailed(true);
     })();
     return () => {
       dead = true;
       if (blob) URL.revokeObjectURL(blob);
     };
-  }, [id, kind]);
-  return url;
+  }, [id, kind, tick]);
+  return { url, failed, retry: () => setTick((t) => t + 1) };
 }
 
 export function ObjImg({
@@ -53,7 +62,21 @@ export function ObjImg({
   alt?: string;
   title?: string;
 }) {
-  const url = useObjectBlob(id, kind);
-  if (!url) return <span className={className} aria-hidden />; // layout stub while loading
+  const { url, failed, retry } = useObjectBlob(id, kind);
+  if (failed)
+    return (
+      // biome-ignore lint/a11y/noStaticElementInteractions lint/a11y/useKeyWithClickEvents: rendered inside interactive wrappers (.att-img/.stk-img) where a real <button> is invalid HTML; pointer-only retry, keyboard users still have the parent control / 嵌在按钮内不能用真 button，点击重试
+      <span
+        className={`obj-ph obj-ph-err${className ? ` ${className}` : ""}`}
+        title={`${alt ?? "图片"} 加载失败 · 点击重试`}
+        onClick={(e) => {
+          e.stopPropagation();
+          retry();
+        }}
+      >
+        加载失败
+      </span>
+    );
+  if (!url) return <span className={`obj-ph${className ? ` ${className}` : ""}`} aria-hidden />;
   return <img src={url} className={className} alt={alt ?? ""} title={title} loading="lazy" />;
 }
