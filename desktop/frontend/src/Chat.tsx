@@ -44,6 +44,8 @@ interface Attachment {
   name: string;
   size: number;
   mime: string;
+  w?: number; // decoded px dims from objects.width/height, when known / 服务端解析的图片像素宽
+  h?: number;
 }
 
 // Reaction aggregate attached to message payloads (server-side applyEffectiveView
@@ -1054,7 +1056,15 @@ export function Chat({
                                           id={a.id}
                                           kind={a.mime === "image/gif" ? "full" : "thumb"}
                                           alt={a.name}
-                                          ctx="att"
+                                          // solo sticker-style messages get a taller cap
+                                          // — separate ctx keeps dim memory from reusing
+                                          // the wrong box. / 单图消息上限更高，独立 ctx
+                                          // 防止尺寸记忆串场景。
+                                          ctx={
+                                            atts.length === 1 && isPlaceholder ? "attstk" : "att"
+                                          }
+                                          natW={a.w}
+                                          natH={a.h}
                                         />
                                       </button>
                                     ) : (

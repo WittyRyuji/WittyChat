@@ -448,6 +448,8 @@ export function Mail() {
                         id={a.object_id}
                         alt={a.name}
                         ctx="mail"
+                        natW={a.w}
+                        natH={a.h}
                       />
                     )}
                     <a

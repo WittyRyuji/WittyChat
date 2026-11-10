@@ -1,0 +1,2 @@
+ALTER TABLE objects DROP COLUMN width;
+ALTER TABLE objects DROP COLUMN height;

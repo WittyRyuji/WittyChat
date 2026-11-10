@@ -74,6 +74,8 @@ type Attach struct {
 	Name     string    `json:"name"`
 	Mime     string    `json:"mime"`
 	Size     int64     `json:"size_bytes"`
+	W        *int      `json:"w,omitempty"` // decoded image px, if known / 图片像素宽（已知时）
+	H        *int      `json:"h,omitempty"`
 }
 
 var defaultFolders = []struct{ kind, name string }{
@@ -253,12 +255,14 @@ func (s *Store) Get(ctx context.Context, user, id uuid.UUID) (*Message, error) {
 	}
 	// attachments
 	rows, err := s.pool.Query(ctx,
-		`SELECT object_id,name,COALESCE(mime,''),size_bytes FROM mail_attachments WHERE message_id=$1`, id)
+		`SELECT a.object_id,a.name,COALESCE(a.mime,''),a.size_bytes,o.width,o.height
+		 FROM mail_attachments a LEFT JOIN objects o ON o.id=a.object_id
+		 WHERE a.message_id=$1`, id)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var a Attach
-			if rows.Scan(&a.ObjectID, &a.Name, &a.Mime, &a.Size) == nil {
+			if rows.Scan(&a.ObjectID, &a.Name, &a.Mime, &a.Size, &a.W, &a.H) == nil {
 				m.Attach = append(m.Attach, a)
 			}
 		}

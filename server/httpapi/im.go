@@ -166,6 +166,7 @@ func (d *Deps) enrichAttachments(ctx context.Context, convID uuid.UUID, events [
 		for _, o := range objs {
 			list = append(list, map[string]any{
 				"id": o.ID.String(), "name": o.Name, "size": o.Size, "mime": o.Mime,
+				"w": o.Width, "h": o.Height,
 			})
 		}
 		e.Payload["attachments"] = list

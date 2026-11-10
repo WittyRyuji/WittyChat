@@ -7,11 +7,13 @@ package httpapi
 // 图片上传后入队缩略图任务。
 
 import (
+	"bufio"
 	"context"
 	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
 	"io"
 	"net/http"
 	"os"
@@ -132,7 +134,7 @@ func (d *Deps) uploadAttachment(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"id": obj.ID.String(), "name": obj.Name, "size": obj.Size,
-		"mime": obj.Mime, "deduplicated": dedup,
+		"mime": obj.Mime, "deduplicated": dedup, "w": obj.Width, "h": obj.Height,
 	})
 }
 
@@ -167,7 +169,20 @@ func (d *Deps) downloadObject(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "private, max-age=300")
 	w.Header().Set("Content-Disposition", `attachment; filename*=UTF-8''`+escapeName(obj.Name))
-	_, _ = io.Copy(w, rc) // stream / 流式
+	var src io.Reader = rc
+	if obj.Width == nil && strings.HasPrefix(obj.Mime, "image/") {
+		// One-time header sniff backfills dims for objects that predate
+		// the columns or arrived via multipart. bufio keeps the stream
+		// seamless — DecodeConfig only consumes the header bytes.
+		// 旧对象/分段上传首次下载时从流头回填宽高——DecodeConfig 只消费
+		// 头部字节，bufio 保证后续流式拷贝无缝衔接。
+		br := bufio.NewReader(rc)
+		if cfg, _, derr := image.DecodeConfig(br); derr == nil && cfg.Width > 0 && cfg.Height > 0 {
+			d.Objects.SetDims(r.Context(), objID, cfg.Width, cfg.Height)
+		}
+		src = br
+	}
+	_, _ = io.Copy(w, src) // stream / 流式
 }
 
 // canReadObject is THE object read check: owner / object-conv member, or
@@ -292,13 +307,27 @@ func (d *Deps) thumbObject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if _, err := d.canReadObject(r.Context(), objID, uid); err != nil {
+	obj, err := d.canReadObject(r.Context(), objID, uid)
+	if err != nil {
 		if errors.Is(err, objects.ErrForbidden) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 		} else {
 			http.Error(w, "not found", http.StatusNotFound)
 		}
 		return
+	}
+	// Same one-time dim backfill as download — most images are only ever
+	// fetched via their thumb, so without this they'd never get dims.
+	// The sniff reads the OBJECT's header, never the thumb (different size).
+	// 与 download 相同的一次性回填——多数图片只走缩略图端点，不加此步
+	// 永远拿不到宽高；嗅探的是原图头部而非缩略图（尺寸不同）。
+	if obj.Width == nil && strings.HasPrefix(obj.Mime, "image/") {
+		if orc, oerr := d.Objects.Open(r.Context(), obj); oerr == nil {
+			if cfg, _, derr := image.DecodeConfig(bufio.NewReader(orc)); derr == nil && cfg.Width > 0 && cfg.Height > 0 {
+				d.Objects.SetDims(r.Context(), objID, cfg.Width, cfg.Height)
+			}
+			_ = orc.Close()
+		}
 	}
 	w.Header().Set("Cache-Control", "private, max-age=300")
 	// Path derived from a parsed uuid under a fixed data dir — safe.

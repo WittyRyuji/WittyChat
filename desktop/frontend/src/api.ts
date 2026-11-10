@@ -388,6 +388,8 @@ export interface MailAttach {
   name: string;
   mime: string;
   size_bytes: number;
+  w?: number; // decoded image px when the object has dims / 图片像素宽（已知时）
+  h?: number;
 }
 export interface MailMessage {
   id: string;

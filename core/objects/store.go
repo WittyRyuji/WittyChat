@@ -12,6 +12,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"  // DecodeConfig registration / 注册解码器
+	_ "image/jpeg" // DecodeConfig registration
+	_ "image/png"  // DecodeConfig registration
 	"io"
 	"os"
 	"path/filepath"
@@ -20,6 +24,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	_ "golang.org/x/image/webp" // DecodeConfig registration
 )
 
 var (
@@ -34,14 +39,19 @@ var (
 const MaxDirectUpload = 5 << 20 // 5 MiB
 
 type Object struct {
-	ID        uuid.UUID
-	Owner     uuid.UUID
-	ConvID    *uuid.UUID
-	Purpose   string
-	Name      string
-	Size      int64
-	SHA256    [32]byte
-	Mime      string
+	ID      uuid.UUID
+	Owner   uuid.UUID
+	ConvID  *uuid.UUID
+	Purpose string
+	Name    string
+	Size    int64
+	SHA256  [32]byte
+	Mime    string
+	// Width/Height are decoded pixel dims for image objects — NULL until
+	// sniffed at upload or lazily on download. / 图片像素宽高——上传时
+	// 嗅探，旧对象首次下载时惰性回填。
+	Width     *int
+	Height    *int
 	Location  string
 	Status    string
 	CreatedAt time.Time
@@ -127,6 +137,7 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 	}
 	var sum [32]byte
 	copy(sum[:], h.Sum(nil))
+	wPtr, hPtr := imageDims(tmpPath)
 
 	// Dedup: same sha256 by the same owner into the same conv → reuse the row.
 	// Cross-owner/conv uploads need their own row for correct ownership + ACL;
@@ -135,11 +146,12 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 	var existing Object
 	var sha []byte
 	err = s.pool.QueryRow(ctx,
-		`SELECT id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, location, status, created_at
+		`SELECT id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, width, height, location, status, created_at
 		 FROM objects WHERE sha256=$1 AND owner_user=$2 AND conv_id IS NOT DISTINCT FROM $3::uuid
 		   AND status<>'deleted' LIMIT 1`, sum[:], owner, nilUUID(convID)).
 		Scan(&existing.ID, &existing.Owner, &existing.ConvID, &existing.Purpose, &existing.Name,
-			&existing.Size, &sha, &existing.Mime, &existing.Location, &existing.Status, &existing.CreatedAt)
+			&existing.Size, &sha, &existing.Mime, &existing.Width, &existing.Height,
+			&existing.Location, &existing.Status, &existing.CreatedAt)
 	if err == nil {
 		copy(existing.SHA256[:], sha)
 		return &existing, true, nil
@@ -150,7 +162,8 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 
 	obj := &Object{
 		ID: uuid.Must(uuid.NewV7()), Owner: owner, Purpose: purpose,
-		Name: name, Size: n, SHA256: sum, Mime: mime, Location: "local", Status: "ready",
+		Name: name, Size: n, SHA256: sum, Mime: mime, Width: wPtr, Height: hPtr,
+		Location: "local", Status: "ready",
 	}
 	dst := s.path(obj.ID, sum)
 	rel, _ := filepath.Rel(s.dataDir, dst)
@@ -175,11 +188,12 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 		// it just published. / 锁内去重复查：并发同内容上传若已先提交，
 		// 复用其行——而不是撞唯一索引后误删它刚发布的文件。
 		err := tx.QueryRow(ctx,
-			`SELECT id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, location, status, created_at
+			`SELECT id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, width, height, location, status, created_at
 			 FROM objects WHERE sha256=$1 AND owner_user=$2 AND conv_id IS NOT DISTINCT FROM $3::uuid
 			   AND status<>'deleted' LIMIT 1`, sum[:], owner, nilUUID(convID)).
 			Scan(&existing.ID, &existing.Owner, &existing.ConvID, &existing.Purpose, &existing.Name,
-				&existing.Size, &sha, &existing.Mime, &existing.Location, &existing.Status, &existing.CreatedAt)
+				&existing.Size, &sha, &existing.Mime, &existing.Width, &existing.Height,
+				&existing.Location, &existing.Status, &existing.CreatedAt)
 		if err == nil {
 			copy(existing.SHA256[:], sha)
 			return errDedup
@@ -199,9 +213,9 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 			}
 		}
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO objects (id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, location, status)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'local','ready')`,
-			obj.ID, owner, convArg, purpose, name, n, sum[:], mime); err != nil {
+			`INSERT INTO objects (id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, width, height, location, status)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'local','ready')`,
+			obj.ID, owner, convArg, purpose, name, n, sum[:], mime, wPtr, hPtr); err != nil {
 			return err
 		}
 		_, err = tx.Exec(ctx,
@@ -226,6 +240,25 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 // inside the advisory-locked Put transaction. / 标记锁内去重命中：
 // 并发相同上传已提交，复用其行。
 var errDedup = errors.New("dedup: committed by racing upload")
+
+// imageDims sniffs pixel dimensions from a just-written file — best
+// effort, format-agnostic (the bytes decide, not the claimed mime).
+// (nil,nil) for non-images or anything the decoders can't parse.
+// imageDims 嗅探刚落盘文件的像素尺寸——尽力而为，由字节决定而非声称的
+// mime；非图片或解析失败返回 (nil,nil)。
+func imageDims(path string) (*int, *int) {
+	//nolint:gosec // path is a tempfile we just created inside dataDir — no user input / 自身刚建的临时文件
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil
+	}
+	defer func() { _ = f.Close() }()
+	cfg, _, err := image.DecodeConfig(f)
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
+		return nil, nil
+	}
+	return &cfg.Width, &cfg.Height
+}
 
 // ReplaceBytes streams new content into the store and re-points an
 // existing object at it — the in-place "save" path for office editing.
@@ -271,6 +304,7 @@ func (s *Store) ReplaceBytes(ctx context.Context, id uuid.UUID, r io.Reader, mim
 	if mime == "" {
 		mime = o.Mime
 	}
+	wPtr, hPtr := imageDims(tmpPath)
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		// Same serialization as Put: the file may share its storage key
 		// with another object of identical content — cleanup must consult
@@ -308,9 +342,10 @@ func (s *Store) ReplaceBytes(ctx context.Context, id uuid.UUID, r io.Reader, mim
 			return err
 		}
 		if _, err := tx.Exec(ctx,
-			`UPDATE objects SET sha256=$2, size_bytes=$3, mime=$4, location='local', segment_count=1
+			`UPDATE objects SET sha256=$2, size_bytes=$3, mime=$4, location='local', segment_count=1,
+			   width=$5, height=$6
 			 WHERE id=$1 AND status<>'deleted'`,
-			id, sum[:], n, mime); err != nil {
+			id, sum[:], n, mime, wPtr, hPtr); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx,
@@ -335,6 +370,7 @@ func (s *Store) ReplaceBytes(ctx context.Context, id uuid.UUID, r io.Reader, mim
 	}
 	_ = os.Remove(s.ThumbPath(id)) // stale preview must not survive the edit / 旧缩略图不留
 	o.SHA256, o.Size, o.Mime, o.Location = sum, n, mime, "local"
+	o.Width, o.Height = wPtr, hPtr
 	return o, nil
 }
 
@@ -345,10 +381,10 @@ func (s *Store) Get(ctx context.Context, id, userID uuid.UUID) (*Object, error) 
 	var o Object
 	var sha []byte
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, location, status, created_at
+		`SELECT id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, width, height, location, status, created_at
 		 FROM objects WHERE id=$1 AND status<>'deleted'`, id).
 		Scan(&o.ID, &o.Owner, &o.ConvID, &o.Purpose, &o.Name, &o.Size,
-			&sha, &o.Mime, &o.Location, &o.Status, &o.CreatedAt)
+			&sha, &o.Mime, &o.Width, &o.Height, &o.Location, &o.Status, &o.CreatedAt)
 	copy(o.SHA256[:], sha)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -400,10 +436,10 @@ func (s *Store) Peek(ctx context.Context, id uuid.UUID) (*Object, error) {
 	var sha []byte
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime,
-		        location, status, created_at
+		        width, height, location, status, created_at
 		 FROM objects WHERE id=$1`, id).
 		Scan(&o.ID, &o.Owner, &o.ConvID, &o.Purpose, &o.Name, &o.Size,
-			&sha, &o.Mime, &o.Location, &o.Status, &o.CreatedAt)
+			&sha, &o.Mime, &o.Width, &o.Height, &o.Location, &o.Status, &o.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -443,7 +479,7 @@ func (s *Store) LinkAttachments(ctx context.Context, convID uuid.UUID, opSeq int
 // AttachmentsOf lists objects linked to an op.
 func (s *Store) AttachmentsOf(ctx context.Context, convID uuid.UUID, opSeq int64) ([]*Object, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT o.id, o.name, o.size_bytes, o.mime FROM attachment_refs r
+		`SELECT o.id, o.name, o.size_bytes, o.mime, o.width, o.height FROM attachment_refs r
 		 JOIN objects o ON o.id = r.object_id
 		 WHERE r.conv_id=$1 AND r.op_seq=$2 AND o.status<>'deleted'`, convID, opSeq)
 	if err != nil {
@@ -453,12 +489,22 @@ func (s *Store) AttachmentsOf(ctx context.Context, convID uuid.UUID, opSeq int64
 	var out []*Object
 	for rows.Next() {
 		o := &Object{}
-		if err := rows.Scan(&o.ID, &o.Name, &o.Size, &o.Mime); err != nil {
+		if err := rows.Scan(&o.ID, &o.Name, &o.Size, &o.Mime, &o.Width, &o.Height); err != nil {
 			return nil, err
 		}
 		out = append(out, o)
 	}
 	return out, rows.Err()
+}
+
+// SetDims backfills decoded image dims — used on download for objects that
+// predate the width/height columns or arrived via multipart (where the
+// server never sees a contiguous stream). WHERE width IS NULL keeps it
+// a one-time write. / 回填图片宽高——旧对象与分段上传在首次下载时补；
+// width IS NULL 保证只写一次。
+func (s *Store) SetDims(ctx context.Context, id uuid.UUID, w, h int) {
+	_, _ = s.pool.Exec(ctx,
+		`UPDATE objects SET width=$2, height=$3 WHERE id=$1 AND width IS NULL`, id, w, h)
 }
 
 // ThumbPath is where thumbnails live — date-partitioned like objects.

@@ -513,7 +513,6 @@ button {
 
 /* read-receipt circle / 已读回执圈(飞书式):贴气泡左下角 */
 .msg-body-wrap {
-  position: relative;
   /* Column flex: .msg-bubble shrink-wraps the visible bubble; .rx-zone is
      a normal-flow row beneath it. / 纵向 flex：.msg-bubble 收缩贴合气泡，
      .rx-zone 是气泡下方的正常排版行。 */
