@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -134,7 +135,7 @@ func (s *Store) EnqueueVerifyAll(ctx context.Context) (int, error) {
 func (s *Store) OrphanGC(ctx context.Context) (int, error) {
 	cutoff := time.Now().Add(-7 * 24 * time.Hour)
 	rows, err := s.pool.Query(ctx,
-		`SELECT o.id, o.sha256, o.location FROM objects o
+		`SELECT o.id, o.location FROM objects o
 		 WHERE o.status<>'deleted' AND o.created_at < $1
 		   AND (o.status='pending'
 		        OR (COALESCE(o.purpose,'') IN ('attachment','chat','mail','hr')
@@ -154,18 +155,29 @@ func (s *Store) OrphanGC(ctx context.Context) (int, error) {
 	n := 0
 	for rows.Next() {
 		var id uuid.UUID
-		var sha []byte
 		var loc string
-		if err := rows.Scan(&id, &sha, &loc); err != nil {
+		if err := rows.Scan(&id, &loc); err != nil {
 			return n, err
 		}
 		if _, err := s.pool.Exec(ctx,
 			`UPDATE objects SET status='deleted' WHERE id=$1`, id); err == nil {
-			if loc == "local" && len(sha) == 32 {
-				var fixed [32]byte
-				copy(fixed[:], sha)
-				_ = os.Remove(s.path(id, fixed))
-				_ = os.Remove(s.legacyPath(fixed))
+			// Delete bytes by recorded key only when nothing else still
+			// points at them — a same-content object's file is shared.
+			// 仅在无其它引用时按记录的 key 删字节——同内容对象共享文件。
+			var keys []string
+			kr, kerr := s.pool.Query(ctx,
+				`SELECT storage_key FROM object_segments WHERE object_id=$1`, id)
+			if kerr == nil {
+				for kr.Next() {
+					var k string
+					if kr.Scan(&k) == nil {
+						keys = append(keys, k)
+					}
+				}
+				kr.Close()
+			}
+			for _, k := range keys {
+				_ = s.dropKeyIfOrphaned(ctx, k, loc)
 			}
 			n++
 		}
@@ -218,7 +230,21 @@ func (s *Store) MigrateCold(ctx context.Context, older time.Duration, limit int)
 		if err != nil {
 			return n, fmt.Errorf("s3 put %s: %w", c.id, err)
 		}
-		// Update row + segment atomically, then remove the local file.
+		var localKeys []string
+		lr, lerr := s.pool.Query(ctx,
+			`SELECT storage_key FROM object_segments WHERE object_id=$1`, c.id)
+		if lerr == nil {
+			for lr.Next() {
+				var k string
+				if lr.Scan(&k) == nil {
+					localKeys = append(localKeys, k)
+				}
+			}
+			lr.Close()
+		}
+		// Update row + segment atomically, then remove the local file
+		// only when no other object/version still points at it.
+		// 原子换位置后按引用计数删本地文件——同内容对象可能还在用。
 		err = func() error {
 			tx, err := s.pool.Begin(ctx)
 			if err != nil {
@@ -238,11 +264,73 @@ func (s *Store) MigrateCold(ctx context.Context, older time.Duration, limit int)
 		if err != nil {
 			return n, err
 		}
-		_ = os.Remove(s.path(c.id, c.sha))
-		_ = os.Remove(s.legacyPath(c.sha))
+		for _, lk := range localKeys {
+			_ = s.dropKeyIfOrphaned(ctx, lk, "local")
+		}
 		n++
 	}
 	return n, nil
+}
+
+// keyReferenced reports whether any NON-DELETED object's segments or any
+// retained version's segments still point at storage key `key` (a local
+// relative path or an S3 key). Content-addressed files are shared between
+// objects — delete a file only when this returns false, never by sha alone.
+// 判断存储 key（本地相对路径或 S3 key）是否仍被未删除对象的分段或保留版本
+// 引用。内容寻址文件在对象间共享——仅当返回 false 才可删除，绝不按 sha 直删。
+func (s *Store) keyReferenced(ctx context.Context, key string) (bool, error) {
+	var ok bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM object_segments g
+			JOIN objects o ON o.id = g.object_id AND o.status <> 'deleted'
+			WHERE g.storage_key = $1)
+		OR EXISTS(
+			SELECT 1 FROM object_versions v
+			WHERE v.segments @> jsonb_build_array(jsonb_build_object('key', $1::text)))`,
+		key).Scan(&ok)
+	return ok, err
+}
+
+// segmentKeys extracts the storage keys recorded for a version row —
+// the segments jsonb when present, else the seg-0 storage_key column.
+// 取版本行记录的全部存储 key：优先 segments，缺失时退回 seg0 的 storage_key。
+func segmentKeys(storageKey string, segments []byte) []string {
+	var segs []struct {
+		Key string `json:"key"`
+	}
+	if len(segments) > 0 {
+		_ = json.Unmarshal(segments, &segs)
+	}
+	out := make([]string, 0, len(segs)+1)
+	for _, sg := range segs {
+		if sg.Key != "" {
+			out = append(out, sg.Key)
+		}
+	}
+	if len(out) == 0 && storageKey != "" {
+		out = append(out, storageKey)
+	}
+	return out
+}
+
+// dropKeyIfOrphaned removes the stored bytes for `key` once nothing
+// references it — local file under dataDir or S3 object.
+// 无任何引用后移除 key 对应字节：本地文件（dataDir 下）或 S3 对象。
+func (s *Store) dropKeyIfOrphaned(ctx context.Context, key, loc string) error {
+	refs, err := s.keyReferenced(ctx, key)
+	if err != nil || refs {
+		return err
+	}
+	if loc == "s3" && s.s3 != nil {
+		_, err = s.s3.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(s.s3.cfg.Bucket), Key: aws.String(key),
+		})
+		return err
+	}
+	// storage_key is a dataDir-relative path stored with forward slashes.
+	// storage_key 是相对 dataDir 的正斜杠路径。
+	return os.Remove(filepath.Join(s.dataDir, filepath.FromSlash(key)))
 }
 
 // PurgeOldVersions deletes version-history rows older than `older`
@@ -253,7 +341,7 @@ func (s *Store) MigrateCold(ctx context.Context, older time.Duration, limit int)
 func (s *Store) PurgeOldVersions(ctx context.Context, older time.Duration) (int, error) {
 	cutoff := time.Now().Add(-older)
 	rows, err := s.pool.Query(ctx,
-		`SELECT object_id, version, sha256, location, segments
+		`SELECT object_id, version, location, storage_key, segments
 		 FROM object_versions WHERE created_at < $1`, cutoff)
 	if err != nil {
 		return 0, err
@@ -261,14 +349,14 @@ func (s *Store) PurgeOldVersions(ctx context.Context, older time.Duration) (int,
 	type ver struct {
 		obj      uuid.UUID
 		ver      int
-		sha      []byte
 		loc      string
+		key      string
 		segments []byte
 	}
 	var list []ver
 	for rows.Next() {
 		var v ver
-		if err := rows.Scan(&v.obj, &v.ver, &v.sha, &v.loc, &v.segments); err != nil {
+		if err := rows.Scan(&v.obj, &v.ver, &v.loc, &v.key, &v.segments); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -282,25 +370,12 @@ func (s *Store) PurgeOldVersions(ctx context.Context, older time.Duration) (int,
 			v.obj, v.ver, cutoff); err != nil {
 			return n, err
 		}
-		if v.loc == "s3" && s.s3 != nil {
-			var segs []struct {
-				Key string `json:"key"`
-			}
-			if len(v.segments) > 0 {
-				_ = json.Unmarshal(v.segments, &segs)
-			}
-			for _, sg := range segs {
-				if sg.Key != "" {
-					_, _ = s.s3.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-						Bucket: aws.String(s.s3.cfg.Bucket), Key: aws.String(sg.Key),
-					})
-				}
-			}
-		} else if len(v.sha) == 32 {
-			var fixed [32]byte
-			copy(fixed[:], v.sha)
-			_ = os.Remove(s.path(v.obj, fixed))
-			_ = os.Remove(s.legacyPath(fixed))
+		// Row is gone — anything still pointing at these keys is another
+		// live object or another retained version, so leave shared bytes.
+		// 行已删——仍指向这些 key 的引用来自其它在用对象或保留版本，
+		// 共享字节必须保留。
+		for _, key := range segmentKeys(v.key, v.segments) {
+			_ = s.dropKeyIfOrphaned(ctx, key, v.loc)
 		}
 		n++
 	}

@@ -36,6 +36,7 @@ type InFrame struct {
 
 type conn struct {
 	userID uuid.UUID
+	sessID uuid.UUID
 	ws     *websocket.Conn
 	send   chan Frame
 }
@@ -140,10 +141,37 @@ func (h *Hub) broadcastPresence(userID uuid.UUID, name string, online bool) {
 	}
 }
 
+// KickUser drops every live conn of a user — password change, account
+// deactivation, offboarding. 断开某用户的全部连接——改密、停用、离职。
+func (h *Hub) KickUser(userID uuid.UUID) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for c := range h.conns[userID] {
+		_ = c.ws.Close(websocket.StatusPolicyViolation, "session revoked / 会话已吊销")
+	}
+}
+
+// KickSession drops only conns bound to one session — a single-device
+// logout must not knock the user's other devices offline.
+// 仅断开绑定某会话的连接——单设备登出不能把用户其它设备踢下线。
+func (h *Hub) KickSession(userID, sessID uuid.UUID) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for c := range h.conns[userID] {
+		if c.sessID == sessID {
+			_ = c.ws.Close(websocket.StatusPolicyViolation, "session revoked / 会话已吊销")
+		}
+	}
+}
+
 // Serve runs one websocket connection until close.
 // authenticate is done by the caller; we only need the user id.
-func (h *Hub) Serve(ctx context.Context, w *websocket.Conn, userID uuid.UUID, displayName string) {
-	c := &conn{userID: userID, ws: w, send: make(chan Frame, 64)}
+// revalidate is polled every ~20s — returning false drops the conn, so a
+// deleted session or deactivated user can't keep streaming.
+// revalidate 每约 20 秒复核一次；返回 false 即断开——已删会话或停用
+// 用户不能继续收推送。
+func (h *Hub) Serve(ctx context.Context, w *websocket.Conn, userID uuid.UUID, displayName string, sessID uuid.UUID, revalidate func(context.Context) bool) {
+	c := &conn{userID: userID, sessID: sessID, ws: w, send: make(chan Frame, 64)}
 
 	h.mu.Lock()
 	if h.conns[userID] == nil {
@@ -172,6 +200,30 @@ func (h *Hub) Serve(ctx context.Context, w *websocket.Conn, userID uuid.UUID, di
 		}
 	}()
 
+	stopReval := make(chan struct{})
+	if revalidate != nil {
+		go func() {
+			t := time.NewTicker(20 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-stopReval:
+					return
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+					ok := revalidate(rctx)
+					cancel()
+					if !ok {
+						_ = w.Close(websocket.StatusPolicyViolation, "session revoked / 会话已吊销")
+						return
+					}
+				}
+			}
+		}()
+	}
+
 	// Single read loop owns the conn until it dies; inbound frames are
 	// transient only (typing/ping). CloseRead would race our reads.
 	defer func() {
@@ -183,6 +235,7 @@ func (h *Hub) Serve(ctx context.Context, w *websocket.Conn, userID uuid.UUID, di
 		}
 		h.mu.Unlock()
 
+		close(stopReval)
 		close(c.send)
 		<-writeDone
 		_ = w.Close(websocket.StatusNormalClosure, "bye")

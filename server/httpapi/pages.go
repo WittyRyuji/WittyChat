@@ -14,6 +14,7 @@ import (
 	"html/template"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 	"wittychat/core/audit"
 	"wittychat/core/auth"
 	"wittychat/core/settings"
@@ -129,7 +130,7 @@ func registerPages(mux *http.ServeMux, d *Deps) {
 			fail("两次输入的密码不一致")
 			return
 		}
-		if min := int(d.Settings.Int(r.Context(), settings.KeySecurityMinPass, settings.DefMinPassword)); len(pw) < min {
+		if min := int(d.Settings.Int(r.Context(), settings.KeySecurityMinPass, settings.DefMinPassword)); utf8.RuneCountInString(pw) < min {
 			fail(fmt.Sprintf("密码至少 %d 位", min))
 			return
 		}
@@ -150,6 +151,7 @@ func registerPages(mux *http.ServeMux, d *Deps) {
 			return
 		}
 		d.docRevalidateUser(r.Context(), userID) // reset link bumps cred version / 重置会作废旧会话
+		d.Hub.KickUser(userID)
 		if kind == auth.LinkKindActivation {
 			if err := d.Store.ActivateUser(r.Context(), userID); err != nil && !errors.Is(err, auth.ErrUserNotActive) {
 				http.Error(w, "internal", http.StatusInternalServerError)
@@ -304,7 +306,7 @@ func registerSetup(mux *http.ServeMux, d *Deps) {
 			data.Error = "邮箱和显示名必填"
 		} else if pw != pw2 {
 			data.Error = "两次输入的密码不一致"
-		} else if min := int(d.Settings.Int(r.Context(), settings.KeySecurityMinPass, settings.DefMinPassword)); len(pw) < min {
+		} else if min := int(d.Settings.Int(r.Context(), settings.KeySecurityMinPass, settings.DefMinPassword)); utf8.RuneCountInString(pw) < min {
 			data.Error = fmt.Sprintf("密码至少 %d 位", min)
 		}
 		if data.Error != "" {

@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
+	"time"
 	"wittychat/core/agents"
 	"wittychat/core/audit"
 	"wittychat/core/auth"
@@ -50,6 +52,33 @@ type Deps struct {
 	HR          *hr.Store
 	Docs        *docs.Store
 	Office      *OfficeConfig // nil → OnlyOffice routes off / 未配置则不挂编辑路由
+
+	// settingVals memoizes numeric workspace settings ~10s so hot paths
+	// (per-keystroke log cap) don't hit the DB every frame.
+	// 数值设置约 10 秒缓存——热路径（按键级日志上限）不能每帧打库。
+	setMu      sync.Mutex
+	settingVal map[string]cachedSetting
+}
+
+type cachedSetting struct {
+	v   int64
+	exp time.Time
+}
+
+// settingInt reads a numeric workspace setting through a ~10s cache.
+// 经约 10 秒缓存读取数值型工作区设置。
+func (d *Deps) settingInt(ctx context.Context, key string, def int64) int64 {
+	d.setMu.Lock()
+	defer d.setMu.Unlock()
+	if d.settingVal == nil {
+		d.settingVal = map[string]cachedSetting{}
+	}
+	if e, ok := d.settingVal[key]; ok && time.Now().Before(e.exp) {
+		return e.v
+	}
+	v := d.Settings.Int(ctx, key, def)
+	d.settingVal[key] = cachedSetting{v: v, exp: time.Now().Add(10 * time.Second)}
+	return v
 }
 
 // New builds the root handler: API routes + HTML pages + healthz.

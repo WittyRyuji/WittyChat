@@ -205,6 +205,7 @@ func (d *Deps) adminSetStatus(status, action string) func(ctx context.Context, i
 			return nil, err
 		}
 		d.docRevalidateUser(ctx, uid)
+		d.Hub.KickUser(uid)
 		d.Audit.Log(ctx, &admin.ID, audit.ActorAdmin, action, target.Email, nil, clientIPCtx(ctx))
 		return &struct{}{}, nil
 	}
@@ -240,6 +241,7 @@ func (d *Deps) adminOffboard(ctx context.Context, in *struct {
 		return nil, err
 	}
 	d.docRevalidateUser(ctx, uid)
+	d.Hub.KickUser(uid)
 	d.Audit.Log(ctx, &admin.ID, audit.ActorAdmin, "admin.user.offboard", target.Email,
 		map[string]string{"transfer_to": toUser.Email}, clientIPCtx(ctx))
 	return &struct{}{}, nil

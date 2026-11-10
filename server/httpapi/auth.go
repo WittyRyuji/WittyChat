@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
+	"unicode/utf8"
 	"wittychat/core/audit"
 	"wittychat/core/auth"
 	"wittychat/core/settings"
@@ -107,8 +109,26 @@ func (d *Deps) login(ctx context.Context, in *struct {
 	key := email + "|" + ipStr
 	acctKey := email + "|*"
 
-	if !d.Limiter.Allow(key) || !d.AcctLimiter.Allow(acctKey) {
+	// Policy from workspace settings so admin changes take effect without
+	// a restart. / 每次登录读取 security.lock_* 设置，改动即时生效。
+	th := int(d.Settings.Int(ctx, settings.KeySecurityLockN, settings.DefLockThreshold))
+	lm := time.Duration(d.Settings.Int(ctx, settings.KeySecurityLockMin, settings.DefLockMinutes)) * time.Minute
+	d.Limiter.Configure(th, 5*time.Minute, lm)
+	d.AcctLimiter.Configure(th*2, 5*time.Minute, lm)
+
+	// The email+IP key still hard-locks (429); the account-wide key only
+	// slows — an attacker spraying one account must not be able to lock
+	// its real owner out. / 账号+IP 键仍硬锁；仅账号键只减速——分布式
+	// 攻击不能借此把真实属主锁在门外。
+	if !d.Limiter.Allow(key) {
 		return nil, huma.Error429TooManyRequests("too many failed attempts, try later / 失败过多，稍后再试")
+	}
+	if delay := d.AcctLimiter.Penalty(acctKey); delay > 0 {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
 	}
 
 	u, err := d.Store.UserByEmail(ctx, email)
@@ -171,6 +191,7 @@ func (d *Deps) logout(ctx context.Context, in *struct {
 	}
 	_ = d.Store.RevokeSession(ctx, u.ID, sess.ID)
 	d.docRevalidateUser(ctx, u.ID)
+	d.Hub.KickSession(u.ID, sess.ID) // this device only / 仅断开本设备连接
 	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.logout", u.Email, nil, clientIPCtx(ctx))
 	return &struct{}{}, nil
 }
@@ -212,7 +233,7 @@ func (d *Deps) activate(ctx context.Context, in *struct {
 	}
 	// Workspace password floor (security.min_password, NIST default 15).
 	// 工作区密码下限（security.min_password，NIST 默认 15）。
-	if min := int(d.Settings.Int(ctx, settings.KeySecurityMinPass, settings.DefMinPassword)); len(in.Body.Password) < min {
+	if min := int(d.Settings.Int(ctx, settings.KeySecurityMinPass, settings.DefMinPassword)); utf8.RuneCountInString(in.Body.Password) < min {
 		return nil, huma.Error400BadRequest(fmt.Sprintf("password too short: at least %d chars / 密码至少 %d 位", min, min))
 	}
 	phc, err := auth.HashPassword(in.Body.Password)
@@ -223,6 +244,7 @@ func (d *Deps) activate(ctx context.Context, in *struct {
 		return nil, err
 	}
 	d.docRevalidateUser(ctx, userID) // reset link bumps cred version / 重置会作废旧会话
+	d.Hub.KickUser(userID)
 	if kind == auth.LinkKindActivation {
 		if err := d.Store.ActivateUser(ctx, userID); err != nil {
 			return nil, err
@@ -299,6 +321,7 @@ func (d *Deps) revokeSession(ctx context.Context, in *struct {
 		return nil, err
 	}
 	d.docRevalidateUser(ctx, u.ID)
+	d.Hub.KickSession(u.ID, sid)
 	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "auth.session.revoke", in.ID, nil, clientIPCtx(ctx))
 	return &struct{}{}, nil
 }

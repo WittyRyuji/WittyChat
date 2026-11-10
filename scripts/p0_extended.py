@@ -948,6 +948,35 @@ try:
     check("kick member from group", st in (200, 204), str(st))
     check("kicked member's doc socket closed", ws_closed_within(wsk, 3))
 
+    # unshare drops a live member socket the same way
+    st, b = req("POST", "/api/v1/conversations/group",
+                {"title": f"p0x-ush-{uuid.uuid4().hex[:4]}", "is_public": False,
+                 "member_ids": [p0x_id]}, admin)
+    ugrp = json.loads(b)["id"]
+    st, b = req("POST", "/api/v1/docs", {"title": "p0x-ush-doc"}, admin)
+    udoc = json.loads(b)["id"]
+    req("POST", f"/api/v1/docs/{udoc}/share", {"conv_id": ugrp}, admin)
+    wsu = _wsm.create_connection(f"ws://localhost:8080/ws/doc/{udoc}?token={p0x}", timeout=5)
+    wsu.recv()
+    st, _ = req("POST", f"/api/v1/docs/{udoc}/unshare", {"conv_id": ugrp}, admin)
+    check("owner unshares shared doc", st == 204, str(st))
+    check("unshared member's doc socket closed", ws_closed_within(wsu, 3))
+
+    # a >32KB frame must not kill the socket — the library's default read
+    # limit used to disconnect any client whose doc state crossed it.
+    try:
+        wb = _wsm.create_connection(f"ws://localhost:8080/ws/doc/{cdoc_id}?token={alice}", timeout=5)
+        wb.recv()
+        wb.send(_vu(1) + _vb(b"A" * 40000), _wsm.ABNF.OPCODE_BINARY)  # ~40KB awareness
+        wb.send(_vu(0) + _vu(2) + _vb(b"p0x-40k-survived"), _wsm.ABNF.OPCODE_BINARY)
+        time.sleep(0.4)
+        wb.close()
+        _, frames = ws_replay(cdoc_id, alice)
+        check("doc ws survives >32KB frame",
+              any(b"p0x-40k-survived" in f for f in frames))
+    except Exception as e:
+        check("doc ws survives >32KB frame", False, str(e)[:60])
+
     # deleting a doc disconnects its live editors; soft-deleted doc is gone
     wsd = _wsm.create_connection(f"ws://localhost:8080/ws/doc/{sh_id}?token={p0x}", timeout=5)
     wsd.recv()

@@ -375,7 +375,12 @@ export function Chat({
         // Logo via header-authed blob — keeps the session token out of
         // image URLs. logo 经鉴权 blob 取回，URL 不携带会话 token。
         authBlob(api2.workspaceLogoPath())
-          .then((b) => setWsLogo(URL.createObjectURL(b)))
+          .then((b) =>
+            setWsLogo((prev) => {
+              if (prev.startsWith("blob:")) URL.revokeObjectURL(prev);
+              return URL.createObjectURL(b);
+            })
+          )
           .catch(() => {});
       })
       .catch(() => {});
@@ -437,6 +442,10 @@ export function Chat({
     return () => {
       dead = true;
       wsRef.current?.close();
+      setWsLogo((prev) => {
+        if (prev.startsWith("blob:")) URL.revokeObjectURL(prev);
+        return prev;
+      });
     };
   }, [refreshDirectory, fetchDelta, loadMembers]);
 
@@ -1403,15 +1412,19 @@ export function Chat({
                           {d.shared && <i className="dp-shared">分享</i>}
                           <time>{d.updated_at?.slice(0, 10)}</time>
                         </button>
+                        {/* Unshare needs doc-owner rights — hide it for
+                            plain members instead of letting them 403. */}
                         {d.shared ? (
-                          <button
-                            type="button"
-                            className="dp-del"
-                            title="移出本群（不删除文档）"
-                            onClick={() => unshareConvDoc(d)}
-                          >
-                            ⊘
-                          </button>
+                          d.owner === me.id && (
+                            <button
+                              type="button"
+                              className="dp-del"
+                              title="移出本群（不删除文档）"
+                              onClick={() => unshareConvDoc(d)}
+                            >
+                              ⊘
+                            </button>
+                          )
                         ) : (
                           <button
                             type="button"

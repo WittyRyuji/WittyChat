@@ -22,6 +22,7 @@ import (
 	"wittychat/core/docs"
 	"wittychat/core/mail"
 	"wittychat/core/objects"
+	"wittychat/core/settings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -105,13 +106,17 @@ func (w *worker) dispatch(ctx context.Context, t *objects.Task) error {
 		if err != nil {
 			return err
 		}
-		// Retention sweeps: prior object versions and archived doc updates
-		// past the audit window (30d matches the audit-retention setting).
-		// 保留期清扫：超审计窗口（30 天）的对象历史版本与文档更新归档。
-		v, verr := w.store.PurgeOldVersions(ctx, 30*24*time.Hour)
+		// Retention sweeps past the audit window — the workspace setting
+		// audit.retention_days (default 180d) governs both object version
+		// history and archived doc-update rows.
+		// 审计窗口保留期清扫——audit.retention_days（默认 180 天）同时约束
+		// 对象历史版本与文档更新归档。
+		window := time.Duration(settings.New(w.pool).Int(
+			ctx, settings.KeyAuditRetention, settings.DefAuditRetention)) * 24 * time.Hour
+		v, verr := w.store.PurgeOldVersions(ctx, window)
 		if verr == nil {
 			var a int64
-			a, verr = docs.PurgeArchive(ctx, w.pool, 30*24*time.Hour)
+			a, verr = docs.PurgeArchive(ctx, w.pool, window)
 			if verr == nil {
 				log.Printf("gc: %d versions + %d archived updates purged", v, a)
 			}

@@ -401,7 +401,10 @@ func (d *Deps) sendMessage(ctx context.Context, in *struct {
 			return nil, huma.Error500InternalServerError("attachment link failed / 附件关联失败")
 		}
 	}
-	if !existed {
+	// Notify on the first send AND on a retry that carries attachments —
+	// a first attempt that died in LinkAttachments never told anyone.
+	// 首发与带附件的重试都通知——死在附件关联那步的首发从未广播过。
+	if !existed || len(objIDs) > 0 {
 		d.notifyMembers(ctx, convID, op.Seq, u.ID)
 	}
 	status := http.StatusOK

@@ -7,8 +7,10 @@ package httpapi
 // 只推 conv_update/presence/typing 帧——真实数据走 HTTP ops 接口。
 
 import (
+	"context"
 	"net/http"
 	"strings"
+	"wittychat/core/auth"
 
 	"github.com/coder/websocket"
 )
@@ -37,7 +39,8 @@ func wsToken(r *http.Request) string {
 
 func registerWS(mux *http.ServeMux, d *Deps) {
 	mux.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
-		sess, err := d.Store.ValidateSession(r.Context(), wsToken(r))
+		tok := wsToken(r)
+		sess, err := d.Store.ValidateSession(r.Context(), tok)
 		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -58,6 +61,16 @@ func registerWS(mux *http.ServeMux, d *Deps) {
 		if err != nil {
 			return
 		}
-		d.Hub.Serve(r.Context(), ws, u.ID, u.DisplayName)
+		// Re-check the session periodically — a logged-out or deactivated
+		// user must stop receiving pushes, not just fail new REST calls.
+		// 周期复核会话——登出或停用的用户必须停止接收推送，而非仅 REST 401。
+		revalidate := func(ctx context.Context) bool {
+			if _, err := d.Store.ValidateSession(ctx, tok); err != nil {
+				return false
+			}
+			uu, err := d.Store.UserByID(ctx, u.ID)
+			return err == nil && uu.Status == auth.StatusActive
+		}
+		d.Hub.Serve(r.Context(), ws, u.ID, u.DisplayName, sess.ID, revalidate)
 	})
 }

@@ -253,26 +253,25 @@ func (s *Store) Rename(ctx context.Context, docID uuid.UUID, title string) error
 // （docs.log_max_mb）限制，成员无法无限写库。
 func (s *Store) AppendUpdate(ctx context.Context, docID uuid.UUID, data []byte, maxLogBytes int64) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx,
-			`UPDATE docs SET updated_at=now() WHERE id=$1 AND deleted_at IS NULL`, docID)
-		if err != nil {
+		// One UPDATE takes the doc row lock (serializing appends for this
+		// doc), bumps the running log_bytes total in the same write, and
+		// hands it back — the cap check costs O(1) instead of a full-log
+		// SUM per keystroke. 一次 UPDATE 拿文档行锁（串行化本文档的追加）、
+		// 顺带维护 log_bytes 计数并返回——上限检查 O(1)，不再逐键击全表 SUM。
+		var logBytes int64
+		if err := tx.QueryRow(ctx,
+			`UPDATE docs SET log_bytes = log_bytes + $2, updated_at = now()
+			 WHERE id=$1 AND deleted_at IS NULL RETURNING log_bytes`,
+			docID, int64(len(data))).Scan(&logBytes); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
 			return err
 		}
-		if tag.RowsAffected() == 0 {
-			return ErrNotFound
+		if maxLogBytes > 0 && logBytes > maxLogBytes {
+			return ErrLogFull
 		}
-		if maxLogBytes > 0 {
-			var total int64
-			if err := tx.QueryRow(ctx,
-				`SELECT COALESCE(SUM(LENGTH(data)),0) FROM doc_updates WHERE doc_id=$1`,
-				docID).Scan(&total); err != nil {
-				return err
-			}
-			if total+int64(len(data)) > maxLogBytes {
-				return ErrLogFull
-			}
-		}
-		_, err = tx.Exec(ctx, `INSERT INTO doc_updates (doc_id, data) VALUES ($1,$2)`, docID, data)
+		_, err := tx.Exec(ctx, `INSERT INTO doc_updates (doc_id, data) VALUES ($1,$2)`, docID, data)
 		return err
 	})
 }
@@ -334,6 +333,14 @@ func (s *Store) CompactIfLarge(ctx context.Context, docID uuid.UUID, snapshot []
 		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO doc_updates (doc_id, data) VALUES ($1,$2)`, docID, snapshot); err != nil {
+			return err
+		}
+		// Recompute the byte counter over what remains (snapshot + any
+		// rows past upTo). / 重算剩余日志字节数（快照 + upTo 之后的行）。
+		if _, err := tx.Exec(ctx,
+			`UPDATE docs SET log_bytes = (
+				SELECT COALESCE(SUM(LENGTH(u.data)),0) FROM doc_updates u WHERE u.doc_id=$1)
+			 WHERE id=$1`, docID); err != nil {
 			return err
 		}
 		done = true

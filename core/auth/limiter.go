@@ -90,6 +90,30 @@ func (l *Limiter) Allow(key string) bool {
 	return true
 }
 
+// Penalty returns a progressive delay for a key past its threshold —
+// a slowdown rather than a lockout, so spraying an account can't deny
+// service to its owner. 键超过阈值后的渐进延迟——减速而非硬锁定，
+// 泼水的攻击者无法借此拒绝真实用户登录。
+func (l *Limiter) Penalty(key string) time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	l.sweepLocked(now)
+	r, ok := l.fails[key]
+	if !ok || now.Sub(r.first) > l.window {
+		return 0
+	}
+	over := r.count - l.maxFail + 1
+	if over <= 0 {
+		return 0
+	}
+	d := time.Duration(over) * time.Second
+	if d > 15*time.Second {
+		d = 15 * time.Second
+	}
+	return d
+}
+
 // Fail records a failed attempt; returns whether the key is now locked.
 func (l *Limiter) Fail(key string) bool {
 	l.mu.Lock()

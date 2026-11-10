@@ -6,9 +6,12 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"errors"
+	"log"
 	"net/http"
 	"sync"
 	"time"
+	"wittychat/core/docs"
 	"wittychat/core/settings"
 
 	"github.com/coder/websocket"
@@ -159,6 +162,10 @@ func (d *Deps) docWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	// The library default is 32 KiB — a full-state sync reply for any doc
+	// past that size would be killed mid-handshake (every client looped).
+	// 库默认 32 KiB：文档态一旦超过，全量同步回复会被掐死在握手期。
+	ws.SetReadLimit(docMaxMsg)
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	owner, _ := d.Docs.OwnerOf(r.Context(), docID)
@@ -317,7 +324,17 @@ func (d *Deps) docServe(ctx context.Context, c *docConn) {
 					snapshotPending = false
 				}
 				if perr != nil {
-					return // doc deleted or DB down: stop relaying / 文档已删或库不可用
+					if errors.Is(perr, docs.ErrLogFull) {
+						// Log at the workspace cap: keep relaying so live
+						// collaboration continues; the update just isn't
+						// persisted until the owner's next compaction.
+						// A late joiner only sees what's in the log.
+						// 日志到顶：继续转发保活协作，该 update 只是不落库，
+						// 待属主下次压缩恢复持久化；后进者只见日志已有内容。
+						log.Printf("docsync %s: log full, update dropped (live-sync only)", c.docID)
+					} else {
+						return // doc deleted or DB down: stop relaying / 文档已删或库不可用
+					}
 				}
 				d.docBroadcast(c.docID, c, raw)
 			}
@@ -343,7 +360,7 @@ func (d *Deps) docMaxLogBytes(ctx context.Context) int64 {
 	if d.Settings == nil {
 		return 0
 	}
-	return d.Settings.Int(ctx, settings.KeyDocsLogMaxMB, settings.DefDocsLogMaxMB) << 20
+	return d.settingInt(ctx, settings.KeyDocsLogMaxMB, settings.DefDocsLogMaxMB) << 20
 }
 
 // docBroadcast sends a frame to every conn in the room except src.

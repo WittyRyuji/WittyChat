@@ -166,16 +166,18 @@ func TestGroupManageAndSearch(t *testing.T) {
 	if _, err := s.RenameConv(ctx, m1, g.ID, "x"); !errors.Is(err, ErrNoPermission) {
 		t.Fatalf("member rename: want ErrNoPermission, got %v", err)
 	}
-	if _, err := s.RenameConv(ctx, owner, g.ID, "team-beta"); err != nil {
+	// Unique suffix — a dirty dev DB may hold stale public "team-beta".
+	beta := "team-beta-" + uuid.Must(uuid.NewV7()).String()[:8]
+	if _, err := s.RenameConv(ctx, owner, g.ID, beta); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 	dir, _ := s.Directory(ctx, m1)
-	if dir[0].Title != "team-beta" {
+	if dir[0].Title != beta {
 		t.Fatalf("title=%q", dir[0].Title)
 	}
 
 	// Public search + join.
-	hits, err := s.SearchPublicGroups(ctx, outsider, "beta", 10)
+	hits, err := s.SearchPublicGroups(ctx, outsider, beta, 10)
 	if err != nil || len(hits) != 1 || hits[0].Joined {
 		t.Fatalf("public search: %v %+v", err, hits)
 	}

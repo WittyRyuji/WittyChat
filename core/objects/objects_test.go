@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"testing"
 	"time"
@@ -138,5 +139,104 @@ func TestPurgeOldVersions(t *testing.T) {
 		`SELECT count(*) FROM object_versions WHERE object_id=$1`, obj.ID).Scan(&left)
 	if n != 1 || left != 0 {
 		t.Fatalf("purged=%d left=%d", n, left)
+	}
+}
+
+// Files are content-addressed and shared between objects — PurgeOldVersions
+// must not unlink a physical file the live object or another object still
+// references. Regression for the edit-back case A→B→A.
+func TestPurgeSharedFileKept(t *testing.T) {
+	s, ctx, mk := testEnv(t)
+	alice, bob := mk(), mk()
+	put := func(owner uuid.UUID, content string) *Object {
+		o, _, err := s.Put(ctx, owner, uuid.Nil, "attach", "f.bin", "application/octet-stream",
+			bytes.NewReader([]byte(content)), 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return o
+	}
+	readAll := func(o *Object) string {
+		r, err := s.Open(ctx, o)
+		if err != nil {
+			t.Fatalf("open %s: %v", o.ID, err)
+		}
+		defer func() { _ = r.Close() }()
+		got, _ := io.ReadAll(r)
+		return string(got)
+	}
+
+	v1 := "content-V1-" + uuid.NewString()
+	o1 := put(alice, v1)
+	o2 := put(bob, v1) // same bytes → same physical file under o1's dir
+	if _, err := s.ReplaceBytes(ctx, o1.ID, bytes.NewReader([]byte("content-V2")), "", 1<<20, &alice); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReplaceBytes(ctx, o1.ID, bytes.NewReader([]byte(v1)), "", 1<<20, &alice); err != nil {
+		t.Fatal(err)
+	}
+	// Backdate all version rows past the window so both purge.
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE object_versions SET created_at=now()-interval '2 days'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PurgeOldVersions(ctx, 24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	// v1's file is still the live file of o1 AND the file of o2 — both
+	// must survive; v2's orphaned file may go.
+	if got := readAll(o1); got != v1 {
+		t.Fatalf("o1 content %q want %q", got, v1)
+	}
+	if got := readAll(o2); got != v1 {
+		t.Fatalf("o2 content %q want %q", got, v1)
+	}
+}
+
+// OrphanGC must not unlink a file still referenced by a live object with
+// the same content hash.
+func TestOrphanGCSharedFileKept(t *testing.T) {
+	s, ctx, mk := testEnv(t)
+	alice, bob := mk(), mk()
+	same := "same-content-" + uuid.NewString()
+
+	o1, _, err := s.Put(ctx, alice, uuid.Nil, "attach", "a.bin", "", bytes.NewReader([]byte(same)), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o2, _, err := s.Put(ctx, bob, uuid.Nil, "hr", "b.bin", "", bytes.NewReader([]byte(same)), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep o2 alive via an HR reference; backdate o1 past the 7d window.
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO hr_requests (id, requester, kind, payload)
+		 VALUES ($1,$2,'leave', jsonb_build_object('attachment_object_ids', jsonb_build_array($3::text)))`,
+		uuid.Must(uuid.NewV7()), bob, o2.ID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE objects SET status='pending', created_at=now()-interval '8 days' WHERE id=$1`, o1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.OrphanGC(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var st string
+	if err := s.pool.QueryRow(ctx,
+		`SELECT status FROM objects WHERE id=$1`, o1.ID).Scan(&st); err != nil {
+		t.Fatal(err)
+	}
+	if st != "deleted" {
+		t.Fatalf("o1 status %q want deleted", st)
+	}
+	r, err := s.Open(ctx, o2)
+	if err != nil {
+		t.Fatalf("o2 unreadable after gc: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+	got, _ := io.ReadAll(r)
+	if string(got) != same {
+		t.Fatalf("o2 content %q want %q", got, same)
 	}
 }

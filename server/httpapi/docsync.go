@@ -42,7 +42,10 @@ const (
 	syncStep2 = 1
 	syncUpd   = 2
 
-	docMaxMsg = 4 << 20 // 4 MiB frame cap
+	// Frame cap must exceed a full doc state: docs default to a 100 MB log,
+	// so a whole-state SyncStep2 can approach that. 帧上限须大于整文档态：
+	// 文档日志默认 100 MB，全量同步帧会逼近这个量级。
+	docMaxMsg = 128 << 20 // 128 MiB
 )
 
 // emptyYjsUpdate is a valid zero-content Yjs update (0 structs, 0
