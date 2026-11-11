@@ -1,0 +1,14 @@
+.git
+.env
+.env.*
+!deploy/.env.example
+data
+release
+**/node_modules
+**/dist
+**/bin
+**/*.exe
+**/*.log
+**/*.db
+**/*.sqlite3*
+**/*.syso

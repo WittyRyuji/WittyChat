@@ -144,7 +144,9 @@
 - 单 Go module（`wittychat`），扁平组件目录：`server/ worker/ core/ shared/ desktop/ admin/ deploy/ docs/`。
 - 依赖边界用 **depguard** 写死在 `.golangci.yml`：`desktop→shared`；`server/worker→core+shared`；`shared` 无项目内依赖。已 canary 验证拦截生效。`package main` 本身不可被 import，天然再挡一层。
 - 迁移：golang-migrate，SQL 文件在 `core/migrations/`。
-- CI：自有 GitLab（git.wittyloong.com），`.gitlab-ci.yml`；镜像 tag 首次跑绿后锁定。
+- CI：公开仓库迁至 GitHub（WittyRyuji/WittyChat）；`.github/workflows/ci.yml` 负责验证，
+  `release.yml` 在 alpha 标签推送后构建并发布预发布。旧 `.gitlab-ci.yml` 仅保留历史参考。
+  / Public CI and alpha releases use GitHub Actions; the GitLab configuration is historical.
 - 本机工具链：Go 1.27.3（`D:\Develop\tools\go`，已入用户 PATH）、wails3 v3.0.0、golangci-lint 2.15.0、migrate、pnpm 经 corepack（`corepack pnpm`）、Docker Desktop 29.9.2。
 
 ## 11. 待定

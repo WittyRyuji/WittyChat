@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: wittychat
+          POSTGRES_PASSWORD: ci-test-only
+          POSTGRES_DB: wittychat_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U wittychat -d wittychat_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CGO_ENABLED: "0"
+      WITTYCHAT_TEST_DB_URL: postgres://wittychat:ci-test-only@localhost:5432/wittychat_test?sslmode=disable
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+      - name: Install locked frontend dependencies
+        run: |
+          npm install --global pnpm@12.16.1
+          pnpm --dir admin install --frozen-lockfile
+          pnpm --dir desktop/frontend install --frozen-lockfile
+      - name: Frontend tests and embedded assets
+        run: |
+          pnpm --dir desktop/frontend test
+          pnpm --dir desktop/frontend build
+          pnpm --dir admin build
+      - name: Migrate isolated test database
+        env:
+          WITTYCHAT_DB_URL: ${{ env.WITTYCHAT_TEST_DB_URL }}
+        run: go run ./server migrate -dir up
+      - name: Backend and cache tests
+        run: go test -p 1 ./core/... ./server/... ./worker/... ./shared/... ./desktop/cache/...
+      - name: Build and vet backend
+        run: |
+          go build ./server ./worker
+          go vet ./core/... ./server/... ./worker/... ./shared/... ./desktop/cache/...

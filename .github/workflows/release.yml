@@ -1,0 +1,76 @@
+name: Release Alpha
+
+on:
+  push:
+    tags: ["v*-alpha*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  package:
+    needs: verify
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+      - name: Install locked dependencies and build frontends
+        shell: pwsh
+        run: |
+          npm install --global pnpm@12.16.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm --dir admin install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm --dir desktop/frontend install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm --dir admin build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm --dir desktop/frontend build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Package exact tagged sources
+        shell: pwsh
+        run: ./scripts/package-release.ps1 -ExpectedTag "${{ github.ref_name }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-release
+          path: |
+            release/*.zip
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-release
+          path: release
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" release/*.zip release/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease \
+            --title "WittyChat $version" \
+            --notes-file "docs/RELEASE_NOTES_${version}.md"
