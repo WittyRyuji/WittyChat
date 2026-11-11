@@ -14,9 +14,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 	"wittychat/core/auth"
 	"wittychat/core/docs"
+	"wittychat/core/mail"
 	"wittychat/core/objects"
 
 	"github.com/google/uuid"
@@ -40,6 +42,10 @@ type Job struct {
 	CreatorAlts  []string        `json:"-"`
 	Discovered   bool            `json:"-"`
 	DiscoverDone []int           `json:"-"`
+	// UserToken jobs run as the creator via OAuth; CreatorOpenID then
+	// identifies their own documents exactly. 员工授权任务：按 open_id 认本人文档。
+	UserToken     bool   `json:"user_token"`
+	CreatorOpenID string `json:"-"`
 }
 type Item struct {
 	ObjType  string      `json:"obj_type"`
@@ -59,11 +65,23 @@ var (
 )
 
 type Store struct {
-	pool    *pgxpool.Pool
-	objects *objects.Store
-	docs    *docs.Store
-	key     []byte
-	http    *http.Client
+	pool      *pgxpool.Pool
+	objects   *objects.Store
+	docs      *docs.Store
+	key       []byte
+	http      *http.Client
+	mail      *mail.Store
+	auth      *auth.Store
+	publicURL string
+}
+
+// WithMigration wires what the whole-tenant migration needs on top of doc
+// import: the mail store, the account store (provisioning) and the public
+// URL used in activation links and the OAuth redirect.
+// 整体迁移所需：邮件、账号（建号）与对外地址（激活链接、授权回调）。
+func (s *Store) WithMigration(m *mail.Store, a *auth.Store, publicURL string) *Store {
+	s.mail, s.auth, s.publicURL = m, a, strings.TrimRight(publicURL, "/")
+	return s
 }
 
 func New(pool *pgxpool.Pool, objects *objects.Store, ds *docs.Store, secretKey []byte) *Store {
@@ -140,6 +158,53 @@ func (s *Store) appCreds(ctx context.Context) (*fc, error) {
 		base: strings.TrimRight(baseURL, "/"), appID: appID, secret: string(secret),
 		http: s.http, emailCache: map[string]string{},
 	}, nil
+}
+
+// throttle paces calls per endpoint class across the whole process — the
+// limits are per app, and several lanes share one app.
+// 按接口类别全进程限速：飞书限额按应用计，多条泳道共用一个应用。
+var (
+	throttleMu   sync.Mutex
+	throttleNext = map[string]time.Time{}
+)
+
+func throttle(ctx context.Context, key string, every time.Duration) error {
+	if every <= 0 {
+		return nil
+	}
+	throttleMu.Lock()
+	now := time.Now()
+	at := throttleNext[key]
+	if at.Before(now) {
+		at = now
+	}
+	throttleNext[key] = at.Add(every)
+	throttleMu.Unlock()
+	if d := time.Until(at); d > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(d):
+		}
+	}
+	return nil
+}
+
+// paceFor maps a path to its documented per-app rate. 文档标注的频率限制。
+func paceFor(path string) (string, time.Duration) {
+	switch {
+	case strings.Contains(path, "/attachments/download_url"):
+		return "mail.att", time.Second
+	case strings.Contains(path, "/messages/batch_get"), strings.HasSuffix(strings.SplitN(path, "?", 2)[0], "/messages"):
+		return "mail.msg", 110 * time.Millisecond
+	case strings.Contains(path, "/mail/v1/") && strings.Contains(path, "/folders"):
+		return "mail.folder", 210 * time.Millisecond
+	case strings.Contains(path, "/im/v1/messages"):
+		return "im.send", 25 * time.Millisecond
+	case strings.Contains(path, "/drive/v1/export_tasks"), strings.Contains(path, "/wiki/v2/"):
+		return "docs", 620 * time.Millisecond
+	}
+	return "", 0
 }
 
 // CreateJob stores a self/admin import job (no credentials — workspace-level).
@@ -237,11 +302,14 @@ func (s *Store) DeleteJob(ctx context.Context, id uuid.UUID) error {
 func (s *Store) loadJob(ctx context.Context, id uuid.UUID) (*Job, error) {
 	j := &Job{ID: id}
 	err := s.pool.QueryRow(ctx,
-		`SELECT name,mode,roots,status,COALESCE(last_error,''),created_by,discovered,COALESCE(discover_done,'{}')
+		`SELECT name,mode,roots,status,COALESCE(last_error,''),created_by,discovered,COALESCE(discover_done,'{}'),user_token
 		 FROM feishu_import_jobs WHERE id=$1`, id).
-		Scan(&j.Name, &j.Mode, &j.Roots, &j.Status, &j.LastError, &j.CreatedBy, &j.Discovered, &j.DiscoverDone)
+		Scan(&j.Name, &j.Mode, &j.Roots, &j.Status, &j.LastError, &j.CreatedBy, &j.Discovered, &j.DiscoverDone, &j.UserToken)
 	if err != nil {
 		return nil, err
+	}
+	if j.UserToken {
+		_ = s.pool.QueryRow(ctx, `SELECT open_id FROM feishu_user_tokens WHERE user_id=$1`, j.CreatedBy).Scan(&j.CreatorOpenID)
 	}
 	// creator's own emails for the self-mode ownership check
 	_ = s.pool.QueryRow(ctx, `SELECT email FROM users WHERE id=$1`, j.CreatedBy).Scan(&j.CreatorEmail)
@@ -285,12 +353,23 @@ type fc struct {
 	exp         time.Time
 	http        *http.Client
 	emailCache  map[string]string // open_id → email ("!" prefix = not found)
+	// userToken, when set, makes the client act as an employee (OAuth)
+	// instead of the app. 设置后以员工身份（OAuth）调用。
+	userToken func(ctx context.Context) (string, error)
 }
 
 // token fetches + caches a tenant_access_token. 取租户令牌（缓存）。
 func (c *fc) token(ctx context.Context) (string, error) {
 	if c.accessToken != "" && time.Now().Before(c.exp) {
 		return c.accessToken, nil
+	}
+	if c.userToken != nil {
+		t, err := c.userToken(ctx)
+		if err != nil {
+			return "", err
+		}
+		c.accessToken, c.exp = t, time.Now().Add(90*time.Minute)
+		return t, nil
 	}
 	body, _ := json.Marshal(map[string]string{"app_id": c.appID, "app_secret": c.secret})
 	resp, err := c.do(ctx, http.MethodPost, "/open-apis/auth/v3/tenant_access_token/internal", body, false)
@@ -314,22 +393,25 @@ func (c *fc) token(ctx context.Context) (string, error) {
 	return c.accessToken, nil
 }
 
-// do performs one OpenAPI call; set auth=true to inject the token.
+// do performs one OpenAPI call; set authz=true to inject the token. HTTP
+// 429 and Feishu's in-body rate-limit code back off and resend the body.
+// 单次调用：429 与包体限流码都会退避后重发（每次重建请求体）。
 func (c *fc) do(ctx context.Context, method, path string, body []byte, authz bool) ([]byte, error) {
 	if authz {
 		if _, err := c.token(ctx); err != nil {
 			return nil, err
 		}
 	}
-	var resp *http.Response
-	var err error
-	for try := 0; try < 6; try++ {
+	key, every := paceFor(path)
+	for try := 0; ; try++ {
+		if err := throttle(ctx, key, every); err != nil {
+			return nil, err
+		}
 		var rdr io.Reader
 		if body != nil {
 			rdr = bytes.NewReader(body)
 		}
-		var req *http.Request
-		req, err = http.NewRequestWithContext(ctx, method, c.base+path, rdr)
+		req, err := http.NewRequestWithContext(ctx, method, c.base+path, rdr)
 		if err != nil {
 			return nil, err
 		}
@@ -339,18 +421,21 @@ func (c *fc) do(ctx context.Context, method, path string, body []byte, authz boo
 		if authz {
 			req.Header.Set("Authorization", "Bearer "+c.accessToken)
 		}
-		resp, err = c.http.Do(req)
+		resp, err := c.http.Do(req)
 		if err != nil {
 			return nil, err
 		}
-		if resp.StatusCode == 429 && try < 5 {
-			wait := 2 * time.Second
+		b, rerr := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+		_ = resp.Body.Close()
+		limited := resp.StatusCode == http.StatusTooManyRequests ||
+			(resp.StatusCode/100 == 2 && bytes.Contains(b, []byte(`"code":99991400`)))
+		if limited && try < 5 {
+			wait := time.Duration(2<<try) * time.Second
 			if r := resp.Header.Get("x-ogw-ratelimit-reset"); r != "" {
 				if sec, err2 := time.ParseDuration(r + "s"); err2 == nil {
 					wait = sec
 				}
 			}
-			_ = resp.Body.Close()
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -358,17 +443,17 @@ func (c *fc) do(ctx context.Context, method, path string, body []byte, authz boo
 			}
 			continue
 		}
-		break
+		if rerr != nil {
+			return nil, rerr
+		}
+		if resp.StatusCode == http.StatusForbidden {
+			return nil, ErrForbidden
+		}
+		if resp.StatusCode/100 != 2 {
+			return nil, fmt.Errorf("feishu %s %s → %d: %s", method, path, resp.StatusCode, b[:min(len(b), 512)])
+		}
+		return b, nil
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == 403 {
-		return nil, ErrForbidden
-	}
-	if resp.StatusCode/100 != 2 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("feishu %s %s → %d: %s", method, path, resp.StatusCode, b)
-	}
-	return io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 }
 
 func (c *fc) get(ctx context.Context, path string, out any) error {
@@ -397,8 +482,9 @@ func unwrap(b []byte, out any) error {
 	if err := json.Unmarshal(b, &env); err != nil {
 		return err
 	}
-	if env.Code == 1069902 { // export permission code
-		return ErrForbidden
+	switch env.Code {
+	case 1069902, 1230002, 1234017, 99991672, 99991679: // export / mail / scope permission codes
+		return fmt.Errorf("%w（%d %s）", ErrForbidden, env.Code, env.Msg)
 	}
 	if env.Code == 99991400 {
 		return fmt.Errorf("rate-limited")

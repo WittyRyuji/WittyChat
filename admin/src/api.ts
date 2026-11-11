@@ -244,4 +244,70 @@ export const fiApi = {
 		req("PUT", "/api/v1/admin/feishu/app", { app_id, app_secret, base_url }),
 	clearApp: () => req("DELETE", "/api/v1/admin/feishu/app"),
 	jobs: () => req<FIJob[]>("GET", "/api/v1/feishu/jobs?all=1"),
+	migration: () => req<FIMigration>("GET", "/api/v1/admin/feishu/migration"),
+	migStart: (provision: boolean, continuous: boolean) =>
+		req("POST", "/api/v1/admin/feishu/migration/start", {
+			provision,
+			continuous,
+		}),
+	migFinish: () => req("POST", "/api/v1/admin/feishu/migration/finish"),
+	dirSync: () =>
+		req<{
+			Seen: number;
+			Active: number;
+			Matched: number;
+			Unmatched: number;
+			NoEmail: number;
+		}>("POST", "/api/v1/admin/feishu/directory/sync"),
+	people: () => req<FIPerson[]>("GET", "/api/v1/admin/feishu/people"),
+	resend: (open_ids?: string[]) =>
+		req<{ sent: number }>("POST", "/api/v1/admin/feishu/people/resend", {
+			open_ids,
+		}),
+	personMail: (openId: string) =>
+		req(
+			"POST",
+			`/api/v1/admin/feishu/people/${encodeURIComponent(openId)}/mail`,
+		),
 };
+
+export interface FIMigration {
+	status: "idle" | "running" | "syncing" | "finishing" | "finished" | "error";
+	provision: boolean;
+	continuous: boolean;
+	started_at?: string;
+	dir_synced_at?: string;
+	finished_at?: string;
+	last_error: string;
+	people: number;
+	linked: number;
+	provisioned: number;
+	activated: number;
+	mail_done_people: number;
+	mail_running_people: number;
+	mail_error_people: number;
+	messages: number;
+	docs_authorized: number;
+	redirect_url: string;
+	public_url: string;
+	configured: boolean;
+}
+
+export interface FIPerson {
+	open_id: string;
+	name: string;
+	email: string;
+	feishu_status: string;
+	user_id?: string;
+	user_status: string;
+	provisioned: boolean;
+	link_sent_at?: string;
+	link_error: string;
+	mail_status: string;
+	mail_error: string;
+	mail_done: number;
+	mail_skipped: number;
+	mail_failed: number;
+	mail_synced_at?: string;
+	docs_authorized: boolean;
+}

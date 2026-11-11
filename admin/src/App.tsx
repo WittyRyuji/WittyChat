@@ -70,7 +70,7 @@ export function App() {
 										: t === "mailimport"
 											? "邮件搬家"
 											: t === "feishu"
-												? "飞书导入"
+												? "飞书迁移"
 												: "审计日志"}
 						</button>
 					))}

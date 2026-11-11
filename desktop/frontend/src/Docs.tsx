@@ -137,11 +137,15 @@ export function Docs({
   };
 
   const [feishuOn, setFeishuOn] = useState(false);
+  const [feishuAuthed, setFeishuAuthed] = useState(false);
   const [feishuPanel, setFeishuPanel] = useState(false);
   useEffect(() => {
     feishuApi
       .status()
-      .then((s) => setFeishuOn(s.configured))
+      .then((s) => {
+        setFeishuOn(s.configured);
+        setFeishuAuthed(s.authorized);
+      })
       .catch(() => {});
   }, []);
 
@@ -203,6 +207,7 @@ export function Docs({
         </div>
         {feishuPanel && (
           <FeishuImport
+            authorized={feishuAuthed}
             onDone={() =>
               docsApi
                 .list()

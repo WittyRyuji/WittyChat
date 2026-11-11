@@ -781,7 +781,8 @@ export interface FeishuItem {
   doc_ids: string[];
 }
 export const feishuApi = {
-  status: () => req<{ configured: boolean }>("GET", "/api/v1/feishu/status"),
+  status: () => req<{ configured: boolean; authorized: boolean }>("GET", "/api/v1/feishu/status"),
+  oauthStart: () => req<{ url: string }>("POST", "/api/v1/feishu/oauth/start"),
   createJob: (links: string[]) => req<{ id: string }>("POST", "/api/v1/feishu/jobs", { links }),
   jobs: () => req<FeishuJob[]>("GET", "/api/v1/feishu/jobs"),
   job: (id: string) =>

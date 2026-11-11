@@ -47,6 +47,11 @@ func (s *Store) Run(ctx context.Context, jobID uuid.UUID, budget time.Duration) 
 			jobID, "管理员尚未配置飞书应用")
 		return false, nil
 	}
+	// Employee-authorized jobs act as that employee (OAuth refresh token).
+	// 员工授权的任务以员工身份调用（刷新令牌）。
+	if j.UserToken {
+		c.userToken = s.userTokenFor(j.CreatedBy)
+	}
 	// Bad creds → job error, no retry (token() surfaces ErrBadCreds).
 	if _, err := c.token(ctx); err != nil {
 		if errors.Is(err, ErrBadCreds) {
@@ -129,6 +134,15 @@ func (s *Store) discover(ctx context.Context, jobID uuid.UUID, c *fc, rt Root, p
 		return s.walkWiki(ctx, jobID, c, rt.ID, "", path)
 	case "folder":
 		return s.walkFolder(ctx, jobID, c, rt.ID, path)
+	case "my_space":
+		// the employee's own drive root (user-token jobs only) / 员工"我的空间"根目录
+		var out struct {
+			Token string `json:"token"`
+		}
+		if err := c.get(ctx, "/open-apis/drive/explorer/v2/root_folder/meta", &out); err != nil {
+			return err
+		}
+		return s.walkFolder(ctx, jobID, c, out.Token, path)
 	case "wiki_node":
 		// resolve the node → obj_token/obj_type/title/owner, then walk children
 		var out struct {
@@ -287,7 +301,7 @@ func (s *Store) importItem(ctx context.Context, j *Job, c *fc, it Item) {
 		return
 	}
 	// self-mode ownership check FIRST — skip before spending an export on it
-	if j.Mode == "self" {
+	if j.Mode == "self" && (j.CreatorOpenID == "" || it.Owner != j.CreatorOpenID) {
 		email := c.emailFor(ctx, it.Owner)
 		if !j.creatorOwns(email) {
 			// Unknown owner fails closed, but as `failed` so a re-start retries

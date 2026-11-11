@@ -6,6 +6,9 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"html"
+	"net/http"
 	"strings"
 	"wittychat/core/audit"
 	"wittychat/core/feishuimport"
@@ -40,6 +43,14 @@ func registerFeishuImport(api huma.API, d *Deps) {
 	huma.Register(api, huma.Operation{Method: "PUT", Path: "/api/v1/admin/feishu/app"}, d.fiAppSet)
 	huma.Register(api, huma.Operation{Method: "DELETE", Path: "/api/v1/admin/feishu/app"}, d.fiAppClear)
 	huma.Register(api, huma.Operation{Method: "GET", Path: "/api/v1/feishu/status"}, d.fiStatus)
+	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/feishu/oauth/start"}, d.fiOAuthStart)
+	huma.Register(api, huma.Operation{Method: "GET", Path: "/api/v1/admin/feishu/migration"}, d.fiMigGet)
+	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/admin/feishu/migration/start"}, d.fiMigStart)
+	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/admin/feishu/migration/finish"}, d.fiMigFinish)
+	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/admin/feishu/directory/sync"}, d.fiDirSync)
+	huma.Register(api, huma.Operation{Method: "GET", Path: "/api/v1/admin/feishu/people"}, d.fiPeople)
+	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/admin/feishu/people/resend"}, d.fiResend)
+	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/admin/feishu/people/{open_id}/mail"}, d.fiPersonMail)
 	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/feishu/jobs"}, d.fiJobCreate)
 	huma.Register(api, huma.Operation{Method: "GET", Path: "/api/v1/feishu/jobs"}, d.fiJobList)
 	huma.Register(api, huma.Operation{Method: "GET", Path: "/api/v1/feishu/jobs/{id}"}, d.fiJobDetail)
@@ -115,13 +126,14 @@ func (d *Deps) fiStatus(ctx context.Context, in *struct{ Headers }) (*struct {
 	Body map[string]bool `json:"body"`
 }, error,
 ) {
-	if _, _, err := d.requireUser(ctx, in.Authorization); err != nil {
+	_, u, err := d.requireUser(ctx, in.Authorization)
+	if err != nil {
 		return nil, err
 	}
 	_, _, cfg := d.Feishu.GetApp(ctx)
 	return &struct {
 		Body map[string]bool `json:"body"`
-	}{Body: map[string]bool{"configured": cfg}}, nil
+	}{Body: map[string]bool{"configured": cfg, "authorized": cfg && d.Feishu.Authorized(ctx, u.ID)}}, nil
 }
 
 func (d *Deps) fiJobCreate(ctx context.Context, in *struct {
@@ -316,4 +328,171 @@ func (d *Deps) fiJobCancel(ctx context.Context, in *fiActIn) (*struct{}, error) 
 
 func (d *Deps) fiJobDelete(ctx context.Context, in *fiActIn) (*struct{}, error) {
 	return &struct{}{}, d.fiJobDo(ctx, in, "delete")
+}
+
+// ---- whole-tenant migration (admin) + one-click personal import ----
+
+type fiMigOut struct {
+	*feishuimport.Migration
+	RedirectURL string `json:"redirect_url"`
+	PublicURL   string `json:"public_url"`
+	Configured  bool   `json:"configured"`
+}
+
+func (d *Deps) fiMigGet(ctx context.Context, in *struct{ Headers }) (*struct{ Body fiMigOut }, error) {
+	if _, _, err := d.requireAdmin(ctx, in.Authorization); err != nil {
+		return nil, err
+	}
+	m, err := d.Feishu.GetMigration(ctx)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("failed")
+	}
+	_, _, cfg := d.Feishu.GetApp(ctx)
+	return &struct{ Body fiMigOut }{Body: fiMigOut{
+		Migration: m, RedirectURL: d.Feishu.OAuthRedirectURL(), PublicURL: d.PublicURL, Configured: cfg,
+	}}, nil
+}
+
+func (d *Deps) fiMigStart(ctx context.Context, in *struct {
+	Headers
+	Body struct {
+		Provision  bool `json:"provision"`
+		Continuous bool `json:"continuous"`
+	}
+},
+) (*struct{}, error) {
+	_, u, err := d.requireAdmin(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.Feishu.StartMigration(ctx, u.ID, in.Body.Provision, in.Body.Continuous); err != nil {
+		return nil, huma.Error409Conflict(err.Error())
+	}
+	d.Audit.Log(ctx, &u.ID, audit.ActorAdmin, "feishu.migration.start", "",
+		map[string]any{"provision": in.Body.Provision, "continuous": in.Body.Continuous}, clientIPCtx(ctx))
+	return &struct{}{}, nil
+}
+
+func (d *Deps) fiMigFinish(ctx context.Context, in *struct{ Headers }) (*struct{}, error) {
+	_, u, err := d.requireAdmin(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.Feishu.FinishMigration(ctx); err != nil {
+		return nil, huma.Error409Conflict(err.Error())
+	}
+	d.Audit.Log(ctx, &u.ID, audit.ActorAdmin, "feishu.migration.finish", "", nil, clientIPCtx(ctx))
+	return &struct{}{}, nil
+}
+
+func (d *Deps) fiDirSync(ctx context.Context, in *struct{ Headers }) (*struct {
+	Body feishuimport.DirStats
+}, error,
+) {
+	_, u, err := d.requireAdmin(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	st, err := d.Feishu.SyncDirectory(ctx)
+	if err != nil {
+		return nil, huma.Error422UnprocessableEntity(err.Error())
+	}
+	d.Audit.Log(ctx, &u.ID, audit.ActorAdmin, "feishu.directory.sync", "", st, clientIPCtx(ctx))
+	return &struct{ Body feishuimport.DirStats }{Body: st}, nil
+}
+
+func (d *Deps) fiPeople(ctx context.Context, in *struct{ Headers }) (*struct {
+	Body []feishuimport.Person
+}, error,
+) {
+	if _, _, err := d.requireAdmin(ctx, in.Authorization); err != nil {
+		return nil, err
+	}
+	ps, err := d.Feishu.People(ctx)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("failed")
+	}
+	return &struct{ Body []feishuimport.Person }{Body: ps}, nil
+}
+
+func (d *Deps) fiResend(ctx context.Context, in *struct {
+	Headers
+	Body struct {
+		OpenIDs []string `json:"open_ids" required:"false"`
+	}
+}) (*struct {
+	Body map[string]int `json:"body"`
+}, error,
+) {
+	_, u, err := d.requireAdmin(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	ids := in.Body.OpenIDs
+	if ids == nil {
+		ids = []string{}
+	}
+	n, err := d.Feishu.ResendLinks(ctx, u.ID, ids)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("failed")
+	}
+	d.Audit.Log(ctx, &u.ID, audit.ActorAdmin, "feishu.people.resend", "", map[string]any{"count": n}, clientIPCtx(ctx))
+	return &struct {
+		Body map[string]int `json:"body"`
+	}{Body: map[string]int{"sent": n}}, nil
+}
+
+func (d *Deps) fiPersonMail(ctx context.Context, in *struct {
+	Headers
+	OpenID string `path:"open_id"`
+},
+) (*struct{}, error) {
+	_, u, err := d.requireAdmin(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.Feishu.StartMailFor(ctx, in.OpenID, true); err != nil {
+		return nil, huma.Error500InternalServerError("failed")
+	}
+	d.Audit.Log(ctx, &u.ID, audit.ActorAdmin, "feishu.person.mail", in.OpenID, nil, clientIPCtx(ctx))
+	return &struct{}{}, nil
+}
+
+func (d *Deps) fiOAuthStart(ctx context.Context, in *struct{ Headers }) (*struct {
+	Body map[string]string `json:"body"`
+}, error,
+) {
+	_, u, err := d.requireUser(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	link, err := d.Feishu.OAuthStart(ctx, u.ID)
+	if err != nil {
+		return nil, huma.Error409Conflict(err.Error())
+	}
+	return &struct {
+		Body map[string]string `json:"body"`
+	}{Body: map[string]string{"url": link}}, nil
+}
+
+// fiOAuthCallback is where Feishu sends the employee's browser back. It
+// answers with a small page (the employee returns to the desktop app).
+// 飞书授权回调：返回一个小页面，员工回到桌面端即可。
+func (d *Deps) fiOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	title, msg := "授权成功", "已开始导入你的飞书文档。现在可以关闭这个页面，回到 WittyChat 查看进度。"
+	if e := q.Get("error"); e != "" {
+		title, msg = "未授权", "你取消了授权。需要时可以在 WittyChat 里重新点击导入。"
+	} else if job, err := d.Feishu.OAuthCallback(r.Context(), q.Get("code"), q.Get("state")); err != nil {
+		title, msg = "授权失败", err.Error()
+	} else if d.Audit != nil {
+		d.Audit.Log(r.Context(), nil, audit.ActorSystem, "feishu.oauth.linked", job.String(), nil, clientIPCtx(r.Context()))
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><title>%s</title>
+<body style="font-family:system-ui,'Microsoft YaHei',sans-serif;background:#111216;color:#e4e4e7;display:grid;place-items:center;height:100vh;margin:0">
+<div style="max-width:420px;text-align:center"><h2>%s</h2><p style="color:#9a9ca6;line-height:1.7">%s</p></div></body>`,
+		html.EscapeString(title), html.EscapeString(title), html.EscapeString(msg))
 }

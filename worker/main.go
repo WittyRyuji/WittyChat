@@ -83,6 +83,13 @@ func (w *worker) schedule(ctx context.Context) {
 		if n, err := w.store.RequeueStale(ctx, 60*time.Minute); err == nil && n > 0 {
 			log.Printf("schedule: %d stale tasks requeued", n)
 		}
+		// Feishu migration: incremental mail catch-up / finishing check.
+		// 飞书迁移：增量追平邮件、收尾检查。
+		if fi, err := w.fimpStore(); err == nil {
+			if err := fi.Tick(ctx); err != nil {
+				log.Printf("schedule feishu: %v", err)
+			}
+		}
 		for _, spec := range []struct {
 			kind   string
 			every  time.Duration
@@ -180,15 +187,20 @@ func (w *worker) fimpStore() (*feishuimport.Store, error) {
 		ims := im.NewStore(w.pool)
 		w.docSt = docs.New(w.pool, ims.IsMember, ims.MemberRole)
 	}
-	w.fimp = feishuimport.New(w.pool, w.store, w.docSt, key)
+	w.fimp = feishuimport.New(w.pool, w.store, w.docSt, key).
+		WithMigration(w.mailStore(), auth.NewStore(w.pool), envOr("WITTYCHAT_PUBLIC_URL", "http://localhost:8080"))
 	return w.fimp, nil
 }
+
+// importKinds are long, budgeted chunks that run on their own lanes.
+// 长耗时分块任务，走独立泳道。
+var importKinds = []string{"mail_import", "feishu_import", "feishu_mail", "feishu_migrate"}
 
 // run processes everything EXCEPT mail_import — a 4-minute import chunk
 // must not delay thumbnails or outbound mail (head-of-line blocking).
 // 主循环认领除 mail_import 外的一切：4 分钟的导入块不能卡住缩略图/发信。
 func (w *worker) run(ctx context.Context) {
-	w.loop(ctx, []string{"mail_import", "feishu_import"}, false)
+	w.loop(ctx, importKinds, false)
 }
 
 // runImportLanes spawns N goroutines that claim ONLY mail_import tasks.
@@ -209,7 +221,7 @@ func (w *worker) runImportLanes(ctx context.Context) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			w.loop(ctx, []string{"mail_import", "feishu_import"}, true)
+			w.loop(ctx, importKinds, true)
 		}()
 	}
 	wg.Wait()
@@ -369,6 +381,26 @@ func (w *worker) dispatch(ctx context.Context, t *objects.Task) error {
 			return w.store.Enqueue(ctx, "mail_import", map[string]any{"account_id": aid.String()})
 		}
 		return nil
+	case "feishu_mail":
+		openID := str(t.Payload["open_id"])
+		fi, err := w.fimpStore()
+		if err != nil {
+			return err
+		}
+		more, err := fi.RunMail(ctx, openID, 4*time.Minute)
+		if err != nil {
+			return err
+		}
+		if more {
+			return w.store.Enqueue(ctx, "feishu_mail", map[string]any{"open_id": openID})
+		}
+		return nil
+	case "feishu_migrate":
+		fi, err := w.fimpStore()
+		if err != nil {
+			return err
+		}
+		return fi.RunMigrate(ctx)
 	case "feishu_import":
 		jid, err := uuid.Parse(str(t.Payload["job_id"]))
 		if err != nil {

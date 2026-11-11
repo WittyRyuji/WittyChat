@@ -217,8 +217,9 @@ func cmdServe() {
 		Agents:     agents.NewStore(pool),
 		HR:         hr.New(pool),
 		Docs:       docs.New(pool, imStore.IsMember, imStore.MemberRole),
-		Feishu:     feishuimport.New(pool, objStore, docs.New(pool, imStore.IsMember, imStore.MemberRole), key),
-		Office:     officeConfig(),
+		Feishu: feishuimport.New(pool, objStore, docs.New(pool, imStore.IsMember, imStore.MemberRole), key).
+			WithMigration(mail.NewStore(pool, envOr("WITTYCHAT_MAIL_DOMAIN", "wittyloong.com")), auth.NewStore(pool), publicURL()),
+		Office: officeConfig(),
 	}
 
 	addr := envOr("WITTYCHAT_ADDR", ":8080")

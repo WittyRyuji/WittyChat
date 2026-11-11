@@ -142,6 +142,9 @@ func New(d *Deps) http.Handler {
 	registerObjects(mux, d)
 	registerOffice(mux, d)
 	registerDocs(mux, d)
+	if d.Feishu != nil {
+		mux.HandleFunc("GET /api/v1/feishu/oauth/callback", d.fiOAuthCallback)
+	}
 	registerMail(mux, d)
 	registerAgents(mux, d)
 	mux.HandleFunc("GET /api/v1/admin/audit/export", d.adminAuditExport)

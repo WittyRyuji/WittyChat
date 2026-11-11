@@ -16,7 +16,7 @@ Self-hostable enterprise IM + coding-agent platform. Go backend (`server/`, `wor
 
 ## Gates
 - Go (repo root): `go build ./...`, `go vet ./...`, `golangci-lint run ./...` (expects 0 issues; nolint only with a reason, repo convention),
-  `WITTYCHAT_TEST_DB_URL='postgres://wittychat:wittychat@localhost:5432/wittychat_test?sslmode=disable' go test ./...` (DB tests skip silently without it).
+  `WITTYCHAT_TEST_DB_URL='postgres://wittychat:wittychat@localhost:5432/wittychat_test?sslmode=disable' go test ./...` (DB tests skip silently without it). Use `go test -p 1 ./...` for the full suite: packages share the test DB and `TestReplaceBytesVersionsAndQuota` reads a global usage total, so parallel packages make it flaky.
 - Frontend (`desktop/frontend`): `npm.cmd run build` (tsc + vite), `npm.cmd test` (vitest), `npx.cmd biome check <files>` (pre-existing style warnings exist; no new errors).
 - API smoke against a running server: `python scripts/smoke_p0.py` (creates smoke-* users in the dev DB).
 
@@ -43,3 +43,6 @@ Sniffed at upload (`core/objects/imgmeta.go`, EXIF-orientation aware for JPEG) a
 
 ## Dev IMAP (devimap)
 `go run ./scripts/devimap` starts an in-process IMAP server on `127.0.0.1:1143` (plain) for testing the 邮件搬家 admin tab. Users: `zhang@wittyloong.com / zhang-app-pass` (~318 msgs incl. GBK/multipart/cid/flags) and `old@feishu-old.test / old-pass` (20 msgs).
+
+## Dev Feishu (devfeishu)
+`go build -o devfeishu.exe ./scripts/devfeishu && ./devfeishu.exe` serves a mock Feishu OpenAPI on `127.0.0.1:1180` (bot messages are logged to stderr). PUT `/api/v1/admin/feishu/app` with `base_url=http://127.0.0.1:1180` (any secret except `bad`). Directory: Ryuji + Alice (existing), dave/erin (provisioned), one resigned; each mailbox has 33 messages (INBOX 30, SENT 2, 项目/2024 1). OAuth redirects straight back as `DEVFEISHU_OAUTH_USER` (default alice). Clear the app config and `feishu_*` state afterwards.

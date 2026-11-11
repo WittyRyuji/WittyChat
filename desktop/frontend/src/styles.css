@@ -2944,3 +2944,18 @@ button.avatar .avatar-img {
 .feishu-panel .err-sm {
   color: var(--dim);
 }
+.feishu-panel .fi-oneclick {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+.feishu-panel details summary {
+  cursor: pointer;
+  color: var(--dim);
+}
+.feishu-panel details[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
