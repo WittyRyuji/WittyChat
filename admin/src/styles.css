@@ -209,6 +209,33 @@ code {
 }
 
 /* mail-import progress bar / 邮件搬家进度条 */
-.bar { background: var(--line); border-radius: 4px; height: 6px; width: 90px; display: inline-block; margin-right: 6px; vertical-align: middle; }
-.bar .fill { background: var(--accent); border-radius: 4px; height: 100%; }
-.card.warn { background: #fff7e6; border-left: 3px solid #faad14; padding: 8px 12px; }
+.bar {
+	background: var(--line);
+	border-radius: 4px;
+	height: 6px;
+	width: 90px;
+	display: inline-block;
+	margin-right: 6px;
+	vertical-align: middle;
+}
+.bar .fill {
+	background: var(--accent);
+	border-radius: 4px;
+	height: 100%;
+}
+.card.warn {
+	background: #fff7e6;
+	border-left: 3px solid #faad14;
+	padding: 8px 12px;
+}
+/* 飞书应用表单：App ID / Secret / 按钮各占一行 */
+.fs-form {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	max-width: 420px;
+	margin-bottom: 12px;
+}
+.fs-form .row {
+	margin-bottom: 0;
+}

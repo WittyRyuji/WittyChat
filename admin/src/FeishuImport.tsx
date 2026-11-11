@@ -59,7 +59,7 @@ export function FeishuImport() {
 			) : (
 				<p className="warn">未配置</p>
 			)}
-			<div className="form">
+			<div className="fs-form">
 				<input
 					placeholder="App ID"
 					value={appID}
@@ -71,16 +71,19 @@ export function FeishuImport() {
 					value={secret}
 					onChange={(e) => setSecret(e.target.value)}
 				/>
-				<button
-					type="button"
-					disabled={busy || !appID || !secret}
-					onClick={save}
-				>
-					保存
-				</button>
-				<button type="button" onClick={clear}>
-					清除
-				</button>
+				<div className="row">
+					<button
+						type="button"
+						className="primary"
+						disabled={busy || !appID || !secret}
+						onClick={save}
+					>
+						保存
+					</button>
+					<button type="button" className="ghost danger" onClick={clear}>
+						清除
+					</button>
+				</div>
 			</div>
 			{err && <p className="err">{err}</p>}
 			<h3>迁移步骤</h3>
