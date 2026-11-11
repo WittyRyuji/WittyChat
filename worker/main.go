@@ -25,6 +25,8 @@ import (
 	"wittychat/core/auth"
 	"wittychat/core/db"
 	"wittychat/core/docs"
+	"wittychat/core/feishuimport"
+	"wittychat/core/im"
 	"wittychat/core/mail"
 	"wittychat/core/mailimport"
 	"wittychat/core/objects"
@@ -121,6 +123,9 @@ type worker struct {
 	scanner objects.Scanner   // AV plugin; NoopScanner default / 杀毒插件
 	mail    *mail.Store       // lazily built / 惰性构造
 	imp     *mailimport.Store // lazily built — needs the secret key / 惰性构造
+	fimp    *feishuimport.Store
+	docSt   *docs.Store
+	impMu   sync.Mutex // guards imp/fimp/docSt lazy init across lanes / 惰性构造锁
 }
 
 // purgeStaleImportSecrets clears sealed_secret on jobs not running and
@@ -146,6 +151,8 @@ func (w *worker) purgeStaleImportSecrets(ctx context.Context) (int64, error) {
 // Missing key → mail_import tasks fail loudly, the rest keeps working.
 // 惰性构造导入引擎：密钥只读加载，缺失时 mail_import 报错重试，其他任务照跑。
 func (w *worker) impStore() (*mailimport.Store, error) {
+	w.impMu.Lock()
+	defer w.impMu.Unlock()
 	if w.imp != nil {
 		return w.imp, nil
 	}
@@ -157,11 +164,31 @@ func (w *worker) impStore() (*mailimport.Store, error) {
 	return w.imp, nil
 }
 
+// fimpStore lazily builds the Feishu import engine — same secret-key rule.
+// 飞书导入引擎同样惰性构造（密钥只读）。
+func (w *worker) fimpStore() (*feishuimport.Store, error) {
+	w.impMu.Lock()
+	defer w.impMu.Unlock()
+	if w.fimp != nil {
+		return w.fimp, nil
+	}
+	key, err := auth.LoadSecretKeyFile(envOr("WITTYCHAT_DATA_DIR", "./data"))
+	if err != nil {
+		return nil, fmt.Errorf("secret key for feishu_import: %w", err)
+	}
+	if w.docSt == nil {
+		ims := im.NewStore(w.pool)
+		w.docSt = docs.New(w.pool, ims.IsMember, ims.MemberRole)
+	}
+	w.fimp = feishuimport.New(w.pool, w.store, w.docSt, key)
+	return w.fimp, nil
+}
+
 // run processes everything EXCEPT mail_import — a 4-minute import chunk
 // must not delay thumbnails or outbound mail (head-of-line blocking).
 // 主循环认领除 mail_import 外的一切：4 分钟的导入块不能卡住缩略图/发信。
 func (w *worker) run(ctx context.Context) {
-	w.loop(ctx, []string{"mail_import"}, false)
+	w.loop(ctx, []string{"mail_import", "feishu_import"}, false)
 }
 
 // runImportLanes spawns N goroutines that claim ONLY mail_import tasks.
@@ -182,7 +209,7 @@ func (w *worker) runImportLanes(ctx context.Context) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			w.loop(ctx, []string{"mail_import"}, true)
+			w.loop(ctx, []string{"mail_import", "feishu_import"}, true)
 		}()
 	}
 	wg.Wait()
@@ -340,6 +367,23 @@ func (w *worker) dispatch(ctx context.Context, t *objects.Task) error {
 		}
 		if more {
 			return w.store.Enqueue(ctx, "mail_import", map[string]any{"account_id": aid.String()})
+		}
+		return nil
+	case "feishu_import":
+		jid, err := uuid.Parse(str(t.Payload["job_id"]))
+		if err != nil {
+			return err
+		}
+		fi, err := w.fimpStore()
+		if err != nil {
+			return err
+		}
+		more, err := fi.Run(ctx, jid, 4*time.Minute)
+		if err != nil {
+			return err
+		}
+		if more {
+			return w.store.Enqueue(ctx, "feishu_import", map[string]any{"job_id": jid.String()})
 		}
 		return nil
 	default:
