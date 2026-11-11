@@ -40,3 +40,6 @@ Debug with CDP: launch with `WITTYCHAT_DEBUG_PORT=9222` (`WEBVIEW2_ADDITIONAL_BR
 
 ## Image dimensions (objects.width/height)
 Sniffed at upload (`core/objects/imgmeta.go`, EXIF-orientation aware for JPEG) and by the server's background sweep (`RunDimsBackfill`, keyed on `objects.dims_checked`). Never sniff on the request path — it previously truncated downloads. Client display boxes come from `desktop/frontend/src/objdims.ts` (`FIT` caps must mirror the CSS).
+
+## Dev IMAP (devimap)
+`go run ./scripts/devimap` starts an in-process IMAP server on `127.0.0.1:1143` (plain) for testing the 邮件搬家 admin tab. Users: `zhang@wittyloong.com / zhang-app-pass` (~318 msgs incl. GBK/multipart/cid/flags) and `old@feishu-old.test / old-pass` (20 msgs).

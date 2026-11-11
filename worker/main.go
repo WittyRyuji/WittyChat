@@ -18,6 +18,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"syscall"
 	"time"
 	"wittychat/core/auth"
@@ -63,6 +65,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go w.schedule(ctx)
+	go w.runImportLanes(ctx)
 	w.run(ctx)
 }
 
@@ -154,14 +157,45 @@ func (w *worker) impStore() (*mailimport.Store, error) {
 	return w.imp, nil
 }
 
+// run processes everything EXCEPT mail_import — a 4-minute import chunk
+// must not delay thumbnails or outbound mail (head-of-line blocking).
+// 主循环认领除 mail_import 外的一切：4 分钟的导入块不能卡住缩略图/发信。
 func (w *worker) run(ctx context.Context) {
+	w.loop(ctx, []string{"mail_import"}, false)
+}
+
+// runImportLanes spawns N goroutines that claim ONLY mail_import tasks.
+// N comes from WITTYCHAT_IMPORT_CONCURRENCY, default 2, clamped 1..8.
+// 导入专用泳道：只认领 mail_import，默认 2 个并发。
+func (w *worker) runImportLanes(ctx context.Context) {
+	n := 2
+	if v, err := strconv.Atoi(envOr("WITTYCHAT_IMPORT_CONCURRENCY", "2")); err == nil {
+		n = v
+	}
+	if n < 1 {
+		n = 1
+	} else if n > 8 {
+		n = 8
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w.loop(ctx, []string{"mail_import"}, true)
+		}()
+	}
+	wg.Wait()
+}
+
+func (w *worker) loop(ctx context.Context, kinds []string, include bool) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		t, err := w.store.Claim(ctx, w.name)
+		t, err := w.store.ClaimKinds(ctx, w.name, kinds, include)
 		if err != nil {
 			log.Printf("claim: %v", err)
 			time.Sleep(2 * time.Second)

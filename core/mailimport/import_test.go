@@ -410,6 +410,37 @@ func TestImportBadPassword(t *testing.T) {
 	_ = more
 }
 
+// TestTestAccountsAll: nil ids (what the admin UI sends for "测试连接") must
+// test every account — a nil slice binds SQL NULL, which once matched none.
+// nil 即全部：UI 不传 account_ids，曾因 NULL 一个都不测。
+func TestTestAccountsAll(t *testing.T) {
+	imp, ctx, pool, mk := testEnv(t)
+	addr := memServer(t, map[string][]appMsg{"INBOX": {{fxPlain, nil, time.Now()}}})
+	jobID, _, _ := seedAccount(t, imp, ctx, pool, mk, addr, "src@old.test,pw")
+	if err := imp.PauseJob(ctx, jobID); err != nil { // uploads are refused while running
+		t.Fatal(err)
+	}
+	if _, _, errs := imp.AddAccountsCSV(ctx, jobID,
+		"bad@old.test,WRONG,"+emailOf(ctx, pool, mk())+"\n"); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	res, err := imp.TestAccounts(ctx, jobID, nil)
+	if err != nil || len(res) != 2 {
+		t.Fatalf("test all: n=%d err=%v", len(res), err)
+	}
+	okN, badN := 0, 0
+	for _, r := range res {
+		if r.OK {
+			okN++
+		} else if strings.Contains(r.Error, "专用密码") {
+			badN++
+		}
+	}
+	if okN != 1 || badN != 1 {
+		t.Fatalf("test all: ok=%d bad=%d res=%+v", okN, badN, res)
+	}
+}
+
 func TestPlainNonLoopbackRejected(t *testing.T) {
 	imp, ctx, _, mk := testEnv(t)
 	_, err := imp.CreateJob(ctx, JobParams{
@@ -461,8 +492,8 @@ func TestAddAccountsCSVErrors(t *testing.T) {
 		"a@x,pw1,ghost@nowhere\n" +
 		"b@x,pw2," + emailOf(ctx, pool, target) + "\n"
 	added, _, errs := imp.AddAccountsCSV(ctx, jobID, csvText)
-	if added != 1 || len(errs) != 1 {
-		t.Fatalf("csv: added=%d errs=%v", added, errs)
+	if added != 1 || len(errs) != 1 || !strings.Contains(errs[0], "目标用户不存在") {
+		t.Fatalf("csv: added=%d errs=%v (want the friendly unknown-target error, not an FK error)", added, errs)
 	}
 	csvText2 := "b@x,pw2b," + emailOf(ctx, pool, target) + "\n"
 	added, updated, errs2 := imp.AddAccountsCSV(ctx, jobID, csvText2)
@@ -635,5 +666,47 @@ func TestDeliverParsedSanitize(t *testing.T) {
 	}
 	if !strings.Contains(body, "�") {
 		t.Fatalf("invalid utf8 not replaced: %q", body)
+	}
+}
+
+// TestClaimKindsLanes: the exclusive claim (everything-but-import) returns
+// the thumb task; the inclusive claim (import-only) returns the import.
+func TestClaimKindsLanes(t *testing.T) {
+	_, ctx, pool, _ := testEnv(t)
+	obj, _ := objects.NewStore(pool, t.TempDir())
+	// clean queue so no other test's rows interfere / 清空队列防止干扰
+	_, _ = pool.Exec(ctx, `DELETE FROM bg_tasks WHERE status='queued'`)
+	if err := obj.Enqueue(ctx, "mail_import", map[string]any{"account_id": uuid.Must(uuid.NewV7()).String()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := obj.Enqueue(ctx, "thumb", map[string]any{"object_id": uuid.Must(uuid.NewV7()).String()}); err != nil {
+		t.Fatal(err)
+	}
+	// exclusive lane: skips mail_import → gets thumb
+	got, err := obj.ClaimKinds(ctx, "w-main", []string{"mail_import"}, false)
+	if err != nil || got == nil {
+		t.Fatalf("exclusive claim: t=%v err=%v", got, err)
+	}
+	if got.Kind != "thumb" {
+		t.Fatalf("exclusive claimed %s want thumb", got.Kind)
+	}
+	_ = obj.Done(ctx, got.ID)
+	// inclusive lane: only mail_import
+	got2, err := obj.ClaimKinds(ctx, "w-imp", []string{"mail_import"}, true)
+	if err != nil || got2 == nil {
+		t.Fatalf("inclusive claim: t=%v err=%v", got2, err)
+	}
+	if got2.Kind != "mail_import" {
+		t.Fatalf("inclusive claimed %s want mail_import", got2.Kind)
+	}
+	_ = obj.Done(ctx, got2.ID)
+	// Unfiltered Claim (no $2 bound) must still work — it once passed an
+	// unreferenced arg and every claim failed. / 无过滤 Claim 曾多传参数致全失败。
+	if err := obj.Enqueue(ctx, "gc", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	got3, err := obj.Claim(ctx, "w-any")
+	if err != nil || got3 == nil || got3.Kind != "gc" {
+		t.Fatalf("unfiltered claim: t=%v err=%v", got3, err)
 	}
 }

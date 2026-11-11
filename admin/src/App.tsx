@@ -9,6 +9,7 @@ import {
 	setToken,
 	type User,
 } from "./api";
+import { MailImport } from "./MailImport";
 
 const STATUS_CN: Record<string, string> = {
 	pending: "待激活",
@@ -43,7 +44,9 @@ export function App() {
 			<header className="topbar">
 				<b>WittyChat 管理后台</b>
 				<nav>
-					{(["users", "storage", "security", "audit"] as const).map((t) => (
+					{(
+						["users", "storage", "security", "mailimport", "audit"] as const
+					).map((t) => (
 						<button
 							key={t}
 							type="button"
@@ -56,7 +59,9 @@ export function App() {
 									? "存储"
 									: t === "security"
 										? "安全策略"
-										: "审计日志"}
+										: t === "mailimport"
+											? "邮件搬家"
+											: "审计日志"}
 						</button>
 					))}
 				</nav>
@@ -76,6 +81,7 @@ export function App() {
 			{tab === "users" && <Users me={me} />}
 			{tab === "storage" && <Storage />}
 			{tab === "security" && <Security />}
+			{tab === "mailimport" && <MailImport />}
 			{tab === "audit" && <Audit />}
 		</div>
 	);

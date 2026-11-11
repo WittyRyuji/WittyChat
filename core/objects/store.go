@@ -835,12 +835,29 @@ type Task struct {
 
 // Claim atomically takes the oldest due task (SKIP LOCKED).
 func (s *Store) Claim(ctx context.Context, worker string) (*Task, error) {
+	return s.ClaimKinds(ctx, worker, nil, true)
+}
+
+// ClaimKinds claims one task either restricted to `kinds` (include=true) or
+// excluding them (include=false). Empty kinds + include=true claims anything.
+// 按类型认领：include=true 只认 kinds，false 排除 kinds；空列表认全部。
+func (s *Store) ClaimKinds(ctx context.Context, worker string, kinds []string, include bool) (*Task, error) {
+	filter := "TRUE"
+	args := []any{worker}
+	if len(kinds) > 0 {
+		if include {
+			filter = "kind = ANY($2)"
+		} else {
+			filter = "kind <> ALL($2)"
+		}
+		args = append(args, kinds) // only when $2 is referenced / 仅在引用 $2 时传参
+	}
 	var t Task
-	err := s.pool.QueryRow(ctx, `
+	err := s.pool.QueryRow(ctx, fmt.Sprintf(`
 UPDATE bg_tasks SET status='running', locked_by=$1, locked_at=now(), attempts=attempts+1, updated_at=now()
-WHERE id = (SELECT id FROM bg_tasks WHERE status='queued' AND run_after<=now()
+WHERE id = (SELECT id FROM bg_tasks WHERE status='queued' AND run_after<=now() AND %s
             ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED)
-RETURNING id, kind, payload, attempts`, worker).
+RETURNING id, kind, payload, attempts`, filter), args...).
 		Scan(&t.ID, &t.Kind, &t.Payload, &t.Attempts)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil

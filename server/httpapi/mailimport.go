@@ -159,7 +159,7 @@ func (d *Deps) miJobCreate(ctx context.Context, in *struct {
 		Host     string     `json:"host" required:"true"`
 		Port     int        `json:"port" required:"true"`
 		TLSMode  string     `json:"tls_mode" required:"true"`
-		Since    *time.Time `json:"since"`
+		Since    *time.Time `json:"since" required:"false"`
 		AddAlias bool       `json:"add_alias"`
 	}
 }) (*struct {

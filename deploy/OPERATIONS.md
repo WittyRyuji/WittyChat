@@ -85,3 +85,28 @@ Wails3 产出 `bin/wittychat.exe`（已验证 11.4MB）。
 - 本地开发：`docker compose -f deploy/docker-compose.dev.yml up -d onlyoffice`，服务端加 `WITTYCHAT_ONLYOFFICE_URL=http://localhost:8180 WITTYCHAT_ONLYOFFICE_JWT_SECRET=wittychat-office-dev`（或以 `WITTYCHAT_ONLYOFFICE_AUTODETECT=1` 代替 URL 显式指定）
 - 文档 key 随字节 sha 滚动——保存后下次打开必拉新稿；同 key 多人打开 = 协同编辑
 - 编辑保存保留上一版到 `object_versions`（审计保留期可还原/审计）；超限版本由 worker 定期清理
+
+## 邮件搬家（IMAP）
+
+管理员在管理后台「邮件搬家」页配置 IMAP 导入任务，用于从飞书等邮箱迁移历史邮件。
+
+### 前置条件（飞书）
+1. 飞书管理后台 → 邮箱 → 邮箱工具 → 第三方邮箱客户端：开启
+2. 员工在飞书桌面端 设置 → 邮箱 → 第三方邮箱客户端登录：生成专用密码（非登录密码）
+
+### CSV 账号上传
+格式：`source_email,password,target_email`（可带表头行；重复 source_email 覆盖密码）。
+
+### MX 切换 runbook
+5. 开始搬历史邮件 → 6. 将域名 MX 切到 WittyChat → 7. 再跑一次增量补齐切换期间的邮件 → 8. 完成并清除凭据。
+
+### 安全
+- 密码用 `data/secret.key` 加密入库（`sealed_secret`）；worker 需读同一文件。
+- 「完成并清除凭据」或任务闲置 30 天 → 密码 NULL 化，不可再导入。
+- `tls_mode=plain` 仅允许 loopback 主机（开发/测试）。
+
+### 并发
+`WITTYCHAT_IMPORT_CONCURRENCY`（默认 2，范围 1–8）控制 `mail_import` 任务泳道，与缩略图/发信分离，避免头阻塞。
+
+### 失败台账
+单封失败记入 `mail_import_failures`（uidvalidity+uid 主键、attempts、error），`last_uid` 照常前进；下次运行先重试台账行，`msgs_failed` 按活跃行数重算。详见任务详情的失败列表。

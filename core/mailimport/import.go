@@ -99,12 +99,17 @@ func (s *Store) AddAccountsCSV(ctx context.Context, jobID uuid.UUID, csvText str
 			continue
 		}
 		src, pw, tgt := strings.TrimSpace(row[0]), row[1], strings.TrimSpace(row[2])
-		var target uuid.UUID
+		// NULL must not scan into a zero uuid (uuid.UUID.Scan ignores nil) —
+		// that surfaced as a raw FK violation. Both paths require an active user.
+		// NULL 不能扫成零 uuid（会变成裸 FK 错误）；两条路径都要求用户在职。
+		var target *uuid.UUID
 		if err := s.pool.QueryRow(ctx,
-			`SELECT COALESCE((SELECT user_id FROM mail_addresses WHERE lower(address)=$1 LIMIT 1),
-			                 (SELECT id FROM users WHERE lower(email)=$1 AND status='active' LIMIT 1))`,
-			strings.ToLower(tgt)).Scan(&target); err != nil {
-			errs = append(errs, fmt.Sprintf("line %d: 目标用户不存在 %s", i+1, tgt))
+			`SELECT COALESCE(
+			   (SELECT a.user_id FROM mail_addresses a JOIN users u ON u.id=a.user_id
+			     WHERE lower(a.address)=$1 AND u.status='active' LIMIT 1),
+			   (SELECT id FROM users WHERE lower(email)=$1 AND status='active' LIMIT 1))`,
+			strings.ToLower(tgt)).Scan(&target); err != nil || target == nil {
+			errs = append(errs, fmt.Sprintf("line %d: 目标用户不存在或未激活 %s", i+1, tgt))
 			continue
 		}
 		sealed, err := auth.SealSecret(s.secretKey, []byte(pw))
@@ -119,7 +124,7 @@ func (s *Store) AddAccountsCSV(ctx context.Context, jobID uuid.UUID, csvText str
 			`INSERT INTO mail_import_accounts (id,job_id,source_login,sealed_secret,target_user)
 			 VALUES ($1,$2,$3,$4,$5)
 			 ON CONFLICT (job_id, source_login) DO UPDATE SET sealed_secret=EXCLUDED.sealed_secret`,
-			uuid.Must(uuid.NewV7()), jobID, src, sealed, target); err != nil {
+			uuid.Must(uuid.NewV7()), jobID, src, sealed, *target); err != nil {
 			errs = append(errs, fmt.Sprintf("line %d: %v", i+1, err))
 			continue
 		}
@@ -256,13 +261,13 @@ func (s *Store) TestAccounts(ctx context.Context, jobID uuid.UUID, ids []uuid.UU
 	rows, err := s.pool.Query(ctx,
 		`SELECT a.id,a.source_login,a.sealed_secret,j.host,j.port,j.tls_mode
 		 FROM mail_import_accounts a JOIN mail_import_jobs j ON j.id=a.job_id
-		 WHERE a.job_id=$1 AND (cardinality($2::uuid[])=0 OR a.id=ANY($2))
-		 LIMIT 20`, jobID, ids)
+		 WHERE a.job_id=$1 AND ($2::uuid[] IS NULL OR cardinality($2::uuid[])=0 OR a.id=ANY($2))
+		 LIMIT 20`, jobID, ids) // nil ids binds NULL = "all accounts" / nil 即全部账号
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []TestResult
+	out := []TestResult{}
 	for rows.Next() {
 		var r TestResult
 		var login, host, mode string

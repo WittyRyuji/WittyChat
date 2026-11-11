@@ -125,3 +125,99 @@ export interface AdminObject {
 	status: string;
 	created_at: string;
 }
+
+// --- mail import (邮件搬家) ------------------------------------------------
+export interface MIJob {
+	id: string;
+	name: string;
+	provider: string;
+	host: string;
+	port: number;
+	tls_mode: string;
+	since: string | null;
+	add_alias: boolean;
+	status: string;
+	secrets_purged: boolean;
+	accounts: number;
+	msgs_done: number;
+	msgs_total: number;
+	created_at: string;
+}
+export interface MIAccount {
+	id: string;
+	source_login: string;
+	target_user: string;
+	status: string;
+	failures_count: number;
+	msgs_total: number;
+	msgs_done: number;
+	msgs_skipped: number;
+	msgs_failed: number;
+	bytes_done: number;
+	last_error: string;
+	note: string;
+}
+export interface MIFailure {
+	folder: string;
+	uid: number;
+	error: string;
+	attempts: number;
+}
+export interface MIFolderRow {
+	account_id: string;
+	source_name: string;
+	target_folder_id: string;
+	uidvalidity: number;
+	last_uid: number;
+	msgs_total: number;
+	msgs_done: number;
+}
+export interface MIPreset {
+	key: string;
+	name: string;
+	host: string;
+	port: number;
+	tls_mode: string;
+	help: string;
+}
+export interface MITestResult {
+	account_id: string;
+	ok: boolean;
+	error: string;
+	folders: number;
+}
+
+export const miApi = {
+	presets: () => req<MIPreset[]>("GET", "/api/v1/admin/mail-import/presets"),
+	jobs: () => req<MIJob[]>("GET", "/api/v1/admin/mail-import/jobs"),
+	job: (id: string) =>
+		req<{
+			job: MIJob;
+			accounts: MIAccount[];
+			folders: MIFolderRow[];
+			failures: MIFailure[];
+		}>("GET", `/api/v1/admin/mail-import/jobs/${id}`),
+	createJob: (b: Record<string, unknown>) =>
+		req<{ id: string }>("POST", "/api/v1/admin/mail-import/jobs", b),
+	accounts: (id: string, csv: string) =>
+		req<{
+			added: number;
+			updated: number;
+			errors: { line: number; error: string }[];
+		}>("POST", `/api/v1/admin/mail-import/jobs/${id}/accounts`, { csv }),
+	accountDel: (id: string, aid: string) =>
+		req("DELETE", `/api/v1/admin/mail-import/jobs/${id}/accounts/${aid}`),
+	test: (id: string, accountIds?: string[]) =>
+		req<MITestResult[]>("POST", `/api/v1/admin/mail-import/jobs/${id}/test`, {
+			account_ids: accountIds,
+		}),
+	start: (id: string) =>
+		req("POST", `/api/v1/admin/mail-import/jobs/${id}/start`),
+	pause: (id: string) =>
+		req("POST", `/api/v1/admin/mail-import/jobs/${id}/pause`),
+	cancel: (id: string) =>
+		req("POST", `/api/v1/admin/mail-import/jobs/${id}/cancel`),
+	finish: (id: string) =>
+		req("POST", `/api/v1/admin/mail-import/jobs/${id}/finish`),
+	del: (id: string) => req("DELETE", `/api/v1/admin/mail-import/jobs/${id}`),
+};
