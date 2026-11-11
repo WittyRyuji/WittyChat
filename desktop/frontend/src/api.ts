@@ -759,3 +759,37 @@ export const hrApi = {
   monthSummary: (month: string) =>
     req<{ rows: HRSummary[] }>("GET", `/api/v1/hr/attendance/summary?month=${month}`),
 };
+
+// 飞书导入 — self-doc import from Feishu links.
+export interface FeishuJob {
+  id: string;
+  name: string;
+  mode: string;
+  status: string;
+  total: number;
+  done: number;
+  skipped: number;
+  failed: number;
+  pending: number;
+}
+export interface FeishuItem {
+  obj_type: string;
+  title: string;
+  path: string;
+  status: string;
+  error: string;
+  doc_ids: string[];
+}
+export const feishuApi = {
+  status: () => req<{ configured: boolean }>("GET", "/api/v1/feishu/status"),
+  createJob: (links: string[]) => req<{ id: string }>("POST", "/api/v1/feishu/jobs", { links }),
+  jobs: () => req<FeishuJob[]>("GET", "/api/v1/feishu/jobs"),
+  job: (id: string) =>
+    req<{ job: FeishuJob; items: FeishuItem[]; last_error?: string }>(
+      "GET",
+      `/api/v1/feishu/jobs/${id}`
+    ),
+  act: (id: string, act: "start" | "pause" | "cancel") =>
+    req("POST", `/api/v1/feishu/jobs/${id}/${act}`),
+  del: (id: string) => req("DELETE", `/api/v1/feishu/jobs/${id}`),
+};

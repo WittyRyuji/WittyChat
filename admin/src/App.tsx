@@ -9,6 +9,7 @@ import {
 	setToken,
 	type User,
 } from "./api";
+import { FeishuImport } from "./FeishuImport";
 import { MailImport } from "./MailImport";
 
 const STATUS_CN: Record<string, string> = {
@@ -21,9 +22,9 @@ const STATUS_CN: Record<string, string> = {
 export function App() {
 	const [me, setMe] = useState<User | null>(null);
 	const [ready, setReady] = useState(false);
-	const [tab, setTab] = useState<"users" | "storage" | "security" | "audit">(
-		"users",
-	);
+	const [tab, setTab] = useState<
+		"users" | "storage" | "security" | "mailimport" | "feishu" | "audit"
+	>("users");
 
 	useEffect(() => {
 		if (!getToken()) {
@@ -45,7 +46,14 @@ export function App() {
 				<b>WittyChat 管理后台</b>
 				<nav>
 					{(
-						["users", "storage", "security", "mailimport", "audit"] as const
+						[
+							"users",
+							"storage",
+							"security",
+							"mailimport",
+							"feishu",
+							"audit",
+						] as const
 					).map((t) => (
 						<button
 							key={t}
@@ -61,7 +69,9 @@ export function App() {
 										? "安全策略"
 										: t === "mailimport"
 											? "邮件搬家"
-											: "审计日志"}
+											: t === "feishu"
+												? "飞书导入"
+												: "审计日志"}
 						</button>
 					))}
 				</nav>
@@ -82,6 +92,7 @@ export function App() {
 			{tab === "storage" && <Storage />}
 			{tab === "security" && <Security />}
 			{tab === "mailimport" && <MailImport />}
+			{tab === "feishu" && <FeishuImport />}
 			{tab === "audit" && <Audit />}
 		</div>
 	);

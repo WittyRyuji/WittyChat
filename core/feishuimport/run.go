@@ -565,3 +565,67 @@ func ParseFeishuURL(raw string) (Root, bool) {
 	}
 	return Root{}, false
 }
+
+// JobWithCounts: one job row + its item tallies for list endpoints.
+// 任务+计数。
+type JobWithCounts struct {
+	Job
+	Total, Done, Skipped, Failed, Pending int
+}
+
+// ListJobs returns the caller's jobs (all when all=true) newest first.
+// 列任务：普通用户看自己，all=true 看全部。
+func (s *Store) ListJobs(ctx context.Context, uid uuid.UUID, all bool) ([]JobWithCounts, error) {
+	q := `SELECT j.id,j.name,j.mode,j.status,j.roots,COALESCE(j.last_error,''),j.created_by,j.created_at,
+	             count(i.obj_token), count(i.obj_token) FILTER (WHERE i.status='done'),
+	             count(i.obj_token) FILTER (WHERE i.status='skipped'),
+	             count(i.obj_token) FILTER (WHERE i.status='failed'),
+	             count(i.obj_token) FILTER (WHERE i.status='pending')
+	      FROM feishu_import_jobs j LEFT JOIN feishu_import_items i ON i.job_id=j.id`
+	if !all {
+		q += ` WHERE j.created_by=$1`
+	}
+	q += ` GROUP BY j.id ORDER BY j.created_at DESC`
+	args := []any{}
+	if !all {
+		args = append(args, uid)
+	}
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []JobWithCounts
+	for rows.Next() {
+		var j JobWithCounts
+		if err := rows.Scan(&j.ID, &j.Name, &j.Mode, &j.Status, &j.Roots, &j.LastError,
+			&j.CreatedBy, &j.CreatedAt, &j.Total, &j.Done, &j.Skipped, &j.Failed, &j.Pending); err == nil {
+			out = append(out, j)
+		}
+	}
+	return out, nil
+}
+
+// JobDetail: the job + up to 500 items, non-done first. 任务+条目（未完成优先）。
+func (s *Store) JobDetail(ctx context.Context, jobID uuid.UUID) (*Job, []Item, error) {
+	j, err := s.loadJob(ctx, jobID)
+	if err != nil {
+		return nil, nil, err
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT obj_type,obj_token,title,path,COALESCE(status,''),COALESCE(error,''),COALESCE(doc_ids,'{}')
+		 FROM feishu_import_items WHERE job_id=$1
+		 ORDER BY CASE status WHEN 'done' THEN 1 ELSE 0 END, obj_token LIMIT 500`, jobID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var items []Item
+	for rows.Next() {
+		var it Item
+		if err := rows.Scan(&it.ObjType, &it.ObjToken, &it.Title, &it.Path, &it.Status, &it.Error, &it.DocIDs); err == nil {
+			items = append(items, it)
+		}
+	}
+	return j, items, nil
+}

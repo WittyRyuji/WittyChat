@@ -261,3 +261,31 @@ func TestStartJobEnqueuesOnce(t *testing.T) {
 		t.Fatalf("after re-start tasks=%d want 1", n)
 	}
 }
+
+func TestListJobsCountsAndOwner(t *testing.T) {
+	s, ctx, me, other, _ := env(t)
+	j, _ := s.CreateJob(ctx, me, false, "x", "self", json.RawMessage(`[]`))
+	_, _ = s.pool.Exec(ctx, `INSERT INTO feishu_import_items (job_id,obj_type,obj_token,title,status)
+		VALUES ($1,'docx','a','x','done'),($1,'docx','b','y','skipped'),($1,'docx','c','z','failed')`, j.ID)
+	jobs, err := s.ListJobs(ctx, me, false)
+	if err != nil || len(jobs) == 0 {
+		t.Fatalf("list: %v", err)
+	}
+	got := jobs[0]
+	if got.Total != 3 || got.Done != 1 || got.Skipped != 1 || got.Failed != 1 {
+		t.Fatalf("counts %+v", got)
+	}
+	// other user's jobs hidden
+	jobs2, _ := s.ListJobs(ctx, other, false)
+	for _, j2 := range jobs2 {
+		if j2.ID == j.ID {
+			t.Fatal("other user saw the job")
+		}
+	}
+	// JobDetail: creator ok; the store itself doesn't gate — the http layer does
+	// via fiOwnerOrAdmin; here assert the rows load.
+	_, items, err := s.JobDetail(ctx, j.ID)
+	if err != nil || len(items) != 3 {
+		t.Fatalf("detail: %v %d", err, len(items))
+	}
+}

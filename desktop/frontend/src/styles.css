@@ -2892,3 +2892,55 @@ button.avatar .avatar-img {
   border-radius: 6px;
   margin-bottom: 6px;
 }
+
+/* 从飞书导入 panel in the docs sidebar / 文档侧栏的飞书导入面板 */
+.feishu-panel {
+  padding: 0 14px 12px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+.feishu-panel textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font: inherit;
+}
+.feishu-panel .counts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.feishu-panel .fi-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.feishu-panel .fi-items li {
+  padding: 2px 0;
+  overflow-wrap: anywhere;
+}
+.feishu-panel button.link {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-align: left;
+}
+.feishu-panel button.link:hover {
+  text-decoration: underline;
+}
+.feishu-panel .fi-past {
+  display: block;
+  padding: 2px 0;
+}
+.feishu-panel .err-sm {
+  color: var(--dim);
+}

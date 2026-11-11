@@ -34,6 +34,7 @@ import (
 	"wittychat/core/auth"
 	"wittychat/core/db"
 	"wittychat/core/docs"
+	"wittychat/core/feishuimport"
 	"wittychat/core/hr"
 	"wittychat/core/im"
 	"wittychat/core/mail"
@@ -216,6 +217,7 @@ func cmdServe() {
 		Agents:     agents.NewStore(pool),
 		HR:         hr.New(pool),
 		Docs:       docs.New(pool, imStore.IsMember, imStore.MemberRole),
+		Feishu:     feishuimport.New(pool, objStore, docs.New(pool, imStore.IsMember, imStore.MemberRole), key),
 		Office:     officeConfig(),
 	}
 

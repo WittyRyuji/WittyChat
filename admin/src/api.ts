@@ -221,3 +221,27 @@ export const miApi = {
 		req("POST", `/api/v1/admin/mail-import/jobs/${id}/finish`),
 	del: (id: string) => req("DELETE", `/api/v1/admin/mail-import/jobs/${id}`),
 };
+
+export interface FIJob {
+	id: string;
+	name: string;
+	mode: string;
+	status: string;
+	created_by: string;
+	total: number;
+	done: number;
+	skipped: number;
+	failed: number;
+	pending: number;
+}
+export const fiApi = {
+	app: () =>
+		req<{ configured: boolean; app_id: string; base_url: string }>(
+			"GET",
+			"/api/v1/admin/feishu/app",
+		),
+	setApp: (app_id: string, app_secret: string, base_url?: string) =>
+		req("PUT", "/api/v1/admin/feishu/app", { app_id, app_secret, base_url }),
+	clearApp: () => req("DELETE", "/api/v1/admin/feishu/app"),
+	jobs: () => req<FIJob[]>("GET", "/api/v1/feishu/jobs?all=1"),
+};

@@ -35,6 +35,7 @@ type Job struct {
 	Roots        json.RawMessage `json:"roots"`
 	LastError    string          `json:"last_error"`
 	CreatedBy    uuid.UUID       `json:"created_by"`
+	CreatedAt    time.Time       `json:"created_at"`
 	CreatorEmail string          `json:"-"`
 	CreatorAlts  []string        `json:"-"`
 	Discovered   bool            `json:"-"`

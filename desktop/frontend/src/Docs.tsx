@@ -5,10 +5,11 @@
 // 原生协同文档（飞书式）：左列表 + 按类型分发编辑器（富文本/表格/演示），
 // 统一走 /ws/doc/{id} Yjs 同步；awareness 驱动在线徽章；中继逐条落库。
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api2, type DocInfo, docsApi, type UserPublic } from "./api";
+import { api2, type DocInfo, docsApi, feishuApi, type UserPublic } from "./api";
 import { cursorColor } from "./colors";
 import DocTextEditor from "./DocTextEditor";
 import { extOf, fileToHtml, fileToSheets, isDocFile, isSheetFile } from "./docimport";
+import { FeishuImport } from "./FeishuImport";
 import SheetEditor from "./SheetEditor";
 import SlideEditor from "./SlideEditor";
 import { useDocConn } from "./useDocConn";
@@ -135,6 +136,15 @@ export function Docs({
     if (firstId) setActiveId(firstId);
   };
 
+  const [feishuOn, setFeishuOn] = useState(false);
+  const [feishuPanel, setFeishuPanel] = useState(false);
+  useEffect(() => {
+    feishuApi
+      .status()
+      .then((s) => setFeishuOn(s.configured))
+      .catch(() => {});
+  }, []);
+
   const delDoc = (d: DocInfo) => {
     if (!window.confirm(`删除「${d.title || "未命名"}」？删除后所有成员都将无法再访问。`)) return;
     docsApi
@@ -171,6 +181,11 @@ export function Docs({
             >
               导入
             </button>
+            {feishuOn && (
+              <button type="button" className="ghost sm" onClick={() => setFeishuPanel((v) => !v)}>
+                从飞书导入
+              </button>
+            )}
             {createMenu && (
               <div className="menu">
                 <button type="button" onClick={() => createDoc("doc")}>
@@ -186,6 +201,17 @@ export function Docs({
             )}
           </div>
         </div>
+        {feishuPanel && (
+          <FeishuImport
+            onDone={() =>
+              docsApi
+                .list()
+                .then((r) => setDocs(r.docs))
+                .catch(() => {})
+            }
+            onOpenDoc={(id) => setActiveId(id)}
+          />
+        )}
         <div className="doc-kind-tabs">
           {(["", "doc", "sheet", "slide"] as const).map((k) => (
             <button

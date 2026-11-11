@@ -17,6 +17,7 @@ import (
 	"wittychat/core/audit"
 	"wittychat/core/auth"
 	"wittychat/core/docs"
+	"wittychat/core/feishuimport"
 	"wittychat/core/hr"
 	"wittychat/core/im"
 	"wittychat/core/mail"
@@ -50,6 +51,7 @@ type Deps struct {
 	Signer      *objects.Signer // short-lived download URLs / 签名下载URL
 	Mail        *mail.Store
 	Import      *mailimport.Store
+	Feishu      *feishuimport.Store
 	Agents      *agents.Store
 	HR          *hr.Store
 	Docs        *docs.Store
@@ -129,6 +131,7 @@ func New(d *Deps) http.Handler {
 	registerAuth(api, d)
 	registerAdmin(api, d)
 	registerMailImport(api, d)
+	registerFeishuImport(api, d)
 	registerIM(api, d)
 	registerIM2(api, d)
 	registerPrefs(api, d)
