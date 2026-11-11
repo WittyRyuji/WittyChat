@@ -1,6 +1,8 @@
 // Typed client for the WittyChat HTTP API + WS notifications.
 // WittyChat HTTP API + WS 提醒的类型化客户端。
 
+import { partPlan } from "./partplan";
+
 export interface UserPublic {
   id: string;
   email: string;
@@ -260,6 +262,31 @@ export const api = {
     }>("GET", "/api/v1/settings"),
 };
 
+export interface StorageLimits {
+  upload_max_bytes: number;
+  large_max_bytes: number;
+  multipart: boolean;
+  used_bytes: number;
+  quota_bytes: number;
+}
+export interface UploadDone {
+  id: string;
+  name: string;
+  size: number;
+  mime: string;
+  w: number | null;
+  h: number | null;
+  status: string;
+  deduplicated: boolean;
+}
+// MultipartUnavailableError: server has no S3 — the caller must fall back
+// or report "not supported". / 服务端无 S3——调用方须降级或报不支持。
+export class MultipartUnavailableError extends Error {
+  constructor() {
+    super("server has no S3 backend / 服务端未启用 S3");
+    this.name = "MultipartUnavailableError";
+  }
+}
 let officeOn: Promise<boolean> | null = null;
 
 export const api2 = {
@@ -273,6 +300,96 @@ export const api2 = {
     });
     if (!res.ok) throw new Error(`upload failed: ${res.status}`);
     return res.json() as Promise<{ id: string; name: string; size: number; mime: string }>;
+  },
+  // storageLimits fetches /api/v1/objects/quota every call — one GET per
+  // pick, so admin changes (upload_max/large_max/S3 toggle) apply
+  // immediately. / 每次调用都拉取：上限/S3 开关改动即时生效。
+  storageLimits: () => req<StorageLimits>("GET", "/api/v1/objects/quota"),
+  // uploadLarge: S3 multipart upload for files over upload_max_bytes —
+  // init → PUT parts (concurrency 3, 3 retries each) → complete.
+  // Presigned part PUTs carry NO Authorization header; the returned ETag
+  // must be readable, which requires bucket CORS ExposeHeaders: ETag.
+  // 大文件分片上传：init → 分片 PUT（并发3、各重试3次）→ complete。
+  // 预签名分片 PUT 不带 Authorization；读不到 ETag 说明桶 CORS 未放行。
+  uploadLarge: async (
+    file: File,
+    opts: { convId?: string; purpose: "attachment" | "mail" },
+    onProgress?: (pct: number) => void
+  ) => {
+    const initRes = await fetch(`${API_BASE}/api/v1/objects/multipart/init`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
+      body: JSON.stringify({
+        conv_id: opts.convId,
+        purpose: opts.purpose,
+        name: file.name,
+        size: file.size,
+        mime: file.type || "application/octet-stream",
+      }),
+    });
+    if (initRes.status === 501) throw new MultipartUnavailableError();
+    if (initRes.status === 413) throw new Error(`文件过大，超过上限 / file too large`);
+    if (initRes.status === 507) throw new Error("存储配额已满 / storage quota exceeded");
+    if (!initRes.ok) throw new Error(`multipart init failed: ${initRes.status}`);
+    const init = (await initRes.json()) as {
+      object_id: string;
+      part_size: number;
+      urls: string[];
+      deduplicated?: boolean;
+      id?: string;
+    };
+    if (!init.urls || init.urls.length === 0) {
+      throw new Error("multipart init returned no part URLs");
+    }
+    const plan = partPlan(file.size, init.part_size);
+    const etags: { part_number: number; etag: string }[] = new Array(plan.length);
+    let doneBytes = 0;
+    const putPart = async (idx: number) => {
+      const p = plan[idx];
+      const url = init.urls[p.n - 1];
+      let lastErr: unknown;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const res = await fetch(url, { method: "PUT", body: file.slice(p.start, p.end) });
+          if (!res.ok) throw new Error(`part ${p.n} put ${res.status}`);
+          const etag = res.headers.get("ETag");
+          if (!etag) {
+            throw new Error(
+              "分片响应读不到 ETag——S3 桶 CORS 需配置 ExposeHeaders: ETag / " +
+                "missing ETag: bucket CORS must expose ETag"
+            );
+          }
+          etags[idx] = { part_number: p.n, etag };
+          doneBytes += p.end - p.start;
+          onProgress?.(Math.round((doneBytes / file.size) * 100));
+          return;
+        } catch (e) {
+          lastErr = e;
+          await new Promise((r) => setTimeout(r, 300 * 2 ** attempt));
+        }
+      }
+      throw lastErr instanceof Error ? lastErr : new Error(`part ${p.n} failed`);
+    };
+    // Fixed-3 worker pool / 并发 3 的简易池
+    let next = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(3, plan.length) }, async () => {
+        while (next < plan.length) {
+          const i = next++;
+          await putPart(i);
+        }
+      })
+    );
+    const doneRes = await fetch(`${API_BASE}/api/v1/objects/multipart/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
+      body: JSON.stringify({
+        object_id: init.object_id,
+        parts: etags.sort((a, b) => a.part_number - b.part_number),
+      }),
+    });
+    if (!doneRes.ok) throw new Error(`multipart complete failed: ${doneRes.status}`);
+    return doneRes.json() as Promise<UploadDone>;
   },
   // Object fetch paths carry NO token — bytes are pulled via authBlob
   // (Authorization header) and shown through blob: URLs; browser/system

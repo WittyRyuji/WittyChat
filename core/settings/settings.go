@@ -22,6 +22,8 @@ const (
 	KeyIMAtAll           = "im.at_all"               // "all" | "admin", default "all"
 	KeyStorageQuota      = "storage.quota_bytes"     // int bytes, 0 = unlimited
 	KeyStorageUploadMax  = "storage.upload_max_mb"   // int MB per file, default 5
+	KeyStorageLargeMax   = "storage.large_max_mb"    // int MB per S3 multipart file, default 2048
+	KeyStorageColdDays   = "storage.cold_days"       // int days before cold→s3, 0 = off, default 90
 	KeyMailOutbound      = "mail.outbound_enabled"   // bool, default true
 	KeyMailDKIMKey       = "mail.dkim_key"           // string PEM, RSA private key
 	KeyMailDKIMSelector  = "mail.dkim_selector"      // string, default "s1"
@@ -38,6 +40,8 @@ const (
 	MaxMessageCharsCap = int64(5000)
 	DefRecallTimeout   = int64(300)
 	DefUploadMaxMB     = int64(5)
+	DefLargeMaxMB      = int64(2048)
+	DefColdDays        = int64(90)
 	DefMinPassword     = int64(15)
 	DefLockThreshold   = int64(5)
 	DefLockMinutes     = int64(15)
@@ -62,6 +66,8 @@ var IntBounds = map[string][2]int64{
 	KeyAuditRetention:    {1, 36500},
 	KeyStorageQuota:      {0, 1 << 50},
 	KeyStorageUploadMax:  {1, 2048},
+	KeyStorageLargeMax:   {1, 102400},
+	KeyStorageColdDays:   {0, 3650}, // 0 = cold migration off / 0=关闭冷迁移
 }
 
 // ValidateInt checks a numeric policy value against IntBounds.

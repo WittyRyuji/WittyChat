@@ -33,5 +33,10 @@ Debug with CDP: launch with `WITTYCHAT_DEBUG_PORT=9222` (`WEBVIEW2_ADDITIONAL_BR
 4. `./wittychat-server.exe bootstrap -email admin@wittyloong.com -name Ryuji -password <pw>`, complete first-run setup (`POST /setup/confirm`), `./wittychat-server.exe dkim -domain wittyloong.com`.
 5. Start server + worker, then `python scripts/seed_dev.py` (creates Alice/Carol, DM/group/stickers/mail with image fixtures incl. EXIF orientations; manifest at `%TEMP%\wc_seed\manifest.json`). The sticker shelf is per-device localStorage (`wittychat.stickers`) — inject `manifest.stickers` manually.
 
+## S3 (dev)
+- Garage in `deploy/docker-compose.dev.yml` (`dxflrs/garage:v2.5.0`, ports 3900/3903, config `deploy/garage/`). After `compose up garage`, run `sh deploy/garage/bootstrap.sh` once (layout + bucket + key `GKDEV0DEV0DEV0DEV0DEV0`/`devsecret_devsecret_devsecret_012345`), then `compose up garage-cors` applies bucket CORS (PUT/GET/HEAD, `ExposeHeaders: ETag`).
+- Server/worker env: `WITTYCHAT_S3_ENDPOINT=http://localhost:3900`, `WITTYCHAT_S3_BUCKET=wittychat`, `WITTYCHAT_S3_ACCESS_KEY`/`WITTYCHAT_S3_SECRET_KEY` as above, optional `WITTYCHAT_S3_PUBLIC_ENDPOINT` (client-reachable presign host; SigV4 signs Host — the endpoint must preserve it).
+- S3 integration tests: `WITTYCHAT_TEST_S3_ENDPOINT/BUCKET/ACCESS_KEY/SECRET_KEY` (+ optional `_REGION`) plus the test DB DSN; `go test ./core/objects/` skips them silently without the env.
+
 ## Image dimensions (objects.width/height)
 Sniffed at upload (`core/objects/imgmeta.go`, EXIF-orientation aware for JPEG) and by the server's background sweep (`RunDimsBackfill`, keyed on `objects.dims_checked`). Never sniff on the request path — it previously truncated downloads. Client display boxes come from `desktop/frontend/src/objdims.ts` (`FIT` caps must mirror the CSS).

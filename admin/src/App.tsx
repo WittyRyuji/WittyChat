@@ -434,6 +434,12 @@ const POLICY_FIELDS: {
 	{ key: "im.read_receipts", label: "已读回执", kind: "bool" },
 	{ key: "im.at_all", label: "@所有人权限(all/admin)", kind: "str" },
 	{ key: "storage.upload_max_mb", label: "附件上限(MB)", kind: "int" },
+	{ key: "storage.large_max_mb", label: "大文件上限(MB,需S3)", kind: "int" },
+	{
+		key: "storage.cold_days",
+		label: "冷数据迁移天数(0=关闭,需S3)",
+		kind: "int",
+	},
 	{ key: "storage.quota_bytes", label: "工作区配额(字节,0=不限)", kind: "int" },
 	{ key: "docs.log_max_mb", label: "协作文档日志上限(MB)", kind: "int" },
 	{ key: "audit.retention_days", label: "审计/版本保留天数", kind: "int" },

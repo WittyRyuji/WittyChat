@@ -633,6 +633,7 @@ function Compose({
   );
   const [sending, setSending] = useState(false);
   const [err, setErr] = useState("");
+  const [uploading, setUploading] = useState<Record<string, number>>({});
   const fileRef = useRef<HTMLInputElement>(null);
 
   const send = async () => {
@@ -689,6 +690,11 @@ function Compose({
         <button type="button" className="ghost" onClick={() => fileRef.current?.click()}>
           + 附件
         </button>
+        {Object.entries(uploading).map(([k, pct]) => (
+          <span key={k} className="chip">
+            {k.replace(/-\d+$/, "")} <em>上传中 {pct}%</em>
+          </span>
+        ))}
         {files.map((f) => (
           <span key={f.id} className="chip">
             {f.name}
@@ -707,12 +713,42 @@ function Compose({
           multiple
           hidden
           onChange={async (e) => {
+            // Same size routing as chat: ≤upload_max direct, else S3
+            // multipart (mail purpose, no conv), else friendly refuse.
+            // 与聊天一致的按大小分流：超限走 S3 分片（mail 用途）。
+            const limits = await api2.storageLimits().catch(() => null);
             for (const f of Array.from(e.target.files ?? [])) {
+              const key = `${f.name}-${f.size}`;
               try {
-                files.push(await mailApi.upload(f));
+                let obj: { id: string; name: string };
+                if (!limits || f.size <= limits.upload_max_bytes) {
+                  obj = await mailApi.upload(f);
+                } else if (limits.multipart && f.size <= limits.large_max_bytes) {
+                  setUploading((x) => ({ ...x, [key]: 0 }));
+                  obj = await api2.uploadLarge(f, { purpose: "mail" }, (pct) =>
+                    setUploading((x) => ({ ...x, [key]: pct }))
+                  );
+                  setUploading((x) => {
+                    const n = { ...x };
+                    delete n[key];
+                    return n;
+                  });
+                } else {
+                  const lim = limits.multipart ? limits.large_max_bytes : limits.upload_max_bytes;
+                  setErr(`${f.name} 超过上限（${Math.round(lim / 1048576)} MB）`);
+                  continue;
+                }
+                files.push(obj);
                 setFiles([...files]);
               } catch (err) {
-                setErr(String(err));
+                setUploading((x) => {
+                  const n = { ...x };
+                  delete n[key];
+                  return n;
+                });
+                setErr(
+                  `上传失败：${f.name}${err instanceof Error && err.message ? ` — ${err.message}` : ""}`
+                );
               }
             }
             e.target.value = "";

@@ -190,6 +190,7 @@ export function Chat({
   const [quote, setQuote] = useState<OpEvent | null>(null);
   const [files, setFiles] = useState<Attachment[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState<Record<string, number>>({});
   const [typing, setTyping] = useState<Record<string, string>>({});
   const [online, setOnline] = useState<Record<string, boolean>>({});
   const [members, setMembers] = useState<Record<string, MemberInfo[]>>({});
@@ -502,14 +503,42 @@ export function Chat({
 
   const pickFile = async (list: FileList | null) => {
     if (!list || !activeId) return;
+    // Size-aware routing: ≤upload_max direct POST; over it → S3 multipart
+    // when the server supports it; over large_max → friendly refuse.
+    // 按大小分流：≤直传上限走原直传；超过则走 S3 分片（服务端支持时）；
+    // 再超大文件上限则友好拒绝。
+    const limits = await api2.storageLimits().catch(() => null);
     for (const f of Array.from(list)) {
+      const key = `${f.name}-${f.size}`;
       try {
-        const obj = await api2.upload(activeId, f);
+        let obj: { id: string; name: string; size: number; mime: string };
+        if (!limits || f.size <= limits.upload_max_bytes) {
+          obj = await api2.upload(activeId, f);
+        } else if (limits.multipart && f.size <= limits.large_max_bytes) {
+          setUploading((x) => ({ ...x, [key]: 0 }));
+          obj = await api2.uploadLarge(f, { convId: activeId, purpose: "attachment" }, (pct) =>
+            setUploading((x) => ({ ...x, [key]: pct }))
+          );
+          setUploading((x) => {
+            const n = { ...x };
+            delete n[key];
+            return n;
+          });
+        } else {
+          const lim = limits.multipart ? limits.large_max_bytes : limits.upload_max_bytes;
+          setErr(`${f.name} 超过上限（${fmtSize(lim)}）`);
+          continue;
+        }
         setFiles((x) => [...x, { id: obj.id, name: obj.name, size: obj.size, mime: obj.mime }]);
         const tb = await makeThumb(f);
         if (tb) api2.uploadThumb(obj.id, tb).catch(() => {});
-      } catch {
-        setErr(`上传失败：${f.name}`);
+      } catch (e) {
+        setUploading((x) => {
+          const n = { ...x };
+          delete n[key];
+          return n;
+        });
+        setErr(`上传失败：${f.name}${e instanceof Error && e.message ? ` — ${e.message}` : ""}`);
       }
     }
     if (fileInput.current) fileInput.current.value = "";
@@ -1167,8 +1196,13 @@ export function Chat({
                   </button>
                 </div>
               )}
-              {files.length > 0 && (
+              {(files.length > 0 || Object.keys(uploading).length > 0) && (
                 <div className="file-chips">
+                  {Object.entries(uploading).map(([k, pct]) => (
+                    <span key={k} className="chip">
+                      📎 {k.replace(/-\d+$/, "")} <em>上传中 {pct}%</em>
+                    </span>
+                  ))}
                   {files.map((f) => (
                     <span key={f.id} className="chip">
                       📎 {f.name} <em>{fmtSize(f.size)}</em>

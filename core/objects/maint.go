@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // Scanner is the antivirus plugin interface. Implementations can wrap
@@ -86,7 +87,7 @@ func (s *Store) VerifyHash(ctx context.Context, id uuid.UUID) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	rc, err := s.Open(ctx, o)
+	rc, err := s.openBytes(ctx, o)
 	if err != nil {
 		return false, err
 	}
@@ -100,26 +101,46 @@ func (s *Store) VerifyHash(ctx context.Context, id uuid.UUID) (bool, error) {
 	return got == o.SHA256, nil
 }
 
-// EnqueueVerifyAll fans a verify task out to every ready object (batch GC pass).
+// EnqueueVerifyAll fans a verify task out to every ready LOCAL object
+// (batch GC pass). S3 objects are skipped — S3 does its own integrity
+// checking and a full read costs egress; local disk bit-rot is the real
+// risk. / 只对本地 ready 对象派发校验：S3 自带完整性校验且全量回读
+// 消耗出口流量；本地盘位腐烂才是真正风险。
 func (s *Store) EnqueueVerifyAll(ctx context.Context) (int, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT id FROM objects WHERE status='ready' ORDER BY created_at LIMIT 10000`)
-	if err != nil {
-		return 0, err
-	}
-	defer rows.Close()
+	// Keyset over ALL ready objects in 1000-row pages — the old LIMIT-10000
+	// oldest-first pass never reached newer objects.
+	// 键集翻页扫全部 ready 对象——旧的 LIMIT 10000 最老优先写法永远轮不到新对象。
 	n := 0
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
+	last := uuid.Nil
+	for {
+		rows, err := s.pool.Query(ctx,
+			`SELECT id FROM objects WHERE status='ready' AND location='local' AND id > $1 ORDER BY id LIMIT 1000`, last)
+		if err != nil {
 			return n, err
 		}
-		if err := s.Enqueue(ctx, "verify", map[string]any{"object_id": id.String()}); err != nil {
+		got := 0
+		for rows.Next() {
+			var id uuid.UUID
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return n, err
+			}
+			if err := s.Enqueue(ctx, "verify", map[string]any{"object_id": id.String()}); err != nil {
+				rows.Close()
+				return n, err
+			}
+			n++
+			got++
+			last = id
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
 			return n, err
 		}
-		n++
+		if got == 0 {
+			return n, nil
+		}
 	}
-	return n, rows.Err()
 }
 
 // OrphanGC deletes objects that are pending for >7d (aborted uploads)
@@ -401,3 +422,37 @@ func (s *Store) PurgeOldVersions(ctx context.Context, older time.Duration) (int,
 }
 
 var ErrS3Only = errors.New("operation requires s3")
+
+// EnqueueIfDue enqueues a {} task of `kind` at most once per `every`:
+// advisory-locked so concurrent workers can't double-fire; skipped while
+// an equal-kind row is queued/running or finished within the window — a
+// failed run simply retries on the next tick.
+// 按周期入队：advisory 锁防并发重复；有同种 queued/running 或窗口内已
+// 完成则跳过——失败的任务下个周期自动重试。
+func (s *Store) EnqueueIfDue(ctx context.Context, kind string, every time.Duration) (bool, error) {
+	fired := false
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "sched:"+kind); err != nil {
+			return err
+		}
+		var exists bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM bg_tasks WHERE kind=$1
+			   AND (status IN ('queued','running')
+			        OR (status='done' AND updated_at > now() - $2::interval)))`,
+			kind, every).Scan(&exists); err != nil || exists {
+			return err
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO bg_tasks (kind, payload) VALUES ($1,'{}')`, kind); err != nil {
+			return err
+		}
+		fired = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return fired, nil
+}

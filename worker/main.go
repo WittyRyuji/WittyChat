@@ -59,7 +59,48 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go w.schedule(ctx)
 	w.run(ctx)
+}
+
+// schedule ticks every 5 min (and once at start) to enqueue the periodic
+// maintenance tasks — there is no external scheduler, so without this
+// gc/migrate_cold/verify_all never run.
+// 周期调度：每 5 分钟（并启动即触发一次）给维护任务入队——无外部调度器，
+// 没有它 gc/migrate_cold/verify_all 永远不会执行。
+func (w *worker) schedule(ctx context.Context) {
+	fire := func() {
+		for _, spec := range []struct {
+			kind   string
+			every  time.Duration
+			s3Only bool
+		}{
+			{"gc", 24 * time.Hour, false},
+			{"verify_all", 30 * 24 * time.Hour, false},
+			{"migrate_cold", 24 * time.Hour, true},
+		} {
+			if spec.s3Only && !w.store.S3Enabled() {
+				continue
+			}
+			fired, err := w.store.EnqueueIfDue(ctx, spec.kind, spec.every)
+			if err != nil {
+				log.Printf("schedule %s: %v", spec.kind, err)
+			} else if fired {
+				log.Printf("schedule: enqueued %s", spec.kind)
+			}
+		}
+	}
+	fire()
+	t := time.NewTicker(5 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			fire()
+		}
+	}
 }
 
 type worker struct {
@@ -102,6 +143,12 @@ func (w *worker) dispatch(ctx context.Context, t *objects.Task) error {
 	case "thumb":
 		return w.thumb(ctx, t)
 	case "gc":
+		// Abort expired multipart sessions first — pending objects are
+		// deleted there; OrphanGC then drops the files.
+		// 先中止过期分片会话（pending 行即删），再跑孤儿清理。
+		if ab, aerr := w.store.AbortExpiredUploads(ctx); aerr == nil && ab > 0 {
+			log.Printf("gc: %d expired uploads aborted", ab)
+		}
 		n, err := w.store.OrphanGC(ctx)
 		log.Printf("gc: %d orphans deleted", n)
 		if err != nil {
@@ -138,12 +185,29 @@ func (w *worker) dispatch(ctx context.Context, t *objects.Task) error {
 		log.Printf("verify_all: %d tasks enqueued", n)
 		return err
 	case "migrate_cold":
-		n, err := w.store.MigrateCold(ctx, 90*24*time.Hour, 100)
-		log.Printf("migrate_cold: %d objects moved to s3", n)
-		if errors.Is(err, objects.ErrS3Disabled) {
-			return nil // local-only deployment — no-op
+		days := settings.New(w.pool).Int(ctx, settings.KeyStorageColdDays, settings.DefColdDays)
+		if days <= 0 {
+			log.Printf("migrate_cold: storage.cold_days=0, skipped")
+			return nil
 		}
-		return err
+		age := time.Duration(days) * 24 * time.Hour
+		budget := time.Now().Add(30 * time.Minute)
+		total := 0
+		for {
+			n, err := w.store.MigrateCold(ctx, age, 100)
+			total += n
+			if errors.Is(err, objects.ErrS3Disabled) {
+				return nil // local-only deployment — no-op
+			}
+			if err != nil {
+				return err
+			}
+			if n < 100 || time.Now().After(budget) {
+				break
+			}
+		}
+		log.Printf("migrate_cold: %d objects moved to s3", total)
+		return nil
 	case "avscan":
 		objID, err := uuid.Parse(str(t.Payload["object_id"]))
 		if err != nil {

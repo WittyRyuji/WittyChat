@@ -1,0 +1,22 @@
+# Garage single-node dev config / Garage 单节点开发配置
+# S3 API on :3900, admin API on :3903. Region must match the server's
+# default WITTYCHAT_S3_REGION.
+# S3 API :3900，管理 API :3903。region 与服务端默认 WITTYCHAT_S3_REGION 一致。
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+replication_factor = 1
+consistency_mode = "degraded"
+compression_level = 1
+
+rpc_bind_addr = "0.0.0.0:3901"
+rpc_public_addr = "garage:3901"
+rpc_secret = "2ec40186befb57d6d324f02e788a1b51acc19911f96ade86bb8b078ec15c92f8"
+
+[s3_api]
+s3_region = "us-east-1"
+api_bind_addr = "0.0.0.0:3900"
+
+[admin]
+api_bind_addr = "0.0.0.0:3903"
+admin_token = "dev-garage-admin-token"

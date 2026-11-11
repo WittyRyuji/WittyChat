@@ -533,27 +533,57 @@ func (d *Deps) multipartInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		ConvID uuid.UUID `json:"conv_id"`
-		Name   string    `json:"name"`
-		Size   int64     `json:"size"`
-		Mime   string    `json:"mime"`
-		SHA256 string    `json:"sha256"`
+		ConvID  uuid.UUID `json:"conv_id"`
+		Purpose string    `json:"purpose"`
+		Name    string    `json:"name"`
+		Size    int64     `json:"size"`
+		Mime    string    `json:"mime"`
+		SHA256  string    `json:"sha256"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.Size <= 0 {
 		http.Error(w, "bad request / 请求无效", http.StatusBadRequest)
 		return
 	}
-	if !d.IM.IsMember(r.Context(), req.ConvID, uid) {
-		http.Error(w, "not a member", http.StatusForbidden)
+	purpose := req.Purpose
+	if purpose == "" {
+		purpose = "attachment"
+	}
+	switch purpose {
+	case "attachment":
+		if !d.IM.IsMember(r.Context(), req.ConvID, uid) {
+			http.Error(w, "not a member", http.StatusForbidden)
+			return
+		}
+	case "mail":
+		if req.ConvID != uuid.Nil {
+			http.Error(w, "mail multipart must not carry conv_id / 邮件分片不带会话", http.StatusBadRequest)
+			return
+		}
+	default:
+		http.Error(w, "bad purpose / 用途无效", http.StatusBadRequest)
 		return
 	}
-	sha, err := objects.ParseSHA(req.SHA256)
-	if err != nil {
-		http.Error(w, "sha256 must be 64-hex / sha256 需为64位十六进制", http.StatusBadRequest)
+	if maxMB := d.Settings.Int(r.Context(), settings.KeyStorageLargeMax, settings.DefLargeMaxMB); req.Size > maxMB<<20 {
+		http.Error(w, "file too large / 文件过大", http.StatusRequestEntityTooLarge)
 		return
+	}
+	if quota := d.Settings.Int(r.Context(), settings.KeyStorageQuota, 0); quota > 0 {
+		if used, err := d.Objects.UsedBytes(r.Context()); err == nil && used+req.Size > quota {
+			http.Error(w, "storage quota exceeded / 存储配额已满", http.StatusInsufficientStorage)
+			return
+		}
+	}
+	var sha *[32]byte
+	if req.SHA256 != "" {
+		v, err := objects.ParseSHA(req.SHA256)
+		if err != nil {
+			http.Error(w, "sha256 must be 64-hex / sha256 需为64位十六进制", http.StatusBadRequest)
+			return
+		}
+		sha = &v
 	}
 	up, urls, err := d.Objects.BeginMultipart(r.Context(), uid, req.ConvID,
-		"attachment", req.Name, req.Mime, req.Size, sha)
+		purpose, req.Name, req.Mime, req.Size, sha)
 	if errors.Is(err, objects.ErrS3Disabled) {
 		http.Error(w, "multipart disabled: use direct upload / 未启用S3,请用直传", http.StatusNotImplemented)
 		return
@@ -599,7 +629,7 @@ func (d *Deps) multipartComplete(w http.ResponseWriter, r *http.Request) {
 			PartNumber: aws.Int32(p.PartNumber), ETag: aws.String(p.ETag),
 		}
 	}
-	obj, err := d.Objects.CompleteMultipart(r.Context(), req.ObjectID, uid, etags)
+	obj, dedup, err := d.Objects.CompleteMultipart(r.Context(), req.ObjectID, uid, etags)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, objects.ErrForbidden) {
@@ -610,13 +640,16 @@ func (d *Deps) multipartComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
-	if strings.HasPrefix(obj.Mime, "image/") {
+	if !dedup && strings.HasPrefix(obj.Mime, "image/") {
 		_ = d.Objects.Enqueue(r.Context(), "thumb", map[string]any{
 			"object_id": obj.ID.String(), "owner": uid.String(),
 		})
 	}
 	_ = d.Objects.Enqueue(r.Context(), "avscan", map[string]any{"object_id": obj.ID.String()})
-	_ = json.NewEncoder(w).Encode(map[string]any{"id": obj.ID.String(), "status": obj.Status})
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"id": obj.ID.String(), "name": obj.Name, "size": obj.Size, "mime": obj.Mime,
+		"w": obj.Width, "h": obj.Height, "status": obj.Status, "deduplicated": dedup,
+	})
 }
 
 // GET /objects/quota → {used_bytes, quota_bytes}
@@ -634,7 +667,12 @@ func (d *Deps) storageQuota(w http.ResponseWriter, r *http.Request) {
 	if d.Settings != nil {
 		quota = d.Settings.Int(r.Context(), settings.KeyStorageQuota, 0)
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"used_bytes": used, "quota_bytes": quota})
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"used_bytes": used, "quota_bytes": quota,
+		"upload_max_bytes": d.Settings.Int(r.Context(), settings.KeyStorageUploadMax, settings.DefUploadMaxMB) << 20,
+		"large_max_bytes":  d.Settings.Int(r.Context(), settings.KeyStorageLargeMax, settings.DefLargeMaxMB) << 20,
+		"multipart":        d.Objects.S3Enabled(),
+	})
 }
 
 func escapeName(s string) string {

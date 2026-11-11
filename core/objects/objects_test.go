@@ -599,3 +599,39 @@ func TestReplaceBytesDims(t *testing.T) {
 		t.Fatalf("row: w=%v h=%v checked=%v want 22,14,true", w, h, checked)
 	}
 }
+
+// EnqueueIfDue: first call fires, second is suppressed while the task is
+// queued/running, a done task older than the window refires, a running
+// one suppresses.
+func TestEnqueueIfDue(t *testing.T) {
+	s, ctx, _ := testEnv(t)
+	var kb [8]byte
+	_, _ = rand.Read(kb[:])
+	kind := fmt.Sprintf("test-sched-%x", kb[:])
+	fired, err := s.EnqueueIfDue(ctx, kind, time.Hour)
+	if err != nil || !fired {
+		t.Fatalf("first call: fired=%v err=%v", fired, err)
+	}
+	fired, err = s.EnqueueIfDue(ctx, kind, time.Hour)
+	if err != nil || fired {
+		t.Fatalf("second call: fired=%v want false (queued row exists)", fired)
+	}
+	// Mark it done long ago → refires.
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE bg_tasks SET status='done', updated_at=now()-interval '2 hours' WHERE kind=$1`, kind); err != nil {
+		t.Fatal(err)
+	}
+	fired, err = s.EnqueueIfDue(ctx, kind, time.Hour)
+	if err != nil || !fired {
+		t.Fatalf("after stale done: fired=%v want true", fired)
+	}
+	// A running row suppresses.
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE bg_tasks SET status='running' WHERE kind=$1`, kind); err != nil {
+		t.Fatal(err)
+	}
+	fired, err = s.EnqueueIfDue(ctx, kind, time.Hour)
+	if err != nil || fired {
+		t.Fatalf("running row: fired=%v want false", fired)
+	}
+}

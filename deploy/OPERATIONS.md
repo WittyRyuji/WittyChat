@@ -35,6 +35,34 @@ Wails3 产出 `bin/wittychat.exe`（已验证 11.4MB）。
   检查 WebView2 runtime，缺则联网拉取。
 - **防火墙**：exe 只做出站 443/80 + wss，不需要入站放行。
 
+## S3 对象存储 (S3 Object Storage)
+
+可选：对象字节放 S3 兼容存储，DB 仍存元数据与引用。未配置即 local 模式。
+
+| 环境变量 | 说明 |
+|---|---|
+| `WITTYCHAT_S3_ENDPOINT` | S3 API 端点（服务端内部地址），如 `http://localhost:3900` |
+| `WITTYCHAT_S3_BUCKET` | 桶名 |
+| `WITTYCHAT_S3_REGION` | 默认 `us-east-1` |
+| `WITTYCHAT_S3_ACCESS_KEY` / `WITTYCHAT_S3_SECRET_KEY` | 凭据 |
+| `WITTYCHAT_S3_PREFIX` | key 前缀，默认 `wittychat/` |
+| `WITTYCHAT_S3_PUBLIC_ENDPOINT` | 可选：客户端可访问的预签名地址。SigV4 对 Host 签名——该端点必须带原始 Host 转发到 S3，否则签名失效。docker 部署中内部端点客户端不可达时用它 |
+
+分片上传的客户端直 PUT 到桶，要求桶 CORS：
+
+```json
+{"CORSRules":[{"AllowedOrigins":["http://wails.localhost","*"],
+ "AllowedMethods":["PUT","GET","HEAD"],"AllowedHeaders":["*"],
+ "ExposeHeaders":["ETag"]}]}
+```
+
+`ExposeHeaders: ETag` 必须存在——complete 需要每个分片的 ETag，读不到则上传失败。
+
+- **dev/自托管用 Garage**（`dxflrs/garage` v2.x，见 `deploy/docker-compose.dev.yml` + `deploy/garage/`）。MinIO 社区版已归档——Docker Hub 镜像 2026-09 被删、Quay 需认证、最后镜像未打补丁，不再使用。
+- **调度周期**（worker 内置，无外部调度器）：`gc` 每 24h（含过期分片中止）、`migrate_cold` 每 24h（仅启用 S3 时）、`verify_all` 每 30 天且只扫 `location='local'` 对象（S3 自做完整性校验，全量回读耗出口流量；本地盘位腐烂才是风险）。
+- **设置**（管理后台 → 安全策略）：`storage.large_max_mb`（默认 2048，S3 分片单文件上限）、`storage.cold_days`（默认 90，0 = 关闭冷迁移）、`storage.upload_max_mb`（默认 5，直传上限）、`storage.quota_bytes`。
+- 分片上传字节落在 `up/<object-id>` 专属 key（非按内容寻址）；冷迁移的对象按 `key(sha)` 寻址。
+
 ## 健康检查
 
 - `GET /healthz`（server）→ 200
