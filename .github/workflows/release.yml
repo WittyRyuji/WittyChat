@@ -3,6 +3,13 @@ name: Release Alpha
 on:
   push:
     tags: ["v*-alpha*"]
+    branches: ["release/*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing immutable alpha tag to package
+        required: true
+        default: v0.1.0-alpha
 
 permissions:
   contents: read
@@ -12,17 +19,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Resolve immutable source tag
+        id: tag
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          tag="${REQUESTED_TAG:-${GITHUB_REF_NAME#release/}}"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-alpha(\.[0-9]+)?$ ]] || exit 1
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
   verify:
+    needs: metadata
     uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.metadata.outputs.tag }}
 
   package:
-    needs: verify
+    needs: [metadata, verify]
     runs-on: windows-latest
     timeout-minutes: 30
     env:
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+      GODEBUG: http2client=0
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.metadata.outputs.tag }}
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
@@ -32,6 +59,13 @@ jobs:
       - name: Generate Wails bindings
         shell: pwsh
         run: |
+          $downloaded = $false
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            go mod download
+            if ($LASTEXITCODE -eq 0) { $downloaded = $true; break }
+            Start-Sleep -Seconds (5 * $attempt)
+          }
+          if (!$downloaded) { throw "Go dependency download failed after retries" }
           go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Push-Location desktop
@@ -54,7 +88,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Package exact tagged sources
         shell: pwsh
-        run: ./scripts/package-release.ps1 -ExpectedTag "${{ github.ref_name }}"
+        run: ./scripts/package-release.ps1 -ExpectedTag "${{ needs.metadata.outputs.tag }}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-release
@@ -65,12 +99,14 @@ jobs:
           retention-days: 14
 
   publish:
-    needs: package
+    needs: [metadata, package]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.metadata.outputs.tag }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: windows-release
@@ -78,9 +114,10 @@ jobs:
       - name: Publish prerelease
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" release/*.zip release/SHA256SUMS.txt \
+          version="${RELEASE_TAG#v}"
+          gh release create "$RELEASE_TAG" release/*.zip release/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease \
             --title "WittyChat $version" \
             --notes-file "docs/RELEASE_NOTES_${version}.md"

@@ -24,3 +24,9 @@ debugging profiles and configuration copied from the maintainer's machine.
 Never move an existing public tag or overwrite released assets silently.
 If verification fails, fix the workflow and disclose the failure; publish a new
 version rather than rewriting an already published release.
+
+Before a release has been published, the workflow may be retried with
+`workflow_dispatch` selecting its existing tag, or by pushing a new
+`release/v0.1.0-alpha` retry branch containing workflow-only fixes.
+The jobs check out and verify the original immutable tag, not the retry branch.
+Do not use the retry path to replace an already published asset.
