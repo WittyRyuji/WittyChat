@@ -36,6 +36,48 @@ func (s *Store) RenameConv(ctx context.Context, actor, convID uuid.UUID, title s
 	return op, err
 }
 
+// SetGroupAvatar sets a group's avatar object (owner/admin, like rename)
+// and records an `avatar` op so members see the change in the timeline.
+// 设置群头像（群主/管理员，同改群名），并记一条 avatar 操作。
+func (s *Store) SetGroupAvatar(ctx context.Context, actor, convID, objID uuid.UUID) (*Op, error) {
+	var op *Op
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		c, role, err := s.requireMember(ctx, tx, convID, actor)
+		if err != nil {
+			return err
+		}
+		if c.Kind != ConvKindGroup || (role != RoleOwner && role != RoleAdmin) {
+			return ErrNoPermission
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE conversations SET avatar_object_id=$2 WHERE id=$1`, convID, objID); err != nil {
+			return err
+		}
+		o, err := s.appendOpTx(ctx, tx, convID, actor, OpAvatar,
+			nil, 0, "", map[string]any{"object_id": objID.String()})
+		op = o
+		return err
+	})
+	return op, err
+}
+
+// GroupAvatarFor returns a group's avatar object for a current member.
+// 当前成员取群头像对象。
+func (s *Store) GroupAvatarFor(ctx context.Context, convID, uid uuid.UUID) (uuid.UUID, error) {
+	var id *uuid.UUID
+	err := s.pool.QueryRow(ctx, `
+		SELECT c.avatar_object_id FROM conversations c
+		JOIN conv_members m ON m.conv_id=c.id AND m.user_id=$2 AND m.left_at IS NULL
+		WHERE c.id=$1`, convID, uid).Scan(&id)
+	if err != nil {
+		return uuid.Nil, ErrNotMember
+	}
+	if id == nil {
+		return uuid.Nil, ErrNotFound
+	}
+	return *id, nil
+}
+
 // TransferOwner hands ownership to another member (owner only).
 // Old owner keeps 'admin' role; emits a 'transfer' op.
 func (s *Store) TransferOwner(ctx context.Context, actor, convID, target uuid.UUID) (*Op, error) {

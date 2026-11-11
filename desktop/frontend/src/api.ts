@@ -27,6 +27,7 @@ export interface ConversationInfo {
   peer_name?: string;
   peer_read_seq?: number; // dm: peer's watermark → 已读回执
   member_count?: number;
+  avatar_object_id?: string; // group avatar / 群头像
 }
 
 export interface OpEvent {
@@ -74,6 +75,7 @@ export interface WsFrame {
   user_id?: string;
   name?: string;
   online?: boolean;
+  avatar_object_id?: string; // user_update
 }
 
 const TOKEN_KEY = "wittychat.token";
@@ -222,6 +224,8 @@ export const api = {
       is_public: isPublic,
       member_ids: memberIds,
     }),
+  setGroupAvatar: (convId: string, objectId: string) =>
+    req("POST", `/api/v1/conversations/${convId}/avatar`, { object_id: objectId }),
   renameConv: (convId: string, title: string) =>
     req("POST", `/api/v1/conversations/${convId}/rename`, { title }),
   transferConv: (convId: string, userId: string) =>
@@ -426,6 +430,7 @@ export const api2 = {
   },
   avatarURL: (userId: string) => `${API_BASE}/api/v1/users/${userId}/avatar`,
   workspaceLogoPath: () => "/api/v1/workspace/logo",
+  groupAvatarPath: (convId: string) => `/api/v1/conversations/${convId}/avatar`,
   uploadObject: async (file: File, purpose: string) => {
     const fd = new FormData();
     fd.append("file", file, file.name);

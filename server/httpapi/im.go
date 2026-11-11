@@ -208,6 +208,9 @@ func (d *Deps) directory(ctx context.Context, in *struct{ Headers }) (*struct {
 			LastOpSeq: e.LastOpSeq, LastReadSeq: e.LastReadSeq, Unread: e.Unread,
 			Preview: e.Preview, PreviewAt: e.PreviewAt, MemberCount: e.MemberCount,
 		}
+		if e.AvatarID != nil {
+			ci.AvatarID = e.AvatarID.String()
+		}
 		if e.PeerUserID != nil {
 			ci.PeerUserID = e.PeerUserID.String()
 			ci.PeerName = e.PeerName

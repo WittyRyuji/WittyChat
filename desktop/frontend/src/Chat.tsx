@@ -195,6 +195,32 @@ export function Chat({
   const [online, setOnline] = useState<Record<string, boolean>>({});
   const [members, setMembers] = useState<Record<string, MemberInfo[]>>({});
   const [contacts, setContacts] = useState<UserPublic[]>([]);
+  // Live identity by user id: seeded from the directory and patched by
+  // user_update frames, so a rename/avatar change shows everywhere at once —
+  // stored ops only carry the uid; their actor_name is just a fallback.
+  // 按 uid 的实时身份：通讯录初始化，user_update 帧增量更新；改名/换头像即时全局生效，
+  // 消息里存的只是 uid，actor_name 仅作兜底。
+  const [live, setLive] = useState<
+    Record<string, { display_name: string; avatar_object_id?: string }>
+  >({});
+  useEffect(() => {
+    setLive((prev) => {
+      const next = { ...prev };
+      for (const u of contacts) {
+        next[u.id] = { display_name: u.display_name, avatar_object_id: u.avatar_object_id };
+      }
+      return next;
+    });
+  }, [contacts]);
+  const who = (id?: string, fallback?: string) => {
+    if (id && id === me.id) return me;
+    const u = id ? live[id] : undefined;
+    return {
+      id: id ?? "",
+      display_name: u?.display_name || fallback || "?",
+      avatar_object_id: u?.avatar_object_id,
+    };
+  };
   const [modal, setModal] = useState<"" | "newGroup" | "join" | "members">("");
   const [viewer, setViewer] = useState<{ url: string; name: string } | null>(null);
   const [msgLimit, setMsgLimit] = useState(MSG_LIMIT);
@@ -364,6 +390,13 @@ export function Chat({
 
   // ---------- ws ----------
 
+  // The socket is opened once; it reads the current user through refs.
+  // 连接只建立一次，通过 ref 读取当前用户。
+  const meIdRef = useRef(me.id);
+  meIdRef.current = me.id;
+  const onMeUpdatedRef = useRef(onMeUpdated);
+  onMeUpdatedRef.current = onMeUpdated;
+
   useEffect(() => {
     refreshDirectory();
     api
@@ -419,6 +452,34 @@ export function Chat({
               break;
             case "presence":
               if (f.user_id) setOnline((o) => ({ ...o, [f.user_id as string]: !!f.online }));
+              break;
+            case "user_update":
+              if (f.user_id) {
+                const uid = f.user_id;
+                setLive((l) => ({
+                  ...l,
+                  [uid]: {
+                    display_name: f.name ?? l[uid]?.display_name ?? "",
+                    avatar_object_id: f.avatar_object_id || undefined,
+                  },
+                }));
+                setContacts((cs) =>
+                  cs.map((u) =>
+                    u.id === uid
+                      ? {
+                          ...u,
+                          display_name: f.name ?? u.display_name,
+                          avatar_object_id: f.avatar_object_id || undefined,
+                        }
+                      : u
+                  )
+                );
+                if (uid === meIdRef.current) onMeUpdatedRef.current();
+                setActiveId((cur) => {
+                  if (cur) loadMembers(cur);
+                  return cur;
+                });
+              }
               break;
             case "typing":
               if (f.conv_id && f.user_id) {
@@ -812,7 +873,7 @@ export function Chat({
   };
 
   const convTitle = (c: ConversationInfo) =>
-    c.kind === "dm" ? c.peer_name || "私聊" : c.title || "群聊";
+    c.kind === "dm" ? who(c.peer_user_id, c.peer_name || "私聊").display_name : c.title || "群聊";
 
   const pendingHere = useMemo(
     () => pending.filter((p) => p.convId === activeId),
@@ -932,16 +993,14 @@ export function Chat({
                   onClick={() => setActiveId(c.id)}
                 >
                   {c.kind === "dm" && c.peer_user_id ? (
-                    <Avatar
-                      className="avatar sm conv-av"
-                      user={{
-                        id: c.peer_user_id,
-                        display_name: c.peer_name ?? "?",
-                        avatar_object_id: undefined,
-                      }}
-                    />
+                    <Avatar className="avatar sm conv-av" user={who(c.peer_user_id, c.peer_name)} />
                   ) : (
-                    <GroupAvatar className="avatar sm conv-av" id={c.id} title={convTitle(c)} />
+                    <GroupAvatar
+                      className="avatar sm conv-av"
+                      id={c.id}
+                      title={convTitle(c)}
+                      avatarId={c.avatar_object_id}
+                    />
                   )}
                   <span className="conv-col">
                     <span className="conv-title">
@@ -965,7 +1024,12 @@ export function Chat({
             <>
               <header className="conv-head">
                 {active.kind === "group" && (
-                  <GroupAvatar className="avatar sm" id={active.id} title={convTitle(active)} />
+                  <GroupAvatar
+                    className="avatar sm"
+                    id={active.id}
+                    title={convTitle(active)}
+                    avatarId={active.avatar_object_id}
+                  />
                 )}
                 <b>{convTitle(active)}</b>
                 {typingHere.length > 0 && (
@@ -1009,6 +1073,8 @@ export function Chat({
                       <Fragment key={o.op_seq}>
                         {sep}
                         <div className="sys">
+                          {who(o.actor_id, o.actor_name).display_name}{" "}
+                          {o.kind === "avatar" && "更换了群头像"}
                           {o.kind === "member_add" && "加入了会话"}
                           {o.kind === "member_remove" && "离开了会话"}
                           {o.kind === "edit" && "编辑了消息"}
@@ -1033,21 +1099,10 @@ export function Chat({
                     <Fragment key={o.op_seq}>
                       {sep}
                       <div className={`msg ${mine ? "mine" : ""}`}>
-                        <Avatar
-                          className="avatar sm msg-av"
-                          user={
-                            mine
-                              ? me
-                              : {
-                                  id: o.actor_id ?? "",
-                                  display_name: o.actor_name ?? "?",
-                                  avatar_object_id: undefined,
-                                }
-                          }
-                        />
+                        <Avatar className="avatar sm msg-av" user={who(o.actor_id, o.actor_name)} />
                         <div className="msg-col">
                           <div className="msg-meta">
-                            {o.actor_name || me.display_name} ·{" "}
+                            {who(o.actor_id, o.actor_name).display_name} ·{" "}
                             {new Date(o.created_at).toLocaleTimeString()}
                             {o.edited && " · 已编辑"}
                             {o.payload?.mentions_all === true && (
@@ -1056,7 +1111,8 @@ export function Chat({
                           </div>
                           {q && (
                             <div className="quote">
-                              {q.actor_name}: {q.recalled ? "已撤回" : q.body?.slice(0, 80)}
+                              {who(q.actor_id, q.actor_name).display_name}:{" "}
+                              {q.recalled ? "已撤回" : q.body?.slice(0, 80)}
                             </div>
                           )}
                           <div className="msg-body-wrap">
@@ -1139,7 +1195,9 @@ export function Chat({
                                     className={`rx-pill${
                                       r.users.some((u) => u.id === me.id) ? " mine" : ""
                                     }`}
-                                    title={r.users.map((u) => u.name).join("、")}
+                                    title={r.users
+                                      .map((u) => who(u.id, u.name).display_name)
+                                      .join("、")}
                                     onClick={() => reactEmoji(o, r.emoji)}
                                   >
                                     {r.emoji}
@@ -1190,7 +1248,8 @@ export function Chat({
               </div>
               {quote && (
                 <div className="quote-bar">
-                  引用 {quote.actor_name}: {quote.body?.slice(0, 60)}
+                  引用 {who(quote.actor_id, quote.actor_name).display_name}:{" "}
+                  {quote.body?.slice(0, 60)}
                   <button type="button" className="ghost" onClick={() => setQuote(null)}>
                     ✕
                   </button>

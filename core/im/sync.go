@@ -32,13 +32,14 @@ type DirectoryEntry struct {
 	PeerName    string
 	PeerReadSeq int64 // dm: peer's read watermark → 已读回执
 	MemberCount int
+	AvatarID    *uuid.UUID // group avatar object / 群头像对象
 }
 
 // Directory returns all my conversations with watermarks + unread counts.
 // One query; cheap — conv_members index on (user_id) where left_at IS NULL.
 func (s *Store) Directory(ctx context.Context, userID uuid.UUID) ([]*DirectoryEntry, error) {
 	rows, err := s.pool.Query(ctx, `
-SELECT c.id, c.kind, COALESCE(c.title,''), c.is_public, c.last_op_seq,
+SELECT c.id, c.kind, COALESCE(c.title,''), c.is_public, c.last_op_seq, c.avatar_object_id,
        m.last_read_op_seq,
        (SELECT count(*) FROM conv_ops o WHERE o.conv_id=c.id
           AND o.kind='message' AND o.op_seq > m.last_read_op_seq
@@ -72,7 +73,7 @@ ORDER BY c.last_op_seq DESC`, userID)
 		var previewAt *time.Time
 		var peer *uuid.UUID
 		var peerRead *int64
-		if err := rows.Scan(&e.ConvID, &e.Kind, &e.Title, &e.IsPublic, &e.LastOpSeq,
+		if err := rows.Scan(&e.ConvID, &e.Kind, &e.Title, &e.IsPublic, &e.LastOpSeq, &e.AvatarID,
 			&e.LastReadSeq, &e.Unread, &e.Preview, &previewAt, &e.MemberCount, &peer, &peerRead); err != nil {
 			return nil, err
 		}

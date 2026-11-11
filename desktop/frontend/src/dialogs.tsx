@@ -5,6 +5,7 @@
 import { useEffect, useState } from "react";
 import {
   api,
+  api2,
   type ConversationInfo,
   type MemberInfo,
   type MessageSearchHit,
@@ -274,8 +275,13 @@ export function MembersPanel({
     <Modal
       title={
         <span className="grow-name">
-          <GroupAvatar className="avatar sm" id={conv.id} title={conv.title || "群"} /> 成员管理 ·{" "}
-          {conv.title || "群聊"}
+          <GroupAvatar
+            className="avatar sm"
+            id={conv.id}
+            title={conv.title || "群"}
+            avatarId={conv.avatar_object_id}
+          />{" "}
+          成员管理 · {conv.title || "群聊"}
         </span>
       }
       onClose={onClose}
@@ -305,6 +311,26 @@ export function MembersPanel({
               修改群名
             </button>
           )}
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => {
+              const input = document.createElement("input");
+              input.type = "file";
+              input.accept = "image/png,image/jpeg,image/gif,image/webp";
+              input.onchange = () => {
+                const f = input.files?.[0];
+                if (!f) return;
+                void act(async () => {
+                  const o = await api2.uploadObject(f, "avatar");
+                  await api.setGroupAvatar(conv.id, o.id);
+                })();
+              };
+              input.click();
+            }}
+          >
+            更换群头像
+          </button>
           <button type="button" className="ghost" onClick={() => setAdding(!adding)}>
             + 拉人
           </button>

@@ -670,6 +670,16 @@ type AdminObject struct {
 // AdminList returns objects for storage management — filterable by owner
 // (uuid.Nil = all) and created_at range [from,to).
 // AdminList 返回存储管理用的对象清单——可按属主与创建日期过滤。
+// notCoreAsset excludes identity assets from attachment governance: the
+// organization logo, user avatars and group avatars are not attachments and
+// must never be listed or purged with them (alias `o`).
+// 核心资产（组织 Logo、用户头像、群头像）不属于附件，附件管理既不列出也不清理。
+const notCoreAsset = `
+	COALESCE(o.purpose,'') NOT IN ('workspace_logo','avatar')
+	AND o.id::text <> COALESCE((SELECT value #>> '{}' FROM workspace_settings WHERE key='workspace.logo_object_id'), '')
+	AND NOT EXISTS (SELECT 1 FROM users ua WHERE ua.avatar_object_id = o.id)
+	AND NOT EXISTS (SELECT 1 FROM conversations ca WHERE ca.avatar_object_id = o.id)`
+
 func (s *Store) AdminList(ctx context.Context, owner uuid.UUID, from, to time.Time) ([]AdminObject, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT o.id, o.owner_user, u.email, o.name, o.purpose, o.mime, o.size_bytes,
@@ -677,7 +687,7 @@ func (s *Store) AdminList(ctx context.Context, owner uuid.UUID, from, to time.Ti
 		 FROM objects o JOIN users u ON u.id = o.owner_user
 		 WHERE ($1::uuid IS NULL OR o.owner_user=$1)
 		   AND o.created_at >= $2 AND o.created_at < $3
-		   AND o.status <> 'deleted'
+		   AND o.status <> 'deleted' AND `+notCoreAsset+`
 		 ORDER BY o.created_at DESC LIMIT 1000`,
 		nilUUID(owner), from, to)
 	if err != nil {
@@ -703,9 +713,9 @@ func (s *Store) AdminPurge(ctx context.Context, owner uuid.UUID, from, to time.T
 	var deleted []Object
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
-			`UPDATE objects SET status='deleted'
-			 WHERE ($1::uuid IS NULL OR owner_user=$1)
-			   AND created_at >= $2 AND created_at < $3 AND status<>'deleted'
+			`UPDATE objects o SET status='deleted'
+			 WHERE ($1::uuid IS NULL OR o.owner_user=$1)
+			   AND o.created_at >= $2 AND o.created_at < $3 AND o.status<>'deleted' AND `+notCoreAsset+`
 			 RETURNING id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, location, status, created_at`,
 			nilUUID(owner), from, to)
 		if err != nil {

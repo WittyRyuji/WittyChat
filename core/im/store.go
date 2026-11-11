@@ -27,6 +27,7 @@ const (
 	OpMemberRemove = "member_remove"
 	OpRoleChange   = "role_change"
 	OpRename       = "rename"
+	OpAvatar       = "avatar"
 	OpTransfer     = "transfer"
 	OpReaction     = "reaction"
 

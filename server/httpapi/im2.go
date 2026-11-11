@@ -9,6 +9,8 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"strings"
+	"wittychat/core/audit"
 	"wittychat/core/settings"
 	"wittychat/shared/apitypes"
 
@@ -24,6 +26,12 @@ func registerIM2(api huma.API, d *Deps) {
 		Path: "/api/v1/conversations/{id}/rename", Summary: "Rename group (owner/admin) / 群改名",
 		Tags: []string{"im"}, Security: sec,
 	}, d.renameConv)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "im-group-avatar", Method: http.MethodPost,
+		Path: "/api/v1/conversations/{id}/avatar", Summary: "Set group avatar (owner/admin) / 设置群头像",
+		Tags: []string{"im"}, Security: sec,
+	}, d.setGroupAvatar)
 
 	huma.Register(api, huma.Operation{
 		OperationID: "im-transfer", Method: http.MethodPost,
@@ -119,6 +127,44 @@ func (d *Deps) renameConv(ctx context.Context, in *struct {
 		return nil, imErr(err)
 	}
 	d.notifyMembers(ctx, convID, op.Seq, u.ID)
+	op.ActorName = u.DisplayName
+	return &struct{ Body apitypes.OpEvent }{Body: *opEvent(op)}, nil
+}
+
+// setGroupAvatar: the image must be the caller's own upload. 图片须为本人上传。
+func (d *Deps) setGroupAvatar(ctx context.Context, in *struct {
+	Headers
+	ID   string `path:"id" format:"uuid"`
+	Body struct {
+		ObjectID string `json:"object_id" format:"uuid"`
+	}
+},
+) (*struct{ Body apitypes.OpEvent }, error) {
+	_, u, err := d.requireUser(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	convID, _ := uuid.Parse(in.ID)
+	oid, err := uuid.Parse(in.Body.ObjectID)
+	if err != nil {
+		return nil, huma.Error400BadRequest("bad object_id")
+	}
+	obj, err := d.Objects.Peek(ctx, oid)
+	if err != nil {
+		return nil, huma.Error400BadRequest("avatar object not found / 头像图片不存在")
+	}
+	if obj.Owner != u.ID {
+		return nil, huma.Error403Forbidden("avatar must be your own upload / 须为本人上传的图片")
+	}
+	if !strings.HasPrefix(obj.Mime, "image/") || obj.Mime == "image/svg+xml" {
+		return nil, huma.Error400BadRequest("avatar must be an image / 头像必须是图片")
+	}
+	op, err := d.IM.SetGroupAvatar(ctx, u.ID, convID, oid)
+	if err != nil {
+		return nil, imErr(err)
+	}
+	d.notifyMembers(ctx, convID, op.Seq, u.ID)
+	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "im.group.avatar", convID.String(), nil, clientIPCtx(ctx))
 	op.ActorName = u.DisplayName
 	return &struct{ Body apitypes.OpEvent }{Body: *opEvent(op)}, nil
 }

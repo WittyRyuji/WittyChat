@@ -7,7 +7,7 @@
 // 头像组件：有上传头像显示图片，否则显示昵称首字。没有 avatar_object_id
 // 时按 user.id 直接取一次，404 负缓存；blob URL 按对象 id 缓存。
 import { useEffect, useState } from "react";
-import { api2, getToken, type UserPublic } from "./api";
+import { api2, authBlob, getToken, type UserPublic } from "./api";
 
 const cache = new Map<string, string>();
 
@@ -89,12 +89,42 @@ const GROUP_COLORS = [
 export function GroupAvatar({
   id,
   title,
+  avatarId,
   className = "avatar",
 }: {
   id: string;
   title: string;
+  avatarId?: string; // uploaded group avatar; falls back to the color tile / 上传的群头像，否则用色块
   className?: string;
 }) {
+  const key = avatarId ? `g:${avatarId}` : "";
+  const [url, setUrl] = useState(key ? (cache.get(key) ?? "") : "");
+  useEffect(() => {
+    if (!key) {
+      setUrl("");
+      return;
+    }
+    const hit = cache.get(key);
+    if (hit !== undefined) {
+      setUrl(hit);
+      return;
+    }
+    let dead = false;
+    authBlob(api2.groupAvatarPath(id))
+      .then((b) => {
+        const u = URL.createObjectURL(b);
+        cache.set(key, u);
+        if (!dead) setUrl(u);
+      })
+      .catch(() => {
+        cache.set(key, "");
+        if (!dead) setUrl("");
+      });
+    return () => {
+      dead = true;
+    };
+  }, [id, key]);
+  if (url) return <img className={`${className} avatar-img`} src={url} alt="" />;
   let h = 0;
   for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return (

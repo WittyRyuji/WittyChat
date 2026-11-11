@@ -26,6 +26,7 @@ type Frame struct {
 	UserID  string `json:"user_id,omitempty"` // presence, typing
 	Online  bool   `json:"online,omitempty"`  // presence
 	Name    string `json:"name,omitempty"`
+	Avatar  string `json:"avatar_object_id,omitempty"` // user_update
 }
 
 // InFrame is anything a client sends over WS.
@@ -132,6 +133,23 @@ func (h *Hub) sendTo(userID uuid.UUID, f Frame) {
 		default:
 			// Slow consumer: drop the notification. Client catches up
 			// via watermark compare on next reconnect anyway.
+		}
+	}
+}
+
+// BroadcastUser tells every connected client that a user's display name or
+// avatar changed, so names and avatars re-resolve by user id everywhere.
+// 广播用户昵称/头像变更：所有客户端按 uid 重新解析，历史消息同步更新。
+func (h *Hub) BroadcastUser(userID uuid.UUID, name, avatarObjectID string) {
+	f := Frame{Type: "user_update", UserID: userID.String(), Name: name, Avatar: avatarObjectID}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, cs := range h.conns {
+		for c := range cs {
+			select {
+			case c.send <- f:
+			default:
+			}
 		}
 	}
 }

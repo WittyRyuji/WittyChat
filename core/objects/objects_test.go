@@ -386,6 +386,68 @@ func TestAdminPurgeSharedFileKept(t *testing.T) {
 	}
 }
 
+// Core assets (org logo, user avatar, group avatar) are not attachments:
+// the governance list never shows them and a purge never deletes them.
+// 核心资产不在附件列表中出现，也不会被清理。
+func TestAdminSkipsCoreAssets(t *testing.T) {
+	s, ctx, mk := testEnv(t)
+	alice := mk()
+	put := func(purpose string) uuid.UUID {
+		t.Helper()
+		o, _, err := s.Put(ctx, alice, uuid.Nil, purpose, purpose+".png", "image/png",
+			bytes.NewReader([]byte(purpose+uuid.NewString())), 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return o.ID
+	}
+	plain, logoByPurpose, avatar, logoBySetting, groupAv := put("attachment"), put("workspace_logo"), put("avatar"), put("attachment"), put("attachment")
+	if _, err := s.pool.Exec(ctx, `UPDATE users SET avatar_object_id=$2 WHERE id=$1`, alice, avatar); err != nil {
+		t.Fatal(err)
+	}
+	var prev []byte
+	_ = s.pool.QueryRow(ctx, `SELECT value FROM workspace_settings WHERE key='workspace.logo_object_id'`).Scan(&prev)
+	if _, err := s.pool.Exec(ctx, `INSERT INTO workspace_settings (key,value) VALUES ('workspace.logo_object_id',to_jsonb($1::text))
+		ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`, logoBySetting.String()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if prev == nil {
+			_, _ = s.pool.Exec(context.Background(), `DELETE FROM workspace_settings WHERE key='workspace.logo_object_id'`)
+		} else {
+			_, _ = s.pool.Exec(context.Background(), `UPDATE workspace_settings SET value=$1 WHERE key='workspace.logo_object_id'`, prev)
+		}
+	})
+	var conv uuid.UUID
+	if err := s.pool.QueryRow(ctx,
+		`INSERT INTO conversations (id,kind,title,avatar_object_id) VALUES ($1,'group','core-asset',$2) RETURNING id`,
+		uuid.Must(uuid.NewV7()), groupAv).Scan(&conv); err != nil {
+		t.Fatal(err)
+	}
+	from, to := time.Now().Add(-time.Hour), time.Now().Add(time.Hour)
+	list, err := s.AdminList(ctx, alice, from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].ID != plain {
+		t.Fatalf("admin list shows core assets: %+v", list)
+	}
+	deleted, err := s.AdminPurge(ctx, alice, from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deleted) != 1 || deleted[0].ID != plain {
+		t.Fatalf("purge touched core assets: %d deleted", len(deleted))
+	}
+	for _, id := range []uuid.UUID{logoByPurpose, avatar, logoBySetting, groupAv} {
+		var st string
+		_ = s.pool.QueryRow(ctx, `SELECT status FROM objects WHERE id=$1`, id).Scan(&st)
+		if st == "deleted" {
+			t.Fatalf("core asset %s was purged", id)
+		}
+	}
+}
+
 // AV quarantine of an infected object must not unlink a file a clean
 // same-content object still references.
 type detectScanner struct{ hit string }

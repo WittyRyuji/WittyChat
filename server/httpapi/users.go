@@ -29,6 +29,7 @@ func registerProfile(api huma.API, mux *http.ServeMux, d *Deps) {
 	}, d.updateMe)
 
 	mux.HandleFunc("GET /api/v1/users/{id}/avatar", d.userAvatar)
+	mux.HandleFunc("GET /api/v1/conversations/{id}/avatar", d.groupAvatar)
 }
 
 func (d *Deps) updateMe(ctx context.Context, in *struct {
@@ -74,6 +75,13 @@ func (d *Deps) updateMe(ctx context.Context, in *struct {
 	fresh, err := d.Store.UserByID(ctx, u.ID)
 	if err != nil {
 		return nil, err
+	}
+	if d.Hub != nil {
+		av := ""
+		if fresh.AvatarObjectID != nil {
+			av = fresh.AvatarObjectID.String()
+		}
+		d.Hub.BroadcastUser(fresh.ID, fresh.DisplayName, av)
 	}
 	return &struct{ Body apitypes.LoginResponse }{
 		Body: apitypes.LoginResponse{User: publicUser(fresh)},
@@ -123,6 +131,41 @@ func (d *Deps) userAvatar(w http.ResponseWriter, r *http.Request) {
 		mime = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", mime)
+	w.Header().Set("Cache-Control", "private, max-age=300")
+	_, _ = io.Copy(w, rc)
+}
+
+// GET /conversations/{id}/avatar — the group's avatar, members only.
+// 群头像：仅当前成员可取。
+func (d *Deps) groupAvatar(w http.ResponseWriter, r *http.Request) {
+	uid, err := d.bearerUser(r)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	convID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	oid, err := d.IM.GroupAvatarFor(r.Context(), convID, uid)
+	if err != nil {
+		http.Error(w, "no avatar", http.StatusNotFound)
+		return
+	}
+	obj, err := d.Objects.Peek(r.Context(), oid)
+	if err != nil {
+		http.Error(w, "no avatar", http.StatusNotFound)
+		return
+	}
+	rc, err := d.Objects.Open(r.Context(), obj)
+	if err != nil {
+		http.Error(w, "read failed", http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = rc.Close() }()
+	w.Header().Set("Content-Type", obj.Mime)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "private, max-age=300")
 	_, _ = io.Copy(w, rc)
 }

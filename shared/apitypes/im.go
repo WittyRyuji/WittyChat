@@ -43,6 +43,7 @@ type ConversationInfo struct {
 	PeerName    string    `json:"peer_name,omitempty"`
 	PeerReadSeq int64     `json:"peer_read_seq,omitempty"` // dm: peer watermark → 已读回执
 	MemberCount int       `json:"member_count,omitempty"`
+	AvatarID    string    `json:"avatar_object_id,omitempty"` // group avatar / 群头像
 }
 
 // DirectoryResponse is the client's whole conv list + watermarks.
