@@ -494,6 +494,7 @@ type DeliverOpts struct {
 	ReceivedAt  time.Time
 	Direction   string // "" → derived from folder
 	SizeBytes   int64
+	ImportKey   string // mailbox-import dedup key / 导入去重键
 }
 
 // DeliverParsed stores one mailbox copy of a fully parsed message.
@@ -548,16 +549,30 @@ func (s *Store) DeliverParsed(ctx context.Context, toUser uuid.UUID, folderKind 
 		receivedAt = time.Now()
 	}
 	id := uuid.Must(uuid.NewV7())
+	// Postgres rejects 0x00/invalid UTF-8 in text columns — real-world mail
+	// decodes to both sometimes; sanitize every text field we insert.
+	// PG 文本列拒 0x00/非法 UTF-8——真实邮件解码后都会有，入库前全部净化。
+	clean := func(v string) string {
+		return strings.ReplaceAll(strings.ToValidUTF8(v, "�"), "\x00", "")
+	}
+	cleanList := func(vs []string) []string {
+		out := make([]string, len(vs))
+		for i, v := range vs {
+			out[i] = clean(v)
+		}
+		return out
+	}
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO mail_messages
 			 (id,owner_user_id,folder_id,direction,rfc_msgid,thread_id,in_reply_to,
 			  from_addr,to_addrs,cc_addrs,subject,text_body,html_body,preview,search_text,
-			  is_read,is_starred,sent_at,received_at,raw_object_id,size_bytes)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
-			id, toUser, fid, direction, nilable(p.MessageID), thread, nilable(p.InReplyTo),
-			p.From, p.To, p.Cc, p.Subject, text, p.HTML, preview(text), search,
-			o.IsRead, o.IsStarred, sentAt, receivedAt, o.RawObjectID, o.SizeBytes); err != nil {
+			  is_read,is_starred,sent_at,received_at,raw_object_id,size_bytes,import_key)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
+			id, toUser, fid, direction, nilable(clean(p.MessageID)), clean(thread), nilable(clean(p.InReplyTo)),
+			clean(p.From), cleanList(p.To), cleanList(p.Cc), clean(p.Subject),
+			clean(text), clean(p.HTML), preview(clean(text)), clean(search),
+			o.IsRead, o.IsStarred, sentAt, receivedAt, o.RawObjectID, o.SizeBytes, nilable(o.ImportKey)); err != nil {
 			return err
 		}
 		for _, a := range o.Attachments {

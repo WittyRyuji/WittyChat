@@ -805,6 +805,20 @@ func nilUUID(id uuid.UUID) any {
 // ---------- task queue / 任务队列 ----------
 
 // Enqueue adds a background task.
+// RequeueStale returns crashed/interrupted tasks to the queue: a task left
+// 'running' longer than olderThan was claimed by a dead worker. Chunked
+// tasks (mail_import 4min) stay well under the scheduler's 60min horizon.
+// 把卡死的 running 任务重置回队列（认领者已死）：分块任务远小于 60 分钟阈值。
+func (s *Store) RequeueStale(ctx context.Context, olderThan time.Duration) (int64, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE bg_tasks SET status='queued', run_after=now(), locked_by=NULL, locked_at=NULL
+		 WHERE status='running' AND locked_at < now() - make_interval(secs => $1)`, olderThan.Seconds())
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (s *Store) Enqueue(ctx context.Context, kind string, payload map[string]any) error {
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO bg_tasks (kind, payload) VALUES ($1,$2)`, kind, payload)

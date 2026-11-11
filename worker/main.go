@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"image"
 	_ "image/gif" // register decoders / 注册解码器
 	"image/jpeg"
@@ -19,9 +20,11 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+	"wittychat/core/auth"
 	"wittychat/core/db"
 	"wittychat/core/docs"
 	"wittychat/core/mail"
+	"wittychat/core/mailimport"
 	"wittychat/core/objects"
 	"wittychat/core/settings"
 
@@ -70,6 +73,11 @@ func main() {
 // 没有它 gc/migrate_cold/verify_all 永远不会执行。
 func (w *worker) schedule(ctx context.Context) {
 	fire := func() {
+		// Requeue tasks whose claimant died (chunked tasks like mail_import
+		// at 4min stay far under 60min). / 回收死认领者的任务。
+		if n, err := w.store.RequeueStale(ctx, 60*time.Minute); err == nil && n > 0 {
+			log.Printf("schedule: %d stale tasks requeued", n)
+		}
 		for _, spec := range []struct {
 			kind   string
 			every  time.Duration
@@ -107,8 +115,43 @@ type worker struct {
 	pool    *pgxpool.Pool
 	store   *objects.Store
 	name    string
-	scanner objects.Scanner // AV plugin; NoopScanner default / 杀毒插件
-	mail    *mail.Store     // lazily built / 惰性构造
+	scanner objects.Scanner   // AV plugin; NoopScanner default / 杀毒插件
+	mail    *mail.Store       // lazily built / 惰性构造
+	imp     *mailimport.Store // lazily built — needs the secret key / 惰性构造
+}
+
+// purgeStaleImportSecrets clears sealed_secret on jobs not running and
+// idle for 30+ days. / 清掉非运行状态且 30 天未动的导入任务密码。
+func (w *worker) purgeStaleImportSecrets(ctx context.Context) (int64, error) {
+	tag, err := w.pool.Exec(ctx,
+		`UPDATE mail_import_accounts SET sealed_secret=NULL
+		 WHERE sealed_secret IS NOT NULL AND job_id IN (
+		   SELECT id FROM mail_import_jobs WHERE status<>'running' AND updated_at < now()-interval '30 days')`)
+	if err != nil {
+		return 0, err
+	}
+	_, _ = w.pool.Exec(ctx,
+		`UPDATE mail_import_jobs SET secrets_purged=true,updated_at=updated_at
+		 WHERE id IN (SELECT DISTINCT job_id FROM mail_import_accounts WHERE sealed_secret IS NULL)
+		   AND status<>'running' AND NOT secrets_purged
+		   AND NOT EXISTS (SELECT 1 FROM mail_import_accounts a WHERE a.job_id=mail_import_jobs.id AND a.sealed_secret IS NOT NULL)`)
+	return tag.RowsAffected(), nil
+}
+
+// impStore builds the import engine on demand — the secret key is
+// load-only: a worker-created key would differ from the server's.
+// Missing key → mail_import tasks fail loudly, the rest keeps working.
+// 惰性构造导入引擎：密钥只读加载，缺失时 mail_import 报错重试，其他任务照跑。
+func (w *worker) impStore() (*mailimport.Store, error) {
+	if w.imp != nil {
+		return w.imp, nil
+	}
+	key, err := auth.LoadSecretKeyFile(envOr("WITTYCHAT_DATA_DIR", "./data"))
+	if err != nil {
+		return nil, fmt.Errorf("secret key for mail_import: %w", err)
+	}
+	w.imp = mailimport.New(w.pool, w.store, w.mailStore(), key)
+	return w.imp, nil
 }
 
 func (w *worker) run(ctx context.Context) {
@@ -167,6 +210,12 @@ func (w *worker) dispatch(ctx context.Context, t *objects.Task) error {
 			a, verr = docs.PurgeArchive(ctx, w.pool, window)
 			if verr == nil {
 				log.Printf("gc: %d versions + %d archived updates purged", v, a)
+			}
+			// Purge sealed IMAP passwords on idle jobs older than 30d — credentials
+			// are a liability; a running job keeps its keys.
+			// 闲置 30 天的导入任务清密码：凭据是负债，运行中的任务保留。
+			if n, err := w.purgeStaleImportSecrets(ctx); err == nil && n > 0 {
+				log.Printf("gc: %d idle import jobs purged", n)
 			}
 		}
 		return verr
@@ -233,6 +282,32 @@ func (w *worker) dispatch(ctx context.Context, t *objects.Task) error {
 			return err
 		}
 		return w.mailParse(ctx, objID)
+	case "mail_import":
+		// IMAP import: 4-min chunk; re-enqueue while the account has work.
+		// IMAP 导入：4 分钟一块，没完就续跑——让其他任务穿插执行。
+		aid, err := uuid.Parse(str(t.Payload["account_id"]))
+		if err != nil {
+			return err
+		}
+		imp, err := w.impStore()
+		if err != nil {
+			return err
+		}
+		more, err := imp.RunAccount(ctx, aid, 4*time.Minute)
+		if err != nil {
+			if t.Attempts >= 5 {
+				// give up after 5 tries — mark the account error / 终局置错
+				_, _ = w.pool.Exec(ctx,
+					`UPDATE mail_import_accounts SET status='error',last_error=$2,updated_at=now() WHERE id=$1`,
+					aid, err.Error())
+				return nil // no more retries / 不再重试
+			}
+			return err
+		}
+		if more {
+			return w.store.Enqueue(ctx, "mail_import", map[string]any{"account_id": aid.String()})
+		}
+		return nil
 	default:
 		return errors.New("unknown task kind: " + t.Kind)
 	}

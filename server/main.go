@@ -37,6 +37,7 @@ import (
 	"wittychat/core/hr"
 	"wittychat/core/im"
 	"wittychat/core/mail"
+	"wittychat/core/mailimport"
 	"wittychat/core/migrations"
 	"wittychat/core/objects"
 	"wittychat/core/settings"
@@ -211,6 +212,7 @@ func cmdServe() {
 		Settings:   settingsStore,
 		Signer:     objects.NewSigner(key),
 		Mail:       mail.NewStore(pool, envOr("WITTYCHAT_MAIL_DOMAIN", "wittyloong.com")),
+		Import:     mailimport.New(pool, objStore, mail.NewStore(pool, envOr("WITTYCHAT_MAIL_DOMAIN", "wittyloong.com")), key),
 		Agents:     agents.NewStore(pool),
 		HR:         hr.New(pool),
 		Docs:       docs.New(pool, imStore.IsMember, imStore.MemberRole),

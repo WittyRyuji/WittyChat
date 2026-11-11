@@ -82,6 +82,25 @@ func LoadOrCreateSecretKey(dataDir string) (key []byte, source string, err error
 	return k, "created", nil
 }
 
+// LoadSecretKeyFile reads dataDir/secret.key (base64, 32 bytes) — the
+// load-only variant for processes (worker) that must NOT create one: a
+// worker-generated key would differ from the server's and silently break
+// sealed secrets. Errors when the file is missing or corrupt.
+// 只读加载 data/secret.key——worker 等进程不许自建（自建密钥与服务端不一致，
+// 密文全部解密失败）。文件缺失/损坏即报错。
+func LoadSecretKeyFile(dataDir string) ([]byte, error) {
+	p := filepath.Join(dataDir, "secret.key")
+	raw, err := os.ReadFile(p) //nolint:gosec // fixed path under data dir
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", p, err)
+	}
+	k, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil || len(k) != 32 {
+		return nil, fmt.Errorf("corrupt %s", p)
+	}
+	return k, nil
+}
+
 // SealSecret encrypts small secrets. Output = nonce || ciphertext.
 func SealSecret(key, plaintext []byte) ([]byte, error) {
 	gcm, err := newGCM(key)
