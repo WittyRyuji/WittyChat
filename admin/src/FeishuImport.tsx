@@ -50,28 +50,39 @@ export function FeishuImport() {
 		load();
 	};
 	return (
-		<div>
-			<h2>飞书应用</h2>
-			{app?.configured ? (
-				<p className="ok">
-					已配置 App ID {app.app_id}（{app.base_url}）
-				</p>
-			) : (
-				<p className="warn">未配置</p>
-			)}
-			<div className="fs-form">
-				<input
-					placeholder="App ID"
-					value={appID}
-					onChange={(e) => setAppID(e.target.value)}
-				/>
-				<input
-					type="password"
-					placeholder="App Secret（不显示已保存值）"
-					value={secret}
-					onChange={(e) => setSecret(e.target.value)}
-				/>
+		<section>
+			<div className="panel">
+				<h3>飞书应用</h3>
+				{app?.configured ? (
+					<p className="ok">
+						已配置 App ID {app.app_id}（{app.base_url}）
+					</p>
+				) : (
+					<p className="warn">未配置</p>
+				)}
+				<label className="row">
+					<span className="flabel">App ID</span>
+					<input
+						className="fs-input"
+						name="feishu-app-id"
+						autoComplete="off"
+						value={appID}
+						onChange={(e) => setAppID(e.target.value)}
+					/>
+				</label>
+				<label className="row">
+					<span className="flabel">App Secret</span>
+					<input
+						className="fs-input"
+						type="password"
+						name="feishu-app-secret"
+						autoComplete="new-password"
+						value={secret}
+						onChange={(e) => setSecret(e.target.value)}
+					/>
+				</label>
 				<div className="row">
+					<span className="flabel" />
 					<button
 						type="button"
 						className="primary"
@@ -83,43 +94,48 @@ export function FeishuImport() {
 					<button type="button" className="ghost danger" onClick={clear}>
 						清除
 					</button>
+					<span className="muted">已保存的 Secret 不会回显</span>
 				</div>
+				{err && <p className="err">{err}</p>}
 			</div>
-			{err && <p className="err">{err}</p>}
-			<h3>迁移步骤</h3>
-			<ol className="guide">
-				{GUIDE.map((g) => (
-					<li key={g}>{g}</li>
-				))}
-			</ol>
-			<p className="muted">
-				应用只能读到分享给它的内容；员工只能导入自己是所有者的文档。
-			</p>
-			<h3>导入任务</h3>
-			<table>
-				<thead>
-					<tr>
-						<th>任务</th>
-						<th>创建者</th>
-						<th>模式</th>
-						<th>状态</th>
-						<th>完成/跳过/失败/待</th>
-					</tr>
-				</thead>
-				<tbody>
-					{jobs.map((j) => (
-						<tr key={j.id}>
-							<td>{j.name}</td>
-							<td>{j.created_by.slice(0, 8)}</td>
-							<td>{j.mode}</td>
-							<td>{j.status}</td>
-							<td>
-								{j.done}/{j.skipped}/{j.failed}/{j.pending}
-							</td>
-						</tr>
+			<div className="panel">
+				<h3>迁移步骤</h3>
+				<ol className="guide">
+					{GUIDE.map((g) => (
+						<li key={g}>{g}</li>
 					))}
-				</tbody>
-			</table>
-		</div>
+				</ol>
+				<p className="muted">
+					应用只能读到分享给它的内容；员工只能导入自己是所有者的文档。
+				</p>
+			</div>
+			<div className="panel">
+				<h3>导入任务</h3>
+				<table className="tbl">
+					<thead>
+						<tr>
+							<th>任务</th>
+							<th>创建者</th>
+							<th>模式</th>
+							<th>状态</th>
+							<th>完成/跳过/失败/待</th>
+						</tr>
+					</thead>
+					<tbody>
+						{jobs.map((j) => (
+							<tr key={j.id}>
+								<td>{j.name}</td>
+								<td>{j.created_by.slice(0, 8)}</td>
+								<td>{j.mode}</td>
+								<td>{j.status}</td>
+								<td>
+									{j.done}/{j.skipped}/{j.failed}/{j.pending}
+								</td>
+							</tr>
+						))}
+					</tbody>
+				</table>
+			</div>
+		</section>
 	);
 }

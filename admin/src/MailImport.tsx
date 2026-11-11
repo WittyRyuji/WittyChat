@@ -66,7 +66,7 @@ export function MailImport() {
 				/>
 			)}
 			<Guidance />
-			<table className="grid">
+			<table className="tbl">
 				<thead>
 					<tr>
 						<th>名称</th>
@@ -112,7 +112,7 @@ export function MailImport() {
 
 function Guidance() {
 	return (
-		<div className="card" style={{ margin: "12px 0" }}>
+		<div className="panel">
 			<b>迁移步骤</b>
 			<ol style={{ margin: "8px 0 0 18px", lineHeight: 1.7 }}>
 				<li>飞书管理后台 → 邮箱 → 邮箱工具 → 第三方邮箱客户端：开启</li>
@@ -151,7 +151,7 @@ function CreateForm({ onCreated }: { onCreated: (id: string) => void }) {
 	}, []);
 	const help = presets.find((p) => p.key === f.provider)?.help ?? "";
 	return (
-		<div className="card" style={{ margin: "12px 0" }}>
+		<div className="panel">
 			<div className="row">
 				<label>
 					预设
@@ -429,7 +429,7 @@ function JobDetail({ id, onBack }: { id: string; onBack: () => void }) {
 				</button>
 			</div>
 			{testRes && (
-				<div className="card" style={{ margin: "10px 0" }}>
+				<div className="panel">
 					{testRes.map((r) => {
 						const acct = d.accounts.find((a) => a.id === r.account_id);
 						return (
@@ -445,7 +445,7 @@ function JobDetail({ id, onBack }: { id: string; onBack: () => void }) {
 					})}
 				</div>
 			)}
-			<div className="card" style={{ margin: "10px 0" }}>
+			<div className="panel">
 				<b>CSV 账号上传</b>
 				<div className="muted" style={{ fontSize: 12, margin: "4px 0" }}>
 					格式：source_email,password,target_email（可带表头行）。
@@ -495,7 +495,7 @@ function JobDetail({ id, onBack }: { id: string; onBack: () => void }) {
 					</pre>
 				)}
 			</div>
-			<table className="grid">
+			<table className="tbl">
 				<thead>
 					<tr>
 						<th>来源账号</th>

@@ -228,14 +228,16 @@ code {
 	border-left: 3px solid #faad14;
 	padding: 8px 12px;
 }
-/* 飞书应用表单：App ID / Secret / 按钮各占一行 */
-.fs-form {
-	display: flex;
-	flex-direction: column;
-	gap: 10px;
-	max-width: 420px;
-	margin-bottom: 12px;
+/* 飞书应用表单：左标签右输入 / label left, input right */
+.fs-input {
+	width: min(360px, 100%);
 }
-.fs-form .row {
-	margin-bottom: 0;
+.muted {
+	color: var(--dim);
+	font-size: 12px;
+}
+.guide {
+	margin: 0 0 8px 18px;
+	padding: 0;
+	line-height: 1.7;
 }
