@@ -31,6 +31,7 @@ func registerDocs(mux *http.ServeMux, d *Deps) {
 	mux.HandleFunc("DELETE /api/v1/docs/{id}", d.deleteDoc)
 	mux.HandleFunc("GET /api/v1/conversations/{id}/docs", d.convDocs)
 	mux.HandleFunc("GET /ws/doc/{id}", d.docWS)
+	registerDocImport(mux, d)
 }
 
 func (d *Deps) docAudit(r *http.Request, uid uuid.UUID, action string, docID uuid.UUID, detail any) {

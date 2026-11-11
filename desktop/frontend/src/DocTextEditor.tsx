@@ -23,11 +23,80 @@ import TextStyle from "@tiptap/extension-text-style";
 import Underline from "@tiptap/extension-underline";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { WebsocketProvider } from "y-websocket";
 import type * as Y from "yjs";
 import type { UserPublic } from "./api";
+import { api2, authBlob } from "./api";
 import { cursorColor } from "./colors";
+import { fileToHtml } from "./docimport";
+
+// WcImage: a NodeView owns the <img>, so the stored attr stays
+// `wcobj:<id>` while the DOM shows an authenticated blob: URL. Rewriting
+// src in ProseMirror's own DOM would be read back into the Yjs doc and
+// broadcast a dead blob: URL to every collaborator.
+// 图片 NodeView：文档里存 wcobj:<id>，DOM 里显示鉴权后的 blob:——直接改
+// ProseMirror 的 DOM 会把 blob: 地址写回 Yjs 并广播给所有协作者。
+const WcImage = Image.extend({
+  addNodeView() {
+    return ({ node }) => {
+      const img = document.createElement("img");
+      let cur = node;
+      let blobUrl = "";
+      let gen = 0;
+      const show = (src: string) => {
+        const my = ++gen;
+        if (blobUrl) {
+          URL.revokeObjectURL(blobUrl);
+          blobUrl = "";
+        }
+        if (!src.startsWith("wcobj:")) {
+          img.src = src;
+          return;
+        }
+        img.removeAttribute("src");
+        authBlob(api2.downloadURL(src.slice(6)))
+          .then((b) => {
+            const u = URL.createObjectURL(b);
+            if (my !== gen) {
+              URL.revokeObjectURL(u);
+              return;
+            }
+            blobUrl = u;
+            img.src = u;
+          })
+          .catch(() => {
+            if (my === gen) img.alt = "图片加载失败";
+          });
+      };
+      const sync = () => {
+        img.alt = cur.attrs.alt ?? "";
+        if (cur.attrs.title) img.title = cur.attrs.title;
+        else img.removeAttribute("title");
+      };
+      sync();
+      show(String(cur.attrs.src ?? ""));
+      return {
+        dom: img,
+        update(next) {
+          if (next.type !== cur.type) return false;
+          const changed = next.attrs.src !== cur.attrs.src;
+          cur = next;
+          sync();
+          if (changed) show(String(cur.attrs.src ?? ""));
+          return true;
+        },
+        ignoreMutation: () => true,
+        selectNode: () => img.classList.add("ProseMirror-selectednode"),
+        deselectNode: () => img.classList.remove("ProseMirror-selectednode"),
+        destroy() {
+          gen++;
+          if (blobUrl) URL.revokeObjectURL(blobUrl);
+        },
+      };
+    };
+  },
+});
 
 // FontSize via TextStyle global attribute (v2 has no official ext).
 // 字号：挂到 TextStyle 上的自定义属性（v2 无官方字号扩展）。
@@ -111,7 +180,7 @@ export default function DocTextEditor({
         Highlight.configure({ multicolor: true }),
         TextAlign.configure({ types: ["heading", "paragraph"] }),
         Link.configure({ openOnClick: false }),
-        Image,
+        WcImage,
         TaskList,
         TaskItem.configure({ nested: true }),
         Table.configure({ resizable: false }),
@@ -133,6 +202,37 @@ export default function DocTextEditor({
       editor.off("transaction", rerender);
     };
   }, [editor]);
+
+  // Claim a staged import once the provider syncs an EMPTY doc. 200 → apply.
+  const claimedRef = useRef(false);
+  useEffect(() => {
+    if (!editor || claimedRef.current) return;
+    const tryClaim = async () => {
+      if (claimedRef.current) return;
+      if (editor.getText() !== "") return;
+      claimedRef.current = true;
+      const { status, payload } = await api2.docImportClaim(provider.roomname);
+      if (status === 409) {
+        claimedRef.current = false;
+        return;
+      }
+      if (status !== 200 || !payload) return;
+      let html = "";
+      if (payload.type === "html") html = payload.html ?? "";
+      else if (payload.type === "file" && payload.object_id && payload.format) {
+        const blob = await authBlob(api2.downloadURL(payload.object_id));
+        const conv = await fileToHtml(blob, payload.format, { docId: provider.roomname });
+        html = conv.html;
+      } else return;
+      editor.commands.setContent(html);
+    };
+    const onSync = () => {
+      void tryClaim();
+    };
+    provider.on("sync", onSync);
+    if ((provider as { synced?: boolean }).synced) void tryClaim();
+    return () => provider.off("sync", onSync);
+  }, [editor, provider]);
 
   const [, setTick] = useState(0);
   if (!editor) return <div className="doc-editor-loading">加载中…</div>;
@@ -325,7 +425,27 @@ export default function DocTextEditor({
             const u = window.prompt("图片地址 / Image URL", "https://");
             if (u) e.chain().focus().setImage({ src: u }).run();
           }),
-          { title: "图片" }
+          { title: "图片（URL）", active: is("image") }
+        )}
+        {btn(
+          "📁",
+          on(() => {
+            const input = document.createElement("input");
+            input.type = "file";
+            input.accept = "image/*";
+            input.onchange = async () => {
+              const f = input.files?.[0];
+              if (!f || !e) return;
+              const o = await api2.uploadObject(f, "doc");
+              await api2.docObjects(provider.roomname, [o.id]);
+              e.chain()
+                .focus()
+                .setImage({ src: `wcobj:${o.id}` })
+                .run();
+            };
+            input.click();
+          }),
+          { title: "插入图片（本地文件）" }
         )}
         {btn(
           "⊞",

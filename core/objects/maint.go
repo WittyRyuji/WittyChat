@@ -159,10 +159,11 @@ func (s *Store) OrphanGC(ctx context.Context) (int, error) {
 		`SELECT o.id, o.sha256, o.location FROM objects o
 		 WHERE o.status<>'deleted' AND o.created_at < $1
 		   AND (o.status='pending'
-		        OR (COALESCE(o.purpose,'') IN ('attachment','chat','mail','hr')
+		        OR (COALESCE(o.purpose,'') IN ('attachment','chat','mail','hr','doc')
 		        AND NOT EXISTS (SELECT 1 FROM attachment_refs a WHERE a.object_id=o.id)
 		        AND NOT EXISTS (SELECT 1 FROM mail_attachments p WHERE p.object_id=o.id)
 		        AND NOT EXISTS (SELECT 1 FROM mail_messages mm WHERE mm.raw_object_id=o.id)
+		AND NOT EXISTS (SELECT 1 FROM doc_objects dob WHERE dob.object_id=o.id)
 		        AND NOT EXISTS (SELECT 1 FROM hr_requests h
 		                        WHERE h.payload->'attachment_object_ids' ? o.id::text)
 		        AND NOT EXISTS (SELECT 1 FROM users u WHERE u.avatar_object_id=o.id)

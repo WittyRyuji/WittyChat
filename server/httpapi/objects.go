@@ -203,7 +203,8 @@ func (d *Deps) canReadObject(ctx context.Context, objID, uid uuid.UUID) (*object
 		return obj, err
 	}
 	if d.objectViaMail(ctx, objID, uid) || d.objectViaHR(ctx, objID, uid) ||
-		d.objectViaAttachmentRef(ctx, objID, uid) {
+		d.objectViaAttachmentRef(ctx, objID, uid) ||
+		(d.Docs != nil && d.Docs.CanReadObject(ctx, objID, uid)) {
 		return d.Objects.Peek(ctx, objID)
 	}
 	return nil, objects.ErrForbidden
@@ -471,6 +472,16 @@ func (d *Deps) uploadObject(w http.ResponseWriter, r *http.Request) {
 	purpose := r.URL.Query().Get("purpose")
 	if purpose == "" {
 		purpose = "mail"
+	}
+	// Whitelist the real upload purposes — an unknown purpose is never
+	// orphan-collected (dangling objects forever). 白名单上传用途。
+	allowed := map[string]bool{
+		"mail": true, "attachment": true, "chat": true, "hr": true,
+		"doc": true, "workspace_logo": true, "avatar": true, "sticker": true,
+	}
+	if !allowed[purpose] {
+		http.Error(w, "invalid purpose / 非法用途", http.StatusBadRequest)
+		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes+1<<20)
 	file, header, err := r.FormFile("file")

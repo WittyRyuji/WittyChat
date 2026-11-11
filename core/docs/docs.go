@@ -11,6 +11,7 @@ package docs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -269,7 +270,8 @@ func (s *Store) AppendUpdate(ctx context.Context, docID uuid.UUID, data []byte, 
 		// 顺带维护 log_bytes 计数并返回——上限检查 O(1)，不再逐键击全表 SUM。
 		var logBytes int64
 		if err := tx.QueryRow(ctx,
-			`UPDATE docs SET log_bytes = log_bytes + $2, updated_at = now()
+			`UPDATE docs SET log_bytes = log_bytes + $2, updated_at = now(),
+			        import_payload = NULL, import_claimed_at = NULL
 			 WHERE id=$1 AND deleted_at IS NULL RETURNING log_bytes, sv`,
 			docID, int64(len(data))).Scan(&logBytes, &sv); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -521,4 +523,86 @@ func PurgeArchive(ctx context.Context, pool *pgxpool.Pool, older time.Duration) 
 		`DELETE FROM doc_update_archive WHERE compacted_at < $1`,
 		time.Now().Add(-older))
 	return tag.RowsAffected(), err
+}
+
+// Stage stores an import payload for an empty doc; the first editor to open
+// it claims + applies it through the real Yjs path.
+// 暂存导入载荷：空文档可暂存，首个打开者认领并写入。
+func (s *Store) Stage(ctx context.Context, docID uuid.UUID, payload json.RawMessage, source string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE docs SET import_payload=$2, import_claimed_at=NULL, import_source=$3
+		 WHERE id=$1 AND deleted_at IS NULL AND NOT EXISTS(
+		   SELECT 1 FROM doc_updates WHERE doc_id=$1)`, docID, payload, source)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// CanReadObject: object linked to a doc the user can read — same canonical
+// ACL as doc get (owner / bound-conv member / shared-conv member).
+// 对象经文档可读：与取文档同一套 ACL（属主/绑定会话成员/分享会话成员）。
+func (s *Store) CanReadObject(ctx context.Context, objID, uid uuid.UUID) bool {
+	var ok bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(
+		  SELECT 1 FROM doc_objects do2 JOIN docs d ON d.id = do2.doc_id
+		  WHERE do2.object_id=$1 AND d.deleted_at IS NULL AND `+access("$2")+`
+		  LIMIT 1)`, objID, uid).Scan(&ok)
+	return err == nil && ok
+}
+
+// ClaimStatus for a staged-import claim. / 认领结果。
+type ClaimStatus int
+
+const (
+	ClaimEmpty   ClaimStatus = iota // nothing staged → 204
+	ClaimApplied                    // doc log non-empty → cleared → 204
+	ClaimTaken                      // within lease → 409
+	ClaimOK                         // claimed → 200
+)
+
+// Claim atomically takes a staged payload: locks the doc row, checks the log
+// is still empty, honors the 120s lease. Returns the payload on ClaimOK.
+// 认领暂存载荷：锁行、查空日志、遵守 120s 租约。
+func (s *Store) Claim(ctx context.Context, docID uuid.UUID) (json.RawMessage, ClaimStatus, error) {
+	var payload json.RawMessage
+	status := ClaimEmpty
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var logEmpty bool
+		var claimedAt *time.Time
+		err := tx.QueryRow(ctx,
+			`SELECT import_payload, import_claimed_at,
+			        NOT EXISTS(SELECT 1 FROM doc_updates WHERE doc_id=$1)
+			 FROM docs WHERE id=$1 FOR UPDATE`, docID).
+			Scan(&payload, &claimedAt, &logEmpty)
+		if err != nil {
+			return err
+		}
+		if payload == nil {
+			return nil
+		}
+		if !logEmpty {
+			if _, err := tx.Exec(ctx,
+				`UPDATE docs SET import_payload=NULL,import_claimed_at=NULL WHERE id=$1`, docID); err != nil {
+				return err
+			}
+			status = ClaimApplied
+			return nil
+		}
+		if claimedAt != nil && time.Since(*claimedAt) < 120*time.Second {
+			status = ClaimTaken
+			return nil
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE docs SET import_claimed_at=now() WHERE id=$1`, docID); err != nil {
+			return err
+		}
+		status = ClaimOK
+		return nil
+	})
+	return payload, status, err
 }

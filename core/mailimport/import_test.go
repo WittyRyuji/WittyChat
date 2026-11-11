@@ -511,7 +511,9 @@ func TestRequeueStale(t *testing.T) {
 	_ = pool.QueryRow(ctx,
 		`INSERT INTO bg_tasks (kind,status,locked_by,locked_at) VALUES ('x','running','w',now()) RETURNING id`).Scan(&freshID)
 	n, err := obj.RequeueStale(ctx, 60*time.Minute)
-	if err != nil || n != 1 {
+	// >=1: the shared test DB may hold other tests' aged claimed tasks; the
+	// per-row checks below are the real assertion. / 共享测试库可能有别的陈旧任务。
+	if err != nil || n < 1 {
 		t.Fatalf("requeue: n=%d err=%v", n, err)
 	}
 	var st1, st2 string

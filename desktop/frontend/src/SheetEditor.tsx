@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { WebsocketProvider } from "y-websocket";
 import type * as Y from "yjs";
 import type { UserPublic } from "./api";
+import { api2, authBlob } from "./api";
 import { cellKey, cellsFromMap, colName, evalSheet, MAX_COLS, MAX_ROWS } from "./sheetEval";
 
 interface AwUser {
@@ -56,6 +57,41 @@ export default function SheetEditor({
       el.setSelectionRange(el.value.length, el.value.length);
     }
   }, [editKey]);
+
+  // Claim a staged import on first sync of an EMPTY grid → write cells.
+  const claimedRef = useRef(false);
+  useEffect(() => {
+    const tryClaim = async () => {
+      if (claimedRef.current || cellsMap.size > 0) return;
+      claimedRef.current = true;
+      const { status, payload } = await api2.docImportClaim(provider.roomname);
+      if (status === 409) {
+        claimedRef.current = false;
+        return;
+      }
+      if (status !== 200 || !payload) return;
+      let cells: Record<string, string> = {};
+      if (payload.type === "cells") cells = payload.cells ?? {};
+      else if (payload.type === "file" && payload.object_id && payload.format) {
+        const { fileToSheets } = await import("./docimport");
+        const blob = await authBlob(api2.downloadURL(payload.object_id));
+        const sheets = await fileToSheets(blob, payload.format);
+        const pick = payload.sheet
+          ? (sheets.find((sh) => sh.name === payload.sheet) ?? sheets[0])
+          : sheets[0];
+        cells = pick?.cells ?? {};
+      } else return;
+      ydoc.transact(() => {
+        for (const [k, v] of Object.entries(cells)) cellsMap.set(k, v);
+      });
+    };
+    const onSync = () => {
+      void tryClaim();
+    };
+    provider.on("sync", onSync);
+    if ((provider as { synced?: boolean }).synced) void tryClaim();
+    return () => provider.off("sync", onSync);
+  }, [cellsMap, provider, ydoc]);
 
   useEffect(() => {
     const obs = () => setCells(cellsFromMap(cellsMap));

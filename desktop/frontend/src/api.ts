@@ -289,6 +289,14 @@ export class MultipartUnavailableError extends Error {
 }
 let officeOn: Promise<boolean> | null = null;
 
+export interface ImportPayload {
+  type: "html" | "cells" | "file";
+  html?: string;
+  cells?: Record<string, string>;
+  object_id?: string;
+  format?: string;
+  sheet?: string;
+}
 export const api2 = {
   upload: async (convId: string, file: File) => {
     const fd = new FormData();
@@ -442,6 +450,20 @@ export const api2 = {
   // 在线编辑地址：鉴权接口返回签名能力链接交系统浏览器——会话 token
   // 不出应用（旧 ?token= 链接会落浏览器历史）。
   officeURL: (objId: string) => req<{ url: string }>("GET", `/api/v1/objects/${objId}/office-url`),
+  docObjects: (docId: string, ids: string[]) =>
+    req("POST", `/api/v1/docs/${docId}/objects`, { object_ids: ids }),
+  docImportStage: (docId: string, payload: unknown, source: string) =>
+    req("POST", `/api/v1/docs/${docId}/import/stage`, { payload, source }),
+  docImportClaim: async (
+    docId: string
+  ): Promise<{ status: 200 | 204 | 409; payload?: ImportPayload }> => {
+    const res = await fetch(`${API_BASE}/api/v1/docs/${docId}/import/claim`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${getToken()}` },
+    });
+    if (res.status === 200) return { status: 200, payload: await res.json() };
+    return { status: res.status === 409 ? 409 : 204 };
+  },
   officeEnabled: () =>
     (officeOn ??= api
       .settings()

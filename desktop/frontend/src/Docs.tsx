@@ -5,9 +5,10 @@
 // 原生协同文档（飞书式）：左列表 + 按类型分发编辑器（富文本/表格/演示），
 // 统一走 /ws/doc/{id} Yjs 同步；awareness 驱动在线徽章；中继逐条落库。
 import { useEffect, useMemo, useRef, useState } from "react";
-import { type DocInfo, docsApi, type UserPublic } from "./api";
+import { api2, type DocInfo, docsApi, type UserPublic } from "./api";
 import { cursorColor } from "./colors";
 import DocTextEditor from "./DocTextEditor";
+import { extOf, fileToHtml, fileToSheets, isDocFile, isSheetFile } from "./docimport";
 import SheetEditor from "./SheetEditor";
 import SlideEditor from "./SlideEditor";
 import { useDocConn } from "./useDocConn";
@@ -84,6 +85,56 @@ export function Docs({
       .catch(() => setErr("新建失败"));
   };
 
+  const importFiles = async (files: FileList) => {
+    const list = Array.from(files);
+    const errs: string[] = [];
+    let firstId = "";
+    // create → convert → stage; a failure after create removes the empty doc.
+    // 建文档→转换→暂存；中途失败则删掉刚建的空文档，不留孤儿。
+    const stage = async (
+      title: string,
+      kind: "doc" | "sheet",
+      source: string,
+      build: (docId: string) => Promise<unknown>
+    ) => {
+      const d = await docsApi.create(title, kind);
+      try {
+        await api2.docImportStage(d.id, await build(d.id), source);
+      } catch (e) {
+        await docsApi.del(d.id).catch(() => {});
+        throw e;
+      }
+      setDocs((l) => (l ? [d, ...l] : [d]));
+      if (!firstId) firstId = d.id;
+    };
+    for (const [i, f] of list.entries()) {
+      setErr([`导入中 ${i + 1}/${list.length}…`, ...errs].join("；"));
+      const base = f.name.replace(/\.[^.]+$/, "");
+      const src = `file:${f.name}`;
+      try {
+        if (isDocFile(f.name)) {
+          await stage(base, "doc", src, async (id) => ({
+            type: "html",
+            html: (await fileToHtml(f, extOf(f.name), { docId: id })).html,
+          }));
+        } else if (isSheetFile(f.name)) {
+          const sheets = await fileToSheets(f, extOf(f.name));
+          for (const sh of sheets) {
+            const title = sheets.length === 1 ? base : `${base} · ${sh.name}`;
+            await stage(title, "sheet", src, async () => ({ type: "cells", cells: sh.cells }));
+            if (sh.truncated) errs.push(`${title}：超过 1 万行/200 列，已截断`);
+          }
+        } else {
+          errs.push(`${f.name}：不支持的格式`);
+        }
+      } catch (e) {
+        errs.push(`导入 ${f.name} 失败：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    setErr(errs.join("；"));
+    if (firstId) setActiveId(firstId);
+  };
+
   const delDoc = (d: DocInfo) => {
     if (!window.confirm(`删除「${d.title || "未命名"}」？删除后所有成员都将无法再访问。`)) return;
     docsApi
@@ -103,6 +154,22 @@ export function Docs({
           <div className="rel" ref={menuRef}>
             <button type="button" className="ghost sm" onClick={() => setCreateMenu((v) => !v)}>
               ＋新建 ▾
+            </button>
+            <button
+              type="button"
+              className="ghost sm"
+              onClick={() => {
+                const input = document.createElement("input");
+                input.type = "file";
+                input.multiple = true;
+                input.accept = ".docx,.md,.markdown,.html,.htm,.txt,.xlsx,.csv";
+                input.onchange = () => {
+                  if (input.files?.length) void importFiles(input.files);
+                };
+                input.click();
+              }}
+            >
+              导入
             </button>
             {createMenu && (
               <div className="menu">
