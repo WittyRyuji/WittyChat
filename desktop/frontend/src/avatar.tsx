@@ -36,21 +36,29 @@ export function Avatar({
       return;
     }
     let dead = false;
-    fetch(api2.avatarURL(user.id), { headers: { Authorization: `Bearer ${getToken()}` } })
-      .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
+    fetch(api2.avatarURL(user.id, user.avatar_object_id), {
+      headers: { Authorization: `Bearer ${getToken()}` },
+    })
+      .then((r) => {
+        if (r.ok) return r.blob();
+        // Only an unversioned 404 means "no avatar". A transient failure or
+        // an outdated version must not poison the new image's cache.
+        // 仅无版本请求的 404 可负缓存；瞬时失败/版本过期不污染新头像缓存。
+        if (r.status === 404 && !user.avatar_object_id) cache.set(key, "");
+        throw new Error(String(r.status));
+      })
       .then((b) => {
         const u = URL.createObjectURL(b);
         cache.set(key, u);
         if (!dead) setUrl(u);
       })
       .catch(() => {
-        cache.set(key, ""); // 负缓存：无头像不再重复请求
         if (!dead) setUrl("");
       });
     return () => {
       dead = true;
     };
-  }, [user.id, key]);
+  }, [user.id, user.avatar_object_id, key]);
 
   const inner = url ? (
     <img className="avatar-img" src={url} alt="" />
@@ -110,20 +118,19 @@ export function GroupAvatar({
       return;
     }
     let dead = false;
-    authBlob(api2.groupAvatarPath(id))
+    authBlob(api2.groupAvatarPath(id, avatarId))
       .then((b) => {
         const u = URL.createObjectURL(b);
         cache.set(key, u);
         if (!dead) setUrl(u);
       })
       .catch(() => {
-        cache.set(key, "");
         if (!dead) setUrl("");
       });
     return () => {
       dead = true;
     };
-  }, [id, key]);
+  }, [id, key, avatarId]);
   if (url) return <img className={`${className} avatar-img`} src={url} alt="" />;
   let h = 0;
   for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;

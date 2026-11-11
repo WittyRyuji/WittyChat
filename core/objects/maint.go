@@ -155,46 +155,54 @@ func (s *Store) EnqueueVerifyAll(ctx context.Context) (int, error) {
 // 端表情架（服务端不可知），永不回收。
 func (s *Store) OrphanGC(ctx context.Context) (int, error) {
 	cutoff := time.Now().Add(-7 * 24 * time.Hour)
-	rows, err := s.pool.Query(ctx,
-		`SELECT o.id, o.sha256, o.location FROM objects o
-		 WHERE o.status<>'deleted' AND o.created_at < $1
-		   AND (o.status='pending'
-		        OR (COALESCE(o.purpose,'') IN ('attachment','chat','mail','hr','doc')
-		        AND NOT EXISTS (SELECT 1 FROM attachment_refs a WHERE a.object_id=o.id)
-		        AND NOT EXISTS (SELECT 1 FROM mail_attachments p WHERE p.object_id=o.id)
-		        AND NOT EXISTS (SELECT 1 FROM mail_messages mm WHERE mm.raw_object_id=o.id)
+	const orphan = `o.status<>'deleted' AND o.created_at < $1
+		AND ` + notCoreAsset + `
+		AND (o.status='pending'
+		     OR (COALESCE(o.purpose,'') IN ('attachment','chat','mail','hr','doc','avatar','workspace_logo')
+		AND NOT EXISTS (SELECT 1 FROM attachment_refs a WHERE a.object_id=o.id)
+		AND NOT EXISTS (SELECT 1 FROM mail_attachments p WHERE p.object_id=o.id)
+		AND NOT EXISTS (SELECT 1 FROM mail_messages mm WHERE mm.raw_object_id=o.id)
 		AND NOT EXISTS (SELECT 1 FROM doc_objects dob WHERE dob.object_id=o.id)
-		        AND NOT EXISTS (SELECT 1 FROM hr_requests h
-		                        WHERE h.payload->'attachment_object_ids' ? o.id::text)
-		        AND NOT EXISTS (SELECT 1 FROM users u WHERE u.avatar_object_id=o.id)
-		        AND NOT EXISTS (SELECT 1 FROM workspace_settings w
-		                        WHERE w.key='workspace.logo_object_id'
-		                          AND w.value #>> '{}' = o.id::text)))`,
-		cutoff)
+		AND NOT EXISTS (SELECT 1 FROM hr_requests h
+		                WHERE h.payload->'attachment_object_ids' ? o.id::text)))`
+	var deleted []Object
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		// Match AdminPurge's lock-then-recheck protocol with avatar/Logo setters.
+		// 与附件清理、头像/Logo 设置共用先锁对象再复查引用的协议。
+		rows, err := tx.Query(ctx,
+			`SELECT o.id FROM objects o WHERE `+orphan+` ORDER BY o.id FOR UPDATE`, cutoff)
+		if err != nil {
+			return err
+		}
+		ids, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+		if err != nil || len(ids) == 0 {
+			return err
+		}
+		rows, err = tx.Query(ctx,
+			`UPDATE objects o SET status='deleted' WHERE o.id=ANY($2) AND `+orphan+`
+			 RETURNING o.id, o.sha256, o.location`, cutoff, ids)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var o Object
+			var sha []byte
+			if err := rows.Scan(&o.ID, &sha, &o.Location); err != nil {
+				return err
+			}
+			copy(o.SHA256[:], sha)
+			deleted = append(deleted, o)
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
-	n := 0
-	for rows.Next() {
-		var id uuid.UUID
-		var loc string
-		var sha []byte
-		if err := rows.Scan(&id, &sha, &loc); err != nil {
-			return n, err
-		}
-		if _, err := s.pool.Exec(ctx,
-			`UPDATE objects SET status='deleted' WHERE id=$1`, id); err == nil {
-			// Reference-aware cleanup — the file may be shared with a
-			// same-content live object. / 引用感知清理——文件可能与同内容
-			// 在用对象共享。
-			o := &Object{ID: id, Location: loc}
-			copy(o.SHA256[:], sha)
-			s.RemoveFiles(ctx, o)
-			n++
-		}
+	for i := range deleted {
+		s.RemoveFiles(ctx, &deleted[i])
 	}
-	return n, rows.Err()
+	return len(deleted), nil
 }
 
 // MigrateCold moves local objects untouched for `older` to S3.

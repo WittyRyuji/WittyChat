@@ -203,15 +203,6 @@ export function Chat({
   const [live, setLive] = useState<
     Record<string, { display_name: string; avatar_object_id?: string }>
   >({});
-  useEffect(() => {
-    setLive((prev) => {
-      const next = { ...prev };
-      for (const u of contacts) {
-        next[u.id] = { display_name: u.display_name, avatar_object_id: u.avatar_object_id };
-      }
-      return next;
-    });
-  }, [contacts]);
   const who = (id?: string, fallback?: string) => {
     if (id && id === me.id) return me;
     const u = id ? live[id] : undefined;
@@ -283,6 +274,10 @@ export function Chat({
 
   const active = convs.find((c) => c.id === activeId);
   const st = states[activeId];
+  const activeMembers = (members[activeId] ?? []).map((m) => ({
+    ...m,
+    name: who(m.user_id, m.name).display_name,
+  }));
 
   // ---------- data ----------
 
@@ -396,13 +391,40 @@ export function Chat({
   meIdRef.current = me.id;
   const onMeUpdatedRef = useRef(onMeUpdated);
   onMeUpdatedRef.current = onMeUpdated;
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
 
   useEffect(() => {
+    let dead = false;
+    let profileRequest = 0;
+    let identityRevision = 0;
+    const refreshProfiles = async () => {
+      const request = ++profileRequest;
+      const revision = identityRevision;
+      try {
+        const d = await api.users();
+        if (dead || request !== profileRequest) return;
+        // A profile event received during the request is newer than its
+        // possible snapshot. Fetch again instead of overwriting that event.
+        // 请求期间收到的变更可能比快照新；重取，不能用旧快照盖掉新昵称/头像。
+        if (revision !== identityRevision) {
+          void refreshProfiles();
+          return;
+        }
+        setContacts(d.users);
+        setLive((prev) => {
+          const next = { ...prev };
+          for (const u of d.users) {
+            next[u.id] = { display_name: u.display_name, avatar_object_id: u.avatar_object_id };
+          }
+          return next;
+        });
+      } catch {
+        /* transient; the next connection refreshes again */
+      }
+    };
     refreshDirectory();
-    api
-      .users()
-      .then((d) => setContacts(d.users))
-      .catch(() => {});
+    void refreshProfiles();
     api
       .settings()
       .then((s) => {
@@ -420,7 +442,6 @@ export function Chat({
           .catch(() => {});
       })
       .catch(() => {});
-    let dead = false;
     let retry = 0;
     const open = () => {
       if (dead) return;
@@ -430,12 +451,10 @@ export function Chat({
           switch (f.type) {
             case "conv_update":
               refreshDirectory();
-              if (f.conv_id) loadMembers(f.conv_id);
-              setActiveId((cur) => {
-                if (f.conv_id === cur) fetchDelta(cur);
-                else if (f.conv_id) fetchDelta(f.conv_id);
-                return cur;
-              });
+              if (f.conv_id) {
+                loadMembers(f.conv_id);
+                fetchDelta(f.conv_id);
+              }
               break;
             case "read":
               // Someone advanced their watermark — update in place, no refetch.
@@ -455,6 +474,7 @@ export function Chat({
               break;
             case "user_update":
               if (f.user_id) {
+                identityRevision += 1;
                 const uid = f.user_id;
                 setLive((l) => ({
                   ...l,
@@ -475,10 +495,6 @@ export function Chat({
                   )
                 );
                 if (uid === meIdRef.current) onMeUpdatedRef.current();
-                setActiveId((cur) => {
-                  if (cur) loadMembers(cur);
-                  return cur;
-                });
               }
               break;
             case "typing":
@@ -498,6 +514,20 @@ export function Chat({
           if (!dead) {
             retry += 1;
             setTimeout(open, Math.min(1000 * retry, 10000));
+          }
+        },
+        () => {
+          // Notifications are transient: every connection must reconcile
+          // profiles and conversation state, including changes made offline.
+          // 通知不持久化：每次连接成功都补拉身份与会话，覆盖断线期间的变更。
+          retry = 0;
+          void refreshProfiles();
+          onMeUpdatedRef.current();
+          refreshDirectory();
+          const current = activeIdRef.current;
+          if (current) {
+            loadMembers(current);
+            fetchDelta(current);
           }
         }
       );
@@ -875,6 +905,36 @@ export function Chat({
   const convTitle = (c: ConversationInfo) =>
     c.kind === "dm" ? who(c.peer_user_id, c.peer_name || "私聊").display_name : c.title || "群聊";
 
+  const systemText = (o: OpEvent) => {
+    const actor = who(o.actor_id, o.actor_name).display_name;
+    const targetId = typeof o.payload?.user_id === "string" ? o.payload.user_id : undefined;
+    const target = who(targetId, "成员").display_name;
+    switch (o.kind) {
+      case "member_add":
+        return targetId === o.actor_id
+          ? `${actor} 加入了会话`
+          : `${actor} 邀请 ${target} 加入了会话`;
+      case "member_remove":
+        return targetId === o.actor_id ? `${actor} 离开了会话` : `${actor} 将 ${target} 移出了会话`;
+      case "avatar":
+        return `${actor} 更换了群头像`;
+      case "edit":
+        return `${actor} 编辑了消息`;
+      case "recall":
+        return `${actor} 撤回了一条消息`;
+      case "rename":
+        return `${actor} 将群名改为「${o.payload?.title ?? ""}」`;
+      case "transfer": {
+        const to = typeof o.payload?.to === "string" ? o.payload.to : undefined;
+        return `${actor} 将群主转让给 ${who(to, "成员").display_name}`;
+      }
+      case "role_change":
+        return `${actor} 将 ${target} 设为${o.payload?.role === "admin" ? "管理员" : "成员"}`;
+      default:
+        return actor;
+    }
+  };
+
   const pendingHere = useMemo(
     () => pending.filter((p) => p.convId === activeId),
     [pending, activeId]
@@ -975,7 +1035,7 @@ export function Chat({
                   <span className="conv-col">
                     <span className="conv-title">
                       {h.conv_title}
-                      <i className="dim"> · {h.actor_name}</i>
+                      <i className="dim"> · {who(h.actor_id, h.actor_name).display_name}</i>
                     </span>
                     <span className="conv-preview">{h.body}</span>
                   </span>
@@ -1072,17 +1132,7 @@ export function Chat({
                     return (
                       <Fragment key={o.op_seq}>
                         {sep}
-                        <div className="sys">
-                          {who(o.actor_id, o.actor_name).display_name}{" "}
-                          {o.kind === "avatar" && "更换了群头像"}
-                          {o.kind === "member_add" && "加入了会话"}
-                          {o.kind === "member_remove" && "离开了会话"}
-                          {o.kind === "edit" && "编辑了消息"}
-                          {o.kind === "recall" && "撤回了一条消息"}
-                          {o.kind === "rename" && `群名改为「${o.payload?.title ?? ""}」`}
-                          {o.kind === "transfer" && "转让了群主"}
-                          {o.kind === "role_change" && `成员角色调整为 ${o.payload?.role ?? ""}`}
-                        </div>
+                        <div className="sys">{systemText(o)}</div>
                       </Fragment>
                     );
                   }
@@ -1180,7 +1230,7 @@ export function Chat({
                               {mine && !o.recalled && (
                                 <ReadBadge
                                   seq={o.op_seq}
-                                  members={members[activeId] ?? []}
+                                  members={activeMembers}
                                   meId={me.id}
                                   isDm={active.kind === "dm"}
                                 />
@@ -1565,13 +1615,14 @@ export function Chat({
         {modal === "members" && active && (
           <MembersPanel
             conv={active}
-            members={members[activeId] ?? []}
+            members={activeMembers}
             me={me}
             contacts={contacts}
             onClose={() => setModal("")}
             onChanged={() => {
               loadMembers(activeId);
               refreshDirectory();
+              fetchDelta(activeId);
             }}
           />
         )}

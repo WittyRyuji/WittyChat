@@ -9,8 +9,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"wittychat/core/objects"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -153,12 +155,35 @@ func (s *Store) Set(ctx context.Context, key string, value any, updatedBy uuid.U
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx,
-		`INSERT INTO workspace_settings (key, value, updated_by)
-		 VALUES ($1,$2,$3)
-		 ON CONFLICT (key) DO UPDATE SET value=$2, updated_by=$3, updated_at=now()`,
-		key, raw, updatedBy)
-	return err
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if key == "workspace.logo_object_id" {
+			var id string
+			if err := json.Unmarshal(raw, &id); err != nil {
+				return objects.ErrNotImage
+			}
+			if id != "" {
+				oid, err := uuid.Parse(id)
+				if err != nil {
+					return objects.ErrNotFound
+				}
+				if err := objects.RequireReadyImage(ctx, tx, oid, updatedBy); err != nil {
+					return err
+				}
+				// Keep the reference in canonical form for storage governance.
+				// 统一 UUID 表示，避免 URN/花括号等合法输入绕过引用匹配。
+				raw, err = json.Marshal(oid.String())
+				if err != nil {
+					return err
+				}
+			}
+		}
+		_, err := tx.Exec(ctx,
+			`INSERT INTO workspace_settings (key, value, updated_by)
+			 VALUES ($1,$2,$3)
+			 ON CONFLICT (key) DO UPDATE SET value=$2, updated_by=$3, updated_at=now()`,
+			key, raw, updatedBy)
+		return err
+	})
 }
 
 // ---------- per-user prefs (user_prefs) / 用户级偏好 ----------

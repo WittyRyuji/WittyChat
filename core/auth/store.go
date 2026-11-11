@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"wittychat/core/objects"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -256,17 +257,24 @@ func (s *Store) KnownDevice(ctx context.Context, uid uuid.UUID, tok string, cred
 // UpdateProfile patches display_name and/or avatar (nil = keep).
 // UpdateProfile 部分更新昵称/头像（nil 字段保持不变）。
 func (s *Store) UpdateProfile(ctx context.Context, id uuid.UUID, displayName *string, avatar *uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE users SET display_name=COALESCE($2,display_name),
-			avatar_object_id=COALESCE($3,avatar_object_id), updated_at=now() WHERE id=$1`,
-		id, displayName, avatar)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrUserNotFound
-	}
-	return nil
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if avatar != nil {
+			if err := objects.RequireReadyImage(ctx, tx, *avatar, id); err != nil {
+				return err
+			}
+		}
+		tag, err := tx.Exec(ctx,
+			`UPDATE users SET display_name=COALESCE($2,display_name),
+				avatar_object_id=COALESCE($3,avatar_object_id), updated_at=now() WHERE id=$1`,
+			id, displayName, avatar)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrUserNotFound
+		}
+		return nil
+	})
 }
 
 func (s *Store) withTx(ctx context.Context, fn func(pgx.Tx) error) error {

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"os"
 	"path/filepath"
 	"time"
@@ -28,6 +29,7 @@ var (
 	ErrForbidden = errors.New("no access to object")
 	ErrTooLarge  = errors.New("object exceeds size limit")
 	ErrNotReady  = errors.New("object still uploading")
+	ErrNotImage  = errors.New("object is not a supported image")
 )
 
 // MaxDirectUpload — P0 direct upload ceiling. S3 multipart comes later.
@@ -473,6 +475,42 @@ func (s *Store) Peek(ctx context.Context, id uuid.UUID) (*Object, error) {
 	return &o, nil
 }
 
+// RequireReadyImage locks an owned, uploaded raster image until its identity
+// reference is committed. Purge/GC take the same row lock and recheck references
+// afterwards, so an image cannot be deleted between validation and binding.
+// 校验并锁定本人已完成上传的图片，直到头像/Logo 引用提交；清理方取同一行锁后
+// 重新检查引用，避免校验后、绑定前被删。图片尺寸由上传/回填产生，此处不读文件。
+func RequireReadyImage(ctx context.Context, tx pgx.Tx, id, owner uuid.UUID) error {
+	var actualOwner uuid.UUID
+	var contentType, status string
+	var width, height *int
+	err := tx.QueryRow(ctx,
+		`SELECT owner_user, COALESCE(mime,''), status, width, height FROM objects WHERE id=$1 FOR UPDATE`, id).
+		Scan(&actualOwner, &contentType, &status, &width, &height)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if actualOwner != owner {
+		return ErrForbidden
+	}
+	if status != "ready" {
+		return ErrNotReady
+	}
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil || width == nil || height == nil || *width <= 0 || *height <= 0 {
+		return ErrNotImage
+	}
+	switch mediaType {
+	case "image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp":
+		return nil
+	default:
+		return ErrNotImage
+	}
+}
+
 // UsedBytes sums ready-object sizes for the workspace quota check.
 // Retained version history counts too — otherwise an editor could grow
 // storage without limit by re-saving. 配额统计含保留的历史版本，
@@ -670,13 +708,12 @@ type AdminObject struct {
 // AdminList returns objects for storage management — filterable by owner
 // (uuid.Nil = all) and created_at range [from,to).
 // AdminList 返回存储管理用的对象清单——可按属主与创建日期过滤。
-// notCoreAsset excludes identity assets from attachment governance: the
-// organization logo, user avatars and group avatars are not attachments and
-// must never be listed or purged with them (alias `o`).
-// 核心资产（组织 Logo、用户头像、群头像）不属于附件，附件管理既不列出也不清理。
+// notCoreAsset protects actual identity references, never the upload purpose
+// supplied by a client. Unbound uploads remain subject to governance and GC.
+// 按真实的 Logo/用户头像/群头像引用保护核心资产，不信任客户端声明的用途；
+// 尚未绑定的上传仍可管理和清理（对象别名为 o）。
 const notCoreAsset = `
-	COALESCE(o.purpose,'') NOT IN ('workspace_logo','avatar')
-	AND o.id::text <> COALESCE((SELECT value #>> '{}' FROM workspace_settings WHERE key='workspace.logo_object_id'), '')
+	o.id::text <> lower(COALESCE((SELECT value #>> '{}' FROM workspace_settings WHERE key='workspace.logo_object_id'), ''))
 	AND NOT EXISTS (SELECT 1 FROM users ua WHERE ua.avatar_object_id = o.id)
 	AND NOT EXISTS (SELECT 1 FROM conversations ca WHERE ca.avatar_object_id = o.id)`
 
@@ -712,12 +749,29 @@ func (s *Store) AdminList(ctx context.Context, owner uuid.UUID, from, to time.Ti
 func (s *Store) AdminPurge(ctx context.Context, owner uuid.UUID, from, to time.Time) ([]Object, error) {
 	var deleted []Object
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		// Lock candidates before a separate statement rechecks references.
+		// An UPDATE alone may wait for a concurrent avatar bind but still use
+		// its earlier snapshot of the referencing tables.
+		// 先锁候选对象，再用新语句快照检查引用；单条 UPDATE 等锁后仍可能
+		// 使用绑定前的引用快照，误删刚设置的头像。
 		rows, err := tx.Query(ctx,
-			`UPDATE objects o SET status='deleted'
+			`SELECT o.id FROM objects o
 			 WHERE ($1::uuid IS NULL OR o.owner_user=$1)
 			   AND o.created_at >= $2 AND o.created_at < $3 AND o.status<>'deleted' AND `+notCoreAsset+`
-			 RETURNING id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, location, status, created_at`,
+			 ORDER BY o.id FOR UPDATE`,
 			nilUUID(owner), from, to)
+		if err != nil {
+			return err
+		}
+		candidates, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+		if err != nil || len(candidates) == 0 {
+			return err
+		}
+		rows, err = tx.Query(ctx,
+			`UPDATE objects o SET status='deleted'
+			 WHERE o.id=ANY($1) AND o.status<>'deleted' AND `+notCoreAsset+`
+			 RETURNING id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, location, status, created_at`,
+			candidates)
 		if err != nil {
 			return err
 		}
@@ -740,11 +794,8 @@ func (s *Store) AdminPurge(ctx context.Context, owner uuid.UUID, from, to time.T
 		if len(ids) == 0 {
 			return nil
 		}
-		// Detach references so dead objects don't dangle.
-		// 解除引用，避免悬挂指针（头像/邮件附件/会话附件）。
-		if _, err := tx.Exec(ctx, `UPDATE users SET avatar_object_id=NULL WHERE avatar_object_id=ANY($1)`, ids); err != nil {
-			return err
-		}
+		// Identity references were excluded above; detach ordinary attachments.
+		// 核心资产已排除，只解除普通附件引用。
 		if _, err := tx.Exec(ctx, `DELETE FROM mail_attachments WHERE object_id=ANY($1)`, ids); err != nil {
 			return err
 		}

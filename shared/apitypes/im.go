@@ -122,6 +122,7 @@ type MessageSearchHit struct {
 	ConvID    string `json:"conv_id"`
 	OpSeq     int64  `json:"op_seq"`
 	Body      string `json:"body"`
+	ActorID   string `json:"actor_id,omitempty"`
 	ActorName string `json:"actor_name"`
 	ConvTitle string `json:"conv_title"`
 	CreatedAt string `json:"created_at"`

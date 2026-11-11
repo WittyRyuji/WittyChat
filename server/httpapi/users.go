@@ -51,20 +51,13 @@ func (d *Deps) updateMe(ctx context.Context, in *struct {
 		if err != nil {
 			return nil, huma.Error400BadRequest("invalid avatar_object_id")
 		}
-		obj, err := d.Objects.Peek(ctx, oid)
-		if err != nil {
-			return nil, huma.Error400BadRequest("avatar object not found")
-		}
-		if obj.Owner != u.ID {
-			return nil, huma.Error403Forbidden("avatar must be your own upload")
-		}
 		avatar = &oid
 	}
 	if name == nil && avatar == nil {
 		return nil, huma.Error400BadRequest("nothing to update")
 	}
 	if err := d.Store.UpdateProfile(ctx, u.ID, name, avatar); err != nil {
-		return nil, err
+		return nil, imageObjectErr(err)
 	}
 	if name != nil {
 		d.Audit.Log(ctx, &u.ID, audit.ActorUser, "profile.rename", u.Email, nil, clientIPCtx(ctx))
@@ -86,6 +79,41 @@ func (d *Deps) updateMe(ctx context.Context, in *struct {
 	return &struct{ Body apitypes.LoginResponse }{
 		Body: apitypes.LoginResponse{User: publicUser(fresh)},
 	}, nil
+}
+
+// Shared error mapping for user/group avatars and the workspace logo.
+// 用户/群头像与组织 Logo 共用的图片校验错误。
+func imageObjectErr(err error) error {
+	switch {
+	case errors.Is(err, objects.ErrNotFound):
+		return huma.Error400BadRequest("image not found / 图片不存在，请重新上传")
+	case errors.Is(err, objects.ErrForbidden):
+		return huma.Error403Forbidden("image must be your own upload / 须为本人上传的图片")
+	case errors.Is(err, objects.ErrNotReady):
+		return huma.Error400BadRequest("image unavailable / 图片已删除或尚未完成上传")
+	case errors.Is(err, objects.ErrNotImage):
+		return huma.Error400BadRequest("invalid image / 请上传有效的 PNG、JPEG、GIF、WebP 或 BMP 图片")
+	default:
+		return err
+	}
+}
+
+// Versioned avatar URLs must resolve to the requested object, not a newer
+// avatar that would then be cached under the old version.
+// 带版本的头像 URL 必须对应所请求对象，避免把新头像缓存到旧版本名下。
+func avatarVersion(w http.ResponseWriter, r *http.Request, id uuid.UUID) bool {
+	version := r.URL.Query().Get("v")
+	if version != "" && version != id.String() {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Error(w, "avatar changed", http.StatusNotFound)
+		return false
+	}
+	if version == "" {
+		w.Header().Set("Cache-Control", "no-cache")
+	} else {
+		w.Header().Set("Cache-Control", "private, max-age=300")
+	}
+	return true
 }
 
 // GET /users/{id}/avatar — streams the user's avatar object.
@@ -111,13 +139,18 @@ func (d *Deps) userAvatar(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no avatar", http.StatusNotFound)
 		return
 	}
+	if !avatarVersion(w, r, *u.AvatarObjectID) {
+		return
+	}
 	obj, err := d.Objects.Peek(r.Context(), *u.AvatarObjectID)
-	if err != nil {
+	if err != nil || obj.Status != "ready" {
+		w.Header().Set("Cache-Control", "no-store")
 		http.Error(w, "no avatar", http.StatusNotFound)
 		return
 	}
 	rc, err := d.Objects.Open(r.Context(), obj)
 	if err != nil {
+		w.Header().Set("Cache-Control", "no-store")
 		if errors.Is(err, objects.ErrNotReady) {
 			http.Error(w, "not ready", http.StatusConflict)
 			return
@@ -131,7 +164,7 @@ func (d *Deps) userAvatar(w http.ResponseWriter, r *http.Request) {
 		mime = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", mime)
-	w.Header().Set("Cache-Control", "private, max-age=300")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	_, _ = io.Copy(w, rc)
 }
 
@@ -153,19 +186,23 @@ func (d *Deps) groupAvatar(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no avatar", http.StatusNotFound)
 		return
 	}
+	if !avatarVersion(w, r, oid) {
+		return
+	}
 	obj, err := d.Objects.Peek(r.Context(), oid)
-	if err != nil {
+	if err != nil || obj.Status != "ready" {
+		w.Header().Set("Cache-Control", "no-store")
 		http.Error(w, "no avatar", http.StatusNotFound)
 		return
 	}
 	rc, err := d.Objects.Open(r.Context(), obj)
 	if err != nil {
+		w.Header().Set("Cache-Control", "no-store")
 		http.Error(w, "read failed", http.StatusInternalServerError)
 		return
 	}
 	defer func() { _ = rc.Close() }()
 	w.Header().Set("Content-Type", obj.Mime)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "private, max-age=300")
 	_, _ = io.Copy(w, rc)
 }

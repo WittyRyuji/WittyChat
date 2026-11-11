@@ -63,6 +63,7 @@ export interface MessageSearchHit {
   conv_id: string;
   op_seq: number;
   body: string;
+  actor_id?: string;
   actor_name: string;
   conv_title: string;
   created_at: string;
@@ -428,9 +429,11 @@ export const api2 = {
     });
     if (!res.ok) throw new Error(`thumb ${res.status}`);
   },
-  avatarURL: (userId: string) => `${API_BASE}/api/v1/users/${userId}/avatar`,
+  avatarURL: (userId: string, avatarId?: string) =>
+    `${API_BASE}/api/v1/users/${userId}/avatar${avatarId ? `?v=${encodeURIComponent(avatarId)}` : ""}`,
   workspaceLogoPath: () => "/api/v1/workspace/logo",
-  groupAvatarPath: (convId: string) => `/api/v1/conversations/${convId}/avatar`,
+  groupAvatarPath: (convId: string, avatarId?: string) =>
+    `/api/v1/conversations/${convId}/avatar${avatarId ? `?v=${encodeURIComponent(avatarId)}` : ""}`,
   uploadObject: async (file: File, purpose: string) => {
     const fd = new FormData();
     fd.append("file", file, file.name);
@@ -603,7 +606,11 @@ export const mailApi = {
 
 // connectWS opens the notification socket; calls onFrame per frame.
 // Auto-reconnect handled by the caller via onClose.
-export function connectWS(onFrame: (f: WsFrame) => void, onClose: () => void): WebSocket {
+export function connectWS(
+  onFrame: (f: WsFrame) => void,
+  onClose: () => void,
+  onOpen?: () => void
+): WebSocket {
   const proto = location.protocol === "https:" || API_BASE.startsWith("https") ? "wss" : "ws";
   const host = API_BASE ? new URL(API_BASE).host : location.host;
   // Session token rides Sec-WebSocket-Protocol (wt1.<token>) — never the
@@ -613,6 +620,7 @@ export function connectWS(onFrame: (f: WsFrame) => void, onClose: () => void): W
     `${proto}://${host}/ws`,
     getToken() ? ["wittychat", `wt1.${getToken()}`] : []
   );
+  ws.onopen = () => onOpen?.();
   ws.onmessage = (ev) => {
     try {
       onFrame(JSON.parse(ev.data));

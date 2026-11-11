@@ -8,6 +8,7 @@ package im
 
 import (
 	"context"
+	"wittychat/core/objects"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -48,6 +49,9 @@ func (s *Store) SetGroupAvatar(ctx context.Context, actor, convID, objID uuid.UU
 		}
 		if c.Kind != ConvKindGroup || (role != RoleOwner && role != RoleAdmin) {
 			return ErrNoPermission
+		}
+		if err := objects.RequireReadyImage(ctx, tx, objID, actor); err != nil {
+			return err
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE conversations SET avatar_object_id=$2 WHERE id=$1`, convID, objID); err != nil {
@@ -222,6 +226,7 @@ type MessageHit struct {
 	ConvID    uuid.UUID
 	OpSeq     int64
 	Body      string
+	ActorID   *uuid.UUID
 	ActorName string
 	ConvTitle string
 	CreatedAt string
@@ -234,7 +239,7 @@ func (s *Store) SearchMessages(ctx context.Context, userID uuid.UUID, q string, 
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT o.conv_id, o.op_seq, COALESCE(e.payload->>'markdown', o.body),
-		        COALESCE(u.display_name,''),
+		        o.actor_id, COALESCE(u.display_name,''),
 		        COALESCE(c.title,''), o.created_at::text
 		 FROM conv_ops o
 		 JOIN conv_members m ON m.conv_id=o.conv_id AND m.user_id=$1 AND m.left_at IS NULL
@@ -258,7 +263,7 @@ func (s *Store) SearchMessages(ctx context.Context, userID uuid.UUID, q string, 
 	var out []*MessageHit
 	for rows.Next() {
 		var h MessageHit
-		if err := rows.Scan(&h.ConvID, &h.OpSeq, &h.Body, &h.ActorName, &h.ConvTitle, &h.CreatedAt); err != nil {
+		if err := rows.Scan(&h.ConvID, &h.OpSeq, &h.Body, &h.ActorID, &h.ActorName, &h.ConvTitle, &h.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &h)

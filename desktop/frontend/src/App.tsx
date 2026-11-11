@@ -34,7 +34,12 @@ export default function App() {
     <Chat
       me={user}
       onLogout={() => setUser(null)}
-      onMeUpdated={() => api.me().then((r) => setUser(r.user))}
+      onMeUpdated={() =>
+        api
+          .me()
+          .then((r) => setUser(r.user))
+          .catch(() => {})
+      }
     />
   );
 }

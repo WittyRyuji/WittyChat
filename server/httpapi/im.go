@@ -174,15 +174,23 @@ func (d *Deps) enrichAttachments(ctx context.Context, convID uuid.UUID, events [
 }
 
 // notifyMembers pushes a conv_update to all online members except the actor.
-func (d *Deps) notifyMembers(ctx context.Context, convID uuid.UUID, seq int64, actor uuid.UUID) {
+// extra includes removed members so they also refresh their directory.
+// seq=0 reads the committed watermark for membership APIs that return no op.
+// extra 用于通知刚移出的成员刷新会话；不返回 op 的成员接口传 0 补读水印。
+func (d *Deps) notifyMembers(ctx context.Context, convID uuid.UUID, seq int64, actor uuid.UUID, extra ...uuid.UUID) {
 	if d.Hub == nil {
 		return
+	}
+	if seq == 0 {
+		if err := d.Pool.QueryRow(ctx, `SELECT last_op_seq FROM conversations WHERE id=$1`, convID).Scan(&seq); err != nil {
+			return
+		}
 	}
 	ids, err := d.IM.MemberIDs(ctx, convID)
 	if err != nil {
 		return
 	}
-	d.Hub.NotifyConv(ids, convID, seq, &actor)
+	d.Hub.NotifyConv(append(ids, extra...), convID, seq, &actor)
 }
 
 // ---------- handlers ----------
@@ -618,6 +626,7 @@ func (d *Deps) addMembers(ctx context.Context, in *struct {
 	if _, err := d.IM.AddMembers(ctx, u.ID, convID, ids); err != nil {
 		return nil, imErr(err)
 	}
+	d.notifyMembers(ctx, convID, 0, u.ID)
 	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "im.member.add", convID.String(),
 		map[string]any{"count": len(ids)}, clientIPCtx(ctx))
 	return &struct{}{}, nil
@@ -639,5 +648,6 @@ func (d *Deps) removeMember(ctx context.Context, in *struct {
 		return nil, imErr(err)
 	}
 	d.docRevalidateUser(ctx, target) // drop live conv-doc sockets / 断开失权的群文档连接
+	d.notifyMembers(ctx, convID, 0, u.ID, target)
 	return &struct{}{}, nil
 }

@@ -185,10 +185,12 @@ export function JoinGroupDialog({
 export function SearchDialog({
   onClose,
   onPick,
+  resolveName,
   initialQ = "",
 }: {
   onClose: () => void;
   onPick: (convId: string) => void;
+  resolveName: (userId: string | undefined, fallback: string) => string;
   initialQ?: string;
 }) {
   const [q, setQ] = useState(initialQ);
@@ -228,7 +230,7 @@ export function SearchDialog({
             }}
           >
             <span className="dim">
-              {h.conv_title || "私聊"} · {h.actor_name}
+              {h.conv_title || "私聊"} · {resolveName(h.actor_id, h.actor_name)}
             </span>
             <span className="hit-body">{h.body.slice(0, 120)}</span>
           </button>

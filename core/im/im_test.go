@@ -5,13 +5,18 @@ package im
 // 针对真实 PG 的集成测试；未设置 WITTYCHAT_TEST_DB_URL 时跳过。
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"os"
 	"testing"
+	"time"
+	"wittychat/core/objects"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -228,9 +233,108 @@ func TestGroupManageAndSearch(t *testing.T) {
 	if err != nil || len(found) != 1 {
 		t.Fatalf("search zh: %v n=%d", err, len(found))
 	}
+	if found[0].ActorID == nil || *found[0].ActorID != m1 {
+		t.Fatalf("search omitted stable actor id: %+v", found[0])
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE users SET display_name='renamed author' WHERE id=$1`, m1); err != nil {
+		t.Fatal(err)
+	}
+	found, err = s.SearchMessages(ctx, outsider, "手册", 10)
+	if err != nil || len(found) != 1 || found[0].ActorName != "renamed author" ||
+		found[0].ActorID == nil || *found[0].ActorID != m1 {
+		t.Fatalf("search identity after rename: %+v, %v", found, err)
+	}
 	found, _ = s.SearchMessages(ctx, m2, "手册", 10)
 	if len(found) != 0 {
 		t.Fatalf("non-member search leaked %d hits", len(found))
+	}
+}
+
+func TestGroupAvatarLifecycle(t *testing.T) {
+	s, ctx, mk := testEnv(t)
+	owner, member, outsider := mk(uniqEmail()), mk(uniqEmail()), mk(uniqEmail())
+	g, err := s.CreateGroup(ctx, owner, "avatar lifecycle", false, []uuid.UUID{member})
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs, err := objects.NewStore(s.pool, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var imageBytes bytes.Buffer
+	if err := png.Encode(&imageBytes, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
+		t.Fatal(err)
+	}
+	put := func(uid uuid.UUID, purpose string, data []byte) *objects.Object {
+		t.Helper()
+		o, _, err := objs.Put(ctx, uid, uuid.Nil, purpose, "image.png", "image/png", bytes.NewReader(data), 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return o
+	}
+	docImage := put(owner, "doc", imageBytes.Bytes())
+	avatar := put(owner, "avatar", imageBytes.Bytes())
+	if avatar.ID != docImage.ID || avatar.Purpose != "doc" {
+		t.Fatal("fixture must exercise cross-purpose dedup")
+	}
+	foreign := put(member, "avatar", imageBytes.Bytes())
+	if _, err := s.SetGroupAvatar(ctx, member, g.ID, foreign.ID); !errors.Is(err, ErrNoPermission) {
+		t.Fatalf("ordinary member may set avatar: %v", err)
+	}
+	if _, err := s.SetGroupAvatar(ctx, owner, g.ID, foreign.ID); !errors.Is(err, objects.ErrForbidden) {
+		t.Fatalf("foreign image accepted: %v", err)
+	}
+	fakeImage := put(owner, "avatar", []byte("not a PNG despite the supplied MIME"))
+	if _, err := s.SetGroupAvatar(ctx, owner, g.ID, fakeImage.ID); !errors.Is(err, objects.ErrNotImage) {
+		t.Fatalf("forged image MIME accepted: %v", err)
+	}
+	for _, state := range []string{"pending", "deleted"} {
+		if _, err := s.pool.Exec(ctx, `UPDATE objects SET status=$2 WHERE id=$1`, avatar.ID, state); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SetGroupAvatar(ctx, owner, g.ID, avatar.ID); !errors.Is(err, objects.ErrNotReady) {
+			t.Fatalf("%s avatar accepted: %v", state, err)
+		}
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE objects SET status='ready' WHERE id=$1`, avatar.ID); err != nil {
+		t.Fatal(err)
+	}
+	op, err := s.SetGroupAvatar(ctx, owner, g.ID, avatar.ID)
+	if err != nil || op.Kind != OpAvatar || op.Seq != 1 {
+		t.Fatalf("set avatar/failed writes rolled back: %+v, %v", op, err)
+	}
+	if id, err := s.GroupAvatarFor(ctx, g.ID, member); err != nil || id != avatar.ID {
+		t.Fatalf("member cannot see avatar: %s, %v", id, err)
+	}
+	if _, err := s.GroupAvatarFor(ctx, g.ID, outsider); !errors.Is(err, ErrNotMember) {
+		t.Fatalf("outsider can see avatar: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE objects SET created_at=now()-interval '8 days' WHERE id=$1`, avatar.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := objs.OrphanGC(ctx); err != nil {
+		t.Fatal(err)
+	}
+	purged, err := objs.AdminPurge(ctx, owner, time.Now().Add(-9*24*time.Hour), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range purged {
+		if o.ID == avatar.ID {
+			t.Fatal("admin purge deleted the group avatar")
+		}
+	}
+	current, err := objs.Peek(ctx, avatar.ID)
+	if err != nil || current.Status != "ready" {
+		t.Fatalf("group avatar did not survive cleanup: %+v, %v", current, err)
+	}
+	if _, err := s.SetMemberRole(ctx, owner, g.ID, member, RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetGroupAvatar(ctx, member, g.ID, foreign.ID); err != nil {
+		t.Fatalf("group admin cannot set own image: %v", err)
 	}
 }
 

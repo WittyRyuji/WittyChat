@@ -9,7 +9,6 @@ package httpapi
 import (
 	"context"
 	"net/http"
-	"strings"
 	"wittychat/core/audit"
 	"wittychat/core/settings"
 	"wittychat/shared/apitypes"
@@ -149,19 +148,9 @@ func (d *Deps) setGroupAvatar(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, huma.Error400BadRequest("bad object_id")
 	}
-	obj, err := d.Objects.Peek(ctx, oid)
-	if err != nil {
-		return nil, huma.Error400BadRequest("avatar object not found / 头像图片不存在")
-	}
-	if obj.Owner != u.ID {
-		return nil, huma.Error403Forbidden("avatar must be your own upload / 须为本人上传的图片")
-	}
-	if !strings.HasPrefix(obj.Mime, "image/") || obj.Mime == "image/svg+xml" {
-		return nil, huma.Error400BadRequest("avatar must be an image / 头像必须是图片")
-	}
 	op, err := d.IM.SetGroupAvatar(ctx, u.ID, convID, oid)
 	if err != nil {
-		return nil, imErr(err)
+		return nil, imageObjectErr(imErr(err))
 	}
 	d.notifyMembers(ctx, convID, op.Seq, u.ID)
 	d.Audit.Log(ctx, &u.ID, audit.ActorUser, "im.group.avatar", convID.String(), nil, clientIPCtx(ctx))
@@ -276,10 +265,14 @@ func (d *Deps) searchMessages(ctx context.Context, in *struct {
 	}
 	out := []apitypes.MessageSearchHit{}
 	for _, h := range hits {
-		out = append(out, apitypes.MessageSearchHit{
+		hit := apitypes.MessageSearchHit{
 			ConvID: h.ConvID.String(), OpSeq: h.OpSeq, Body: h.Body,
 			ActorName: h.ActorName, ConvTitle: h.ConvTitle, CreatedAt: h.CreatedAt,
-		})
+		}
+		if h.ActorID != nil {
+			hit.ActorID = h.ActorID.String()
+		}
+		out = append(out, hit)
 	}
 	return &struct{ Body any }{Body: map[string]any{"hits": out}}, nil
 }

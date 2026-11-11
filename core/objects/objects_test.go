@@ -386,9 +386,8 @@ func TestAdminPurgeSharedFileKept(t *testing.T) {
 	}
 }
 
-// Core assets (org logo, user avatar, group avatar) are not attachments:
-// the governance list never shows them and a purge never deletes them.
-// 核心资产不在附件列表中出现，也不会被清理。
+// Only actual core-asset references grant protection; a claimed purpose
+// cannot hide an ordinary upload. / 真实引用保活，伪造用途不能隐藏普通上传。
 func TestAdminSkipsCoreAssets(t *testing.T) {
 	s, ctx, mk := testEnv(t)
 	alice := mk()
@@ -401,7 +400,8 @@ func TestAdminSkipsCoreAssets(t *testing.T) {
 		}
 		return o.ID
 	}
-	plain, logoByPurpose, avatar, logoBySetting, groupAv := put("attachment"), put("workspace_logo"), put("avatar"), put("attachment"), put("attachment")
+	plain, unusedLogo, unusedAvatar := put("attachment"), put("workspace_logo"), put("avatar")
+	avatar, logoBySetting, groupAv := put("attachment"), put("attachment"), put("attachment")
 	if _, err := s.pool.Exec(ctx, `UPDATE users SET avatar_object_id=$2 WHERE id=$1`, alice, avatar); err != nil {
 		t.Fatal(err)
 	}
@@ -429,21 +429,134 @@ func TestAdminSkipsCoreAssets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 1 || list[0].ID != plain {
-		t.Fatalf("admin list shows core assets: %+v", list)
+	ordinary := map[uuid.UUID]bool{plain: true, unusedLogo: true, unusedAvatar: true}
+	if len(list) != len(ordinary) {
+		t.Fatalf("admin list must show unbound uploads, including claimed core purposes: %+v", list)
+	}
+	for _, o := range list {
+		if !ordinary[o.ID] {
+			t.Fatalf("admin list shows core asset %s", o.ID)
+		}
 	}
 	deleted, err := s.AdminPurge(ctx, alice, from, to)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(deleted) != 1 || deleted[0].ID != plain {
-		t.Fatalf("purge touched core assets: %d deleted", len(deleted))
+	if len(deleted) != len(ordinary) {
+		t.Fatalf("purge must delete ordinary uploads: %d deleted", len(deleted))
 	}
-	for _, id := range []uuid.UUID{logoByPurpose, avatar, logoBySetting, groupAv} {
+	for _, o := range deleted {
+		if !ordinary[o.ID] {
+			t.Fatalf("purge touched core asset %s", o.ID)
+		}
+	}
+	for _, id := range []uuid.UUID{avatar, logoBySetting, groupAv} {
 		var st string
-		_ = s.pool.QueryRow(ctx, `SELECT status FROM objects WHERE id=$1`, id).Scan(&st)
-		if st == "deleted" {
+		if err := s.pool.QueryRow(ctx, `SELECT status FROM objects WHERE id=$1`, id).Scan(&st); err != nil {
+			t.Fatal(err)
+		}
+		if st != "ready" {
 			t.Fatalf("core asset %s was purged", id)
+		}
+	}
+}
+
+// Cleanup must recheck references committed while it waited for the image
+// row lock. This exercises the actual PostgreSQL interleaving, not a timing
+// assumption about which goroutine ran first.
+// 清理等图片行锁期间新增的头像引用必须保活；用 PG 阻塞关系确认交错次序。
+func TestCoreAssetBindingSurvivesCleanupRace(t *testing.T) {
+	for _, mode := range []string{"admin", "gc"} {
+		t.Run(mode, func(t *testing.T) {
+			s, parent, mk := testEnv(t)
+			ctx, cancel := context.WithTimeout(parent, 15*time.Second)
+			defer cancel()
+			owner := mk()
+			obj, _, err := s.Put(ctx, owner, uuid.Nil, "doc", "avatar.png", "image/png",
+				bytes.NewReader(pngBytes(t, 16, 16)), 1<<20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.pool.Exec(ctx,
+				`UPDATE objects SET created_at=now()-interval '8 days' WHERE id=$1`, obj.ID); err != nil {
+				t.Fatal(err)
+			}
+			tx, err := s.pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tx.Rollback(parent) }()
+			if err := RequireReadyImage(ctx, tx, obj.ID, owner); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() {
+				if mode == "admin" {
+					_, err := s.AdminPurge(ctx, owner, time.Now().Add(-9*24*time.Hour), time.Now().Add(time.Hour))
+					done <- err
+				} else {
+					_, err := s.OrphanGC(ctx)
+					done <- err
+				}
+			}()
+			// Wait until cleanup has taken its candidate snapshot and is
+			// blocked on our binding transaction's object lock.
+			for {
+				var blocked bool
+				if err := s.pool.QueryRow(ctx,
+					`SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1::int=ANY(pg_blocking_pids(pid)))`,
+					tx.Conn().PgConn().PID()).Scan(&blocked); err != nil {
+					t.Fatal(err)
+				}
+				if blocked {
+					break
+				}
+				select {
+				case err := <-done:
+					t.Fatalf("cleanup did not wait for binding: %v", err)
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO conversations (id,kind,title,avatar_object_id) VALUES ($1,'group','avatar-race',$2)`,
+				uuid.Must(uuid.NewV7()), obj.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			current, err := s.Peek(ctx, obj.ID)
+			if err != nil || current.Status != "ready" {
+				t.Fatalf("newly bound avatar was deleted: %+v, %v", current, err)
+			}
+		})
+	}
+}
+
+func TestUnboundIdentityUploadsExpire(t *testing.T) {
+	s, ctx, mk := testEnv(t)
+	owner := mk()
+	for i, purpose := range []string{"avatar", "workspace_logo"} {
+		o, _, err := s.Put(ctx, owner, uuid.Nil, purpose, "unused.png", "image/png",
+			bytes.NewReader(pngBytes(t, i+1, 1)), 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE objects SET created_at=now()-interval '8 days' WHERE id=$1`, o.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.OrphanGC(ctx); err != nil {
+			t.Fatal(err)
+		}
+		current, err := s.Peek(ctx, o.ID)
+		if err != nil || current.Status != "deleted" {
+			t.Fatalf("unbound %s did not expire: %+v, %v", purpose, current, err)
 		}
 	}
 }

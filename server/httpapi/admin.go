@@ -339,7 +339,7 @@ func (d *Deps) adminSettingsSet(ctx context.Context, in *struct {
 			}
 		}
 		if err := d.Settings.Set(ctx, k, v, admin.ID); err != nil {
-			return nil, err
+			return nil, imageObjectErr(err)
 		}
 	}
 	// Refresh hot settings the server caches at boot.
