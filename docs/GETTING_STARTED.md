@@ -42,6 +42,10 @@ Use Go 1.27.3, Node.js 24, pnpm 12.16.1 and Docker. On Windows use
 corepack pnpm --dir admin install --frozen-lockfile
 corepack pnpm --dir admin build
 corepack pnpm --dir desktop/frontend install --frozen-lockfile
+go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0
+cd desktop
+wails3 generate bindings
+cd ..
 corepack pnpm --dir desktop/frontend build
 go build -o bin/wittychat-server.exe ./server
 go build -o bin/wittychat-worker.exe ./worker
@@ -49,7 +53,8 @@ cd desktop
 go build -tags production -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui" -o bin/wittychat.exe .
 ```
 
-The admin SPA and desktop `dist` directories are generated, not committed.
+The admin SPA, desktop `dist` and Wails `frontend/bindings` directories are generated, not committed.
+Generate Wails bindings before building the desktop frontend. The CLI must be on PATH.
 Build them before compiling packages that embed them. Linux server/worker can be
 built from the root with `CGO_ENABLED=0 go build ./server` and `./worker`;
 the Windows desktop is the only packaged/tested GUI target for this alpha.

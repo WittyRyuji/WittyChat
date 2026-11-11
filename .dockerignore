@@ -1,6 +1,8 @@
 .git
 .env
 .env.*
+**/.env
+**/.env.*
 !deploy/.env.example
 data
 release
@@ -12,3 +14,6 @@ release
 **/*.db
 **/*.sqlite3*
 **/*.syso
+**/*.pem
+**/*.key
+deploy/certs

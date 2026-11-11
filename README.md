@@ -60,7 +60,7 @@ PostgreSQL 是权威数据源；桌面端有 SQLite 缓存层。聊天以会话�
 
 ### 从源码运行
 
-需要 Go **1.27.3**、Node.js **24**、pnpm **12.16.1**、Docker，以及 Windows 桌面构建环境。
+需要 Go **1.27.3**、Node.js **24**、pnpm **12.16.1**、Wails CLI **3.0.0**、Docker，以及 Windows 桌面构建环境。
 以下命令在仓库根目录运行（Git Bash 下使用 `npm.cmd` / `corepack.cmd`）。
 
 ```bash

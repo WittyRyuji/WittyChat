@@ -42,6 +42,11 @@ jobs:
           npm install --global pnpm@12.16.1
           pnpm --dir admin install --frozen-lockfile
           pnpm --dir desktop/frontend install --frozen-lockfile
+      - name: Generate Wails bindings without Linux GUI dependencies
+        run: |
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0
+          cd desktop
+          wails3 generate bindings -f '-tags server'
       - name: Frontend tests and embedded assets
         run: |
           pnpm --dir desktop/frontend test
