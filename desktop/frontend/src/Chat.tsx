@@ -184,7 +184,12 @@ export function Chat({
 }) {
   const [convs, setConvs] = useState<ConversationInfo[]>([]);
   const [activeId, setActiveId] = useState("");
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
   const [states, setStates] = useState<Record<string, ConvState>>({});
+  const statesRef = useRef(states);
+  statesRef.current = states;
+  const deltaRequests = useRef<Record<string, number>>({});
   const [pending, setPending] = useState<Pending[]>([]);
   const [text, setText] = useState("");
   const [quote, setQuote] = useState<OpEvent | null>(null);
@@ -291,52 +296,54 @@ export function Chat({
   }, []);
 
   const fetchDelta = useCallback(async (convId: string) => {
-    setStates((prev) => {
-      const cur = prev[convId] ?? { ops: [], watermark: 0, hasOlder: true, loaded: false };
-      void (async () => {
-        try {
-          let wm = cur.watermark;
-          const acc = [...cur.ops];
-          for (;;) {
-            const page = await api.opsAfter(convId, wm);
-            for (const o of page.ops) {
-              if (o.op_seq > wm) {
-                if (o.kind === "reaction") {
-                  applyReaction(acc, o);
-                }
-                acc.push(o);
-              }
-            }
-            if (page.ops.length > 0) {
-              wm = page.ops[page.ops.length - 1].op_seq;
-            }
-            if (!page.has_more) break;
+    const request = (deltaRequests.current[convId] ?? 0) + 1;
+    deltaRequests.current[convId] = request;
+    const cur = statesRef.current[convId];
+    try {
+      let wm = cur?.watermark ?? 0;
+      const incoming: OpEvent[] = [];
+      for (;;) {
+        const page = await api.opsAfter(convId, wm);
+        if (deltaRequests.current[convId] !== request) return;
+        incoming.push(...page.ops.filter((o) => o.op_seq > wm));
+        if (page.ops.length > 0) wm = page.ops[page.ops.length - 1].op_seq;
+        if (!page.has_more) break;
+      }
+      // Switch/reconnect requests can overlap. Only the latest applies, and
+      // merging against current state preserves concurrent sends/older pages.
+      // 切换/重连可能重叠；仅应用最新请求，并保留期间发送的消息和加载的历史页。
+      setStates((prev) => {
+        const current = prev[convId];
+        const ops = [...(current?.ops ?? [])];
+        const present = new Set(ops.map((o) => o.op_seq));
+        for (const o of incoming) {
+          if (!present.has(o.op_seq)) {
+            if (o.kind === "reaction") applyReaction(ops, o);
+            ops.push(o);
+            present.add(o.op_seq);
           }
-          acc.sort((a, b) => a.op_seq - b.op_seq);
-          setStates((p) => ({
-            ...p,
-            // Full fetch from seq 0 → nothing older exists.
-            [convId]: {
-              ops: acc,
-              watermark: wm,
-              hasOlder: cur.watermark === 0 ? false : cur.hasOlder,
-              loaded: true,
-            },
-          }));
-          setPending((p) => {
-            const got = new Set(acc.map((o) => o.client_msg_id).filter(Boolean));
-            return p.filter((x) => x.convId !== convId || !got.has(x.id));
-          });
-          // Mark read when viewing this conv.
-          if (wm > 0) {
-            api.markRead(convId, wm).catch(() => {});
-          }
-        } catch {
-          /* transient */
         }
-      })();
-      return prev;
-    });
+        ops.sort((a, b) => a.op_seq - b.op_seq);
+        return {
+          ...prev,
+          [convId]: {
+            ops,
+            watermark: Math.max(current?.watermark ?? 0, wm),
+            hasOlder: (cur?.watermark ?? 0) === 0 ? false : (current?.hasOlder ?? true),
+            loaded: true,
+          },
+        };
+      });
+      setPending((p) => {
+        const got = new Set(incoming.map((o) => o.client_msg_id).filter(Boolean));
+        return p.filter((x) => x.convId !== convId || !got.has(x.id));
+      });
+      if (wm > 0 && activeIdRef.current === convId) {
+        api.markRead(convId, wm).catch(() => {});
+      }
+    } catch {
+      /* transient; switching/reconnecting retries */
+    }
   }, []);
 
   const loadingOlder = useRef<Record<string, boolean>>({});
@@ -391,8 +398,6 @@ export function Chat({
   meIdRef.current = me.id;
   const onMeUpdatedRef = useRef(onMeUpdated);
   onMeUpdatedRef.current = onMeUpdated;
-  const activeIdRef = useRef(activeId);
-  activeIdRef.current = activeId;
 
   useEffect(() => {
     let dead = false;
@@ -555,7 +560,9 @@ export function Chat({
     setConvDocs(null);
     setPlusMenu(false);
     needInitScroll.current = true; // 进会话跳到底
-    if (!states[activeId]?.loaded) fetchDelta(activeId);
+    // Cached ops may have missed transient notifications while disconnected.
+    // 已加载会话也可能漏掉断线期间的通知；每次进入均按水印补拉增量。
+    fetchDelta(activeId);
     loadMembers(activeId);
     const c = convs.find((x) => x.id === activeId);
     if (c && c.last_op_seq > 0) api.markRead(activeId, c.last_op_seq).catch(() => {});

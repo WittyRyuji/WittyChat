@@ -1,15 +1,41 @@
 // Avatar: renders user's uploaded avatar image, falls back to the
 // display-name initial. Works with or without avatar_object_id — when the
 // id is unknown (chat rows only carry user_id) it still fetches
-// /users/{id}/avatar once and negative-caches 404s. Object URLs are cached
-// per avatar_object_id ("u:"+userId otherwise) so GIF blobs keep animating.
+// /users/{id}/avatar. Requests are shared per identity/version/session and
+// failures cached for 30s; successful blob URLs keep GIFs animating.
 //
 // 头像组件：有上传头像显示图片，否则显示昵称首字。没有 avatar_object_id
-// 时按 user.id 直接取一次，404 负缓存；blob URL 按对象 id 缓存。
+// 时按 user.id 取；按身份/版本/会话合并请求，失败缓存 30 秒，成功 blob URL 稳定复用。
 import { useEffect, useState } from "react";
-import { api2, authBlob, getToken, type UserPublic } from "./api";
+import { API_BASE, api2, authBlob, getToken, type UserPublic } from "./api";
+import { AVATAR_FAILURE_TTL, AvatarCache } from "./avatarcache";
 
-const cache = new Map<string, string>();
+const cache = new AvatarCache();
+
+function useAvatar(path: string) {
+  const key = path ? `${API_BASE}|${getToken()}|${path}` : "";
+  const [image, setImage] = useState({ key, url: key ? (cache.get(key) ?? "") : "" });
+  useEffect(() => {
+    if (!key) return;
+    let dead = false;
+    let retry: ReturnType<typeof setTimeout>;
+    const load = () => {
+      cache
+        .load(key, () => authBlob(path))
+        .then((url) => {
+          if (dead) return;
+          setImage({ key, url });
+          if (!url) retry = setTimeout(load, AVATAR_FAILURE_TTL);
+        });
+    };
+    load();
+    return () => {
+      dead = true;
+      clearTimeout(retry);
+    };
+  }, [key, path]);
+  return image.key === key ? image.url : key ? (cache.get(key) ?? "") : "";
+}
 
 export function Avatar({
   user,
@@ -22,43 +48,7 @@ export function Avatar({
   onClick?: () => void;
   title?: string;
 }) {
-  const key = user.avatar_object_id || `u:${user.id}`;
-  const [url, setUrl] = useState(user.id ? cache.get(key) : "");
-
-  useEffect(() => {
-    if (!user.id) {
-      setUrl("");
-      return;
-    }
-    const hit = cache.get(key);
-    if (hit !== undefined) {
-      setUrl(hit);
-      return;
-    }
-    let dead = false;
-    fetch(api2.avatarURL(user.id, user.avatar_object_id), {
-      headers: { Authorization: `Bearer ${getToken()}` },
-    })
-      .then((r) => {
-        if (r.ok) return r.blob();
-        // Only an unversioned 404 means "no avatar". A transient failure or
-        // an outdated version must not poison the new image's cache.
-        // 仅无版本请求的 404 可负缓存；瞬时失败/版本过期不污染新头像缓存。
-        if (r.status === 404 && !user.avatar_object_id) cache.set(key, "");
-        throw new Error(String(r.status));
-      })
-      .then((b) => {
-        const u = URL.createObjectURL(b);
-        cache.set(key, u);
-        if (!dead) setUrl(u);
-      })
-      .catch(() => {
-        if (!dead) setUrl("");
-      });
-    return () => {
-      dead = true;
-    };
-  }, [user.id, user.avatar_object_id, key]);
+  const url = useAvatar(user.id ? api2.avatarURL(user.id, user.avatar_object_id) : "");
 
   const inner = url ? (
     <img className="avatar-img" src={url} alt="" />
@@ -105,32 +95,7 @@ export function GroupAvatar({
   avatarId?: string; // uploaded group avatar; falls back to the color tile / 上传的群头像，否则用色块
   className?: string;
 }) {
-  const key = avatarId ? `g:${avatarId}` : "";
-  const [url, setUrl] = useState(key ? (cache.get(key) ?? "") : "");
-  useEffect(() => {
-    if (!key) {
-      setUrl("");
-      return;
-    }
-    const hit = cache.get(key);
-    if (hit !== undefined) {
-      setUrl(hit);
-      return;
-    }
-    let dead = false;
-    authBlob(api2.groupAvatarPath(id, avatarId))
-      .then((b) => {
-        const u = URL.createObjectURL(b);
-        cache.set(key, u);
-        if (!dead) setUrl(u);
-      })
-      .catch(() => {
-        if (!dead) setUrl("");
-      });
-    return () => {
-      dead = true;
-    };
-  }, [id, key, avatarId]);
+  const url = useAvatar(avatarId ? api2.groupAvatarPath(id, avatarId) : "");
   if (url) return <img className={`${className} avatar-img`} src={url} alt="" />;
   let h = 0;
   for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;

@@ -471,7 +471,14 @@ function Security() {
 		api
 			.settingsGet()
 			.then((d) => {
-				setVals(d.settings);
+				setVals(
+					Object.fromEntries(
+						POLICY_FIELDS.filter((f) => f.key in d.settings).map((f) => [
+							f.key,
+							d.settings[f.key],
+						]),
+					),
+				);
 				setLogoId(String(d.settings["workspace.logo_object_id"] ?? ""));
 			})
 			.catch(() => {});
@@ -502,7 +509,14 @@ function Security() {
 	const save = async () => {
 		setMsg("");
 		try {
-			await api.settingsSet(vals);
+			await api.settingsSet(
+				Object.fromEntries(
+					POLICY_FIELDS.filter((f) => f.key in vals).map((f) => [
+						f.key,
+						vals[f.key],
+					]),
+				),
+			);
 			setMsg("已保存");
 		} catch (e) {
 			setMsg(e instanceof Error ? e.message : "保存失败");

@@ -8,7 +8,10 @@ package settings
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
+	"sort"
 	"wittychat/core/objects"
 
 	"github.com/google/uuid"
@@ -51,6 +54,8 @@ const (
 	DefAuditRetention  = int64(180)
 )
 
+var ErrInvalidSetting = errors.New("invalid setting")
+
 // IntBounds bounds numeric policy keys. Admin writes outside the range
 // are rejected — a 0 or negative value must not silently disable a
 // safeguard (e.g. retention=0 would purge ALL version history at the
@@ -80,7 +85,7 @@ func ValidateInt(key string, v int64) error {
 		return nil
 	}
 	if v < b[0] || v > b[1] {
-		return fmt.Errorf("setting %s out of range [%d, %d] / 设置 %s 超出范围 [%d, %d]", key, b[0], b[1], key, b[0], b[1])
+		return fmt.Errorf("%w: setting %s out of range [%d, %d] / 设置 %s 超出范围 [%d, %d]", ErrInvalidSetting, key, b[0], b[1], key, b[0], b[1])
 	}
 	return nil
 }
@@ -151,38 +156,90 @@ func (s *Store) Str(ctx context.Context, key, def string) string {
 
 // Set upserts a setting; updated_by tracks which admin changed it.
 func (s *Store) Set(ctx context.Context, key string, value any, updatedBy uuid.UUID) error {
-	raw, err := json.Marshal(value)
-	if err != nil {
-		return err
+	return s.SetMany(ctx, map[string]any{key: value}, updatedBy)
+}
+
+// SetMany validates the whole patch before writing and commits it atomically.
+// Unchanged logos are not rebound: legacy SVGs and another admin's logo must
+// not prevent an unrelated policy change.
+// 整批校验并原子提交；未变更的 Logo 不重新绑定，兼容旧 SVG 和其他管理员的 Logo。
+func (s *Store) SetMany(ctx context.Context, values map[string]any, updatedBy uuid.UUID) error {
+	rawValues := make(map[string]json.RawMessage, len(values))
+	keys := make([]string, 0, len(values))
+	for key, value := range values {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		if bounds, ok := IntBounds[key]; ok {
+			var n float64
+			if string(raw) == "null" || json.Unmarshal(raw, &n) != nil ||
+				math.Trunc(n) != n || n < float64(bounds[0]) || n > float64(bounds[1]) {
+				return fmt.Errorf("%w: %s must be an integer in [%d, %d]", ErrInvalidSetting, key, bounds[0], bounds[1])
+			}
+		}
+		rawValues[key] = raw
+		keys = append(keys, key)
 	}
+	sort.Strings(keys)
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		if key == "workspace.logo_object_id" {
+		const logoKey = "workspace.logo_object_id"
+		if raw, ok := rawValues[logoKey]; ok {
 			var id string
-			if err := json.Unmarshal(raw, &id); err != nil {
+			if string(raw) == "null" || json.Unmarshal(raw, &id) != nil {
 				return objects.ErrNotImage
 			}
+			var oid uuid.UUID
 			if id != "" {
-				oid, err := uuid.Parse(id)
+				var err error
+				oid, err = uuid.Parse(id)
 				if err != nil {
 					return objects.ErrNotFound
 				}
+				id = oid.String()
+			}
+			// Serialize even when the setting row does not yet exist.
+			// 设置行不存在时也串行化 Logo 写入，避免读取旧引用后覆盖新 Logo。
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, logoKey); err != nil {
+				return err
+			}
+			var current string
+			err := tx.QueryRow(ctx, `SELECT COALESCE(value #>> '{}','') FROM workspace_settings WHERE key=$1`, logoKey).Scan(&current)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if currentID, err := uuid.Parse(current); err == nil {
+				current = currentID.String()
+			}
+			if current == id {
+				delete(rawValues, logoKey)
+			} else if id != "" {
 				if err := objects.RequireReadyImage(ctx, tx, oid, updatedBy); err != nil {
 					return err
 				}
-				// Keep the reference in canonical form for storage governance.
-				// 统一 UUID 表示，避免 URN/花括号等合法输入绕过引用匹配。
-				raw, err = json.Marshal(oid.String())
+			}
+			if _, changed := rawValues[logoKey]; changed {
+				raw, err = json.Marshal(id)
 				if err != nil {
 					return err
 				}
+				rawValues[logoKey] = raw
 			}
 		}
-		_, err := tx.Exec(ctx,
-			`INSERT INTO workspace_settings (key, value, updated_by)
-			 VALUES ($1,$2,$3)
-			 ON CONFLICT (key) DO UPDATE SET value=$2, updated_by=$3, updated_at=now()`,
-			key, raw, updatedBy)
-		return err
+		for _, key := range keys {
+			raw, ok := rawValues[key]
+			if !ok {
+				continue
+			}
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO workspace_settings (key, value, updated_by)
+				 VALUES ($1,$2,$3)
+				 ON CONFLICT (key) DO UPDATE SET value=$2, updated_by=$3, updated_at=now()`,
+				key, raw, updatedBy); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 

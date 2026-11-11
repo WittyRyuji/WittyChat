@@ -561,6 +561,102 @@ func TestUnboundIdentityUploadsExpire(t *testing.T) {
 	}
 }
 
+func TestStickerDedupRetainsShelfBytes(t *testing.T) {
+	s, ctx, mk := testEnv(t)
+	owner := mk()
+	for i, purpose := range []string{"avatar", "workspace_logo", "doc", "attachment", "mail"} {
+		t.Run(purpose, func(t *testing.T) {
+			data := pngBytes(t, 10+i, 10)
+			put := func(p string) (*Object, bool) {
+				t.Helper()
+				o, dedup, err := s.Put(ctx, owner, uuid.Nil, p, "shelf.png", "image/png", bytes.NewReader(data), 1<<20)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return o, dedup
+			}
+			first, _ := put(purpose)
+			sticker, dedup := put("sticker")
+			if !dedup || sticker.ID != first.ID || sticker.Purpose != "sticker" {
+				t.Fatalf("sticker reuse did not retain shelf purpose: %+v", sticker)
+			}
+			again, dedup := put(purpose)
+			if !dedup || again.Purpose != "sticker" {
+				t.Fatal("later ordinary upload demoted the shelf object")
+			}
+			if _, err := s.pool.Exec(ctx, `UPDATE objects SET created_at=now()-interval '8 days' WHERE id=$1`, sticker.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.OrphanGC(ctx); err != nil {
+				t.Fatal(err)
+			}
+			current, err := s.Peek(ctx, sticker.ID)
+			if err != nil || current.Status != "ready" {
+				t.Fatalf("GC deleted shelf sticker: %+v, %v", current, err)
+			}
+			rc, err := s.Open(ctx, current)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := io.ReadAll(rc)
+			_ = rc.Close()
+			if err != nil || !bytes.Equal(got, data) {
+				t.Fatal("shelf bytes unavailable after GC")
+			}
+			list, err := s.AdminList(ctx, owner, time.Now().Add(-9*24*time.Hour), time.Now().Add(time.Hour))
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, o := range list {
+				found = found || o.ID == sticker.ID
+			}
+			if !found {
+				t.Fatal("sticker retention must not hide it from admin governance")
+			}
+		})
+	}
+}
+
+func TestConcurrentStickerPromotion(t *testing.T) {
+	s, ctx, mk := testEnv(t)
+	owner := mk()
+	data := pngBytes(t, 123, 123)
+	type result struct {
+		o   *Object
+		err error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 16)
+	for i := 0; i < cap(results); i++ {
+		purpose := "avatar"
+		if i%2 == 0 {
+			purpose = "sticker"
+		}
+		go func() {
+			<-start
+			o, _, err := s.Put(ctx, owner, uuid.Nil, purpose, "concurrent.png", "image/png", bytes.NewReader(data), 1<<20)
+			results <- result{o, err}
+		}()
+	}
+	close(start)
+	var id uuid.UUID
+	for i := 0; i < cap(results); i++ {
+		r := <-results
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		if id != uuid.Nil && r.o.ID != id {
+			t.Fatal("concurrent uploads were not deduplicated")
+		}
+		id = r.o.ID
+	}
+	o, err := s.Peek(ctx, id)
+	if err != nil || o.Purpose != "sticker" {
+		t.Fatalf("concurrent dedup rolled back sticker retention: %+v, %v", o, err)
+	}
+}
+
 // AV quarantine of an infected object must not unlink a file a clean
 // same-content object still references.
 type detectScanner struct{ hit string }

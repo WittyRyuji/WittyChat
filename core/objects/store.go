@@ -143,10 +143,16 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 	// 去重仅限同主同会话；跨主/跨会话各自建行以保归属与 ACL，磁盘文件仍共享。
 	var existing Object
 	var sha []byte
-	err = s.pool.QueryRow(ctx,
-		`SELECT id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, width, height, location, status, created_at
-		 FROM objects WHERE sha256=$1 AND owner_user=$2 AND conv_id IS NOT DISTINCT FROM $3::uuid
-		   AND status<>'deleted' LIMIT 1`, sum[:], owner, nilUUID(convID)).
+	const columns = `id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, width, height, location, status, created_at`
+	const duplicate = `sha256=$1 AND owner_user=$2 AND conv_id IS NOT DISTINCT FROM $3::uuid AND status='ready'`
+	dedupSQL := `SELECT ` + columns + ` FROM objects WHERE ` + duplicate + ` LIMIT 1`
+	if purpose == "sticker" {
+		// The shelf is client-local: promote a reused upload to sticker retention.
+		// UPDATE takes GC's row lock and rechecks status if GC deleted it first.
+		// 表情架仅存本机，复用时提升为表情用途；与 GC 共用行锁，已删除则重新上传。
+		dedupSQL = `UPDATE objects SET purpose='sticker' WHERE ` + duplicate + ` RETURNING ` + columns
+	}
+	err = s.pool.QueryRow(ctx, dedupSQL, sum[:], owner, nilUUID(convID)).
 		Scan(&existing.ID, &existing.Owner, &existing.ConvID, &existing.Purpose, &existing.Name,
 			&existing.Size, &sha, &existing.Mime, &existing.Width, &existing.Height,
 			&existing.Location, &existing.Status, &existing.CreatedAt)
@@ -178,6 +184,7 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 		obj.ConvID = &convID
 		convArg = convID
 	}
+	deduplicated := false
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		// Serialize reference creation vs. reference-aware deletion on the
 		// storage key — a GC can't unlink the file between our rename and
@@ -193,16 +200,14 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 		// row instead of dying on the unique index and deleting the file
 		// it just published. / 锁内去重复查：并发同内容上传若已先提交，
 		// 复用其行——而不是撞唯一索引后误删它刚发布的文件。
-		err := tx.QueryRow(ctx,
-			`SELECT id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, width, height, location, status, created_at
-			 FROM objects WHERE sha256=$1 AND owner_user=$2 AND conv_id IS NOT DISTINCT FROM $3::uuid
-			   AND status<>'deleted' LIMIT 1`, sum[:], owner, nilUUID(convID)).
+		err := tx.QueryRow(ctx, dedupSQL, sum[:], owner, nilUUID(convID)).
 			Scan(&existing.ID, &existing.Owner, &existing.ConvID, &existing.Purpose, &existing.Name,
 				&existing.Size, &sha, &existing.Mime, &existing.Width, &existing.Height,
 				&existing.Location, &existing.Status, &existing.CreatedAt)
 		if err == nil {
 			copy(existing.SHA256[:], sha)
-			return errDedup
+			deduplicated = true
+			return nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return err
@@ -230,28 +235,21 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 		return err
 	})
 	if err != nil {
-		if errors.Is(err, errDedup) {
-			// Same legacy-row backfill as the outside dedup check.
-			// 与锁外去重检查相同的旧行回填。
-			s.markDims(ctx, existing.ID, wPtr, hPtr)
-			if existing.Width == nil {
-				existing.Width, existing.Height = wPtr, hPtr
-			}
-			return &existing, true, nil
-		}
 		// Rolled back after the rename? Drop our bytes ONLY if nothing
 		// else references the key — another object may legitimately share
 		// it. / 落盘后回滚：仅当无人引用该 key 才删——文件可能是共享的。
 		_ = s.dropKeyIfOrphaned(ctx, rel, "local")
 		return nil, false, err
 	}
+	if deduplicated {
+		s.markDims(ctx, existing.ID, wPtr, hPtr)
+		if existing.Width == nil {
+			existing.Width, existing.Height = wPtr, hPtr
+		}
+		return &existing, true, nil
+	}
 	return obj, false, nil
 }
-
-// errDedup marks "an identical row was committed by a racing upload"
-// inside the advisory-locked Put transaction. / 标记锁内去重命中：
-// 并发相同上传已提交，复用其行。
-var errDedup = errors.New("dedup: committed by racing upload")
 
 // imageDims sniffs pixel dimensions from a just-written file — best
 // effort, format-agnostic (the bytes decide, not the claimed mime), with

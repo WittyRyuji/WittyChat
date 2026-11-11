@@ -329,18 +329,11 @@ func (d *Deps) adminSettingsSet(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, err
 	}
-	for k, v := range in.Body.Settings {
-		// Bounded numeric keys reject out-of-range values — a typo must
-		// not be able to disable retention or the doc cap. / 有界数值键
-		// 拒绝越界值——手滑不能关掉保留期或文档上限。
-		if f, ok := v.(float64); ok {
-			if err := settings.ValidateInt(k, int64(f)); err != nil {
-				return nil, huma.Error400BadRequest(err.Error())
-			}
+	if err := d.Settings.SetMany(ctx, in.Body.Settings, admin.ID); err != nil {
+		if errors.Is(err, settings.ErrInvalidSetting) {
+			return nil, huma.Error400BadRequest(err.Error())
 		}
-		if err := d.Settings.Set(ctx, k, v, admin.ID); err != nil {
-			return nil, imageObjectErr(err)
-		}
+		return nil, imageObjectErr(err)
 	}
 	// Refresh hot settings the server caches at boot.
 	// 刷新启动时缓存的热设置（撤回时限）。
