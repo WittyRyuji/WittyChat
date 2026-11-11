@@ -2,16 +2,20 @@
 // Internal mail delivers instantly; external queues for direct-to-MX.
 //
 // 邮件视图：文件夹 | 列表 | 阅读 + 写信弹窗。
-import { useCallback, useEffect, useRef, useState } from "react";
+
+import DOMPurify from "dompurify";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   api2,
+  authBlob,
   downloadExternal,
   isOfficeFile,
   type MailFolder,
   type MailMessage,
   mailApi,
   officeOpenExternal,
+  openExternal,
 } from "./api";
 import {
   IconArchive,
@@ -22,7 +26,6 @@ import {
   IconSpam,
   IconTrash,
 } from "./icons";
-import { Md } from "./md";
 import { ObjImg } from "./objimg";
 import { prefGet, prefSet } from "./prefs";
 
@@ -423,7 +426,7 @@ export function Mail() {
               </div>
             )}
             <div className="mail-body">
-              <Md text={open.text_body} />
+              <MailBody msg={open} />
             </div>
             {open.attachments && open.attachments.length > 0 && (
               <div className="mail-attach">
@@ -440,41 +443,46 @@ export function Mail() {
                     </button>
                   </div>
                 )}
-                {open.attachments.map((a) => (
-                  <span key={a.object_id} className="mail-attach-item">
-                    {a.mime.startsWith("image/") && showImages && (
-                      <ObjImg
-                        className="mail-attach-img"
-                        id={a.object_id}
-                        alt={a.name}
-                        ctx="mail"
-                        natW={a.w}
-                        natH={a.h}
-                      />
-                    )}
-                    <a
-                      href={api2.downloadURL(a.object_id)}
-                      rel="noreferrer"
-                      download={a.name}
-                      onClick={(e) => {
-                        e.preventDefault();
-                        downloadExternal(a.object_id).catch(() => {});
-                      }}
-                    >
-                      📎 {a.name}
-                    </a>
-                    {officeOn && isOfficeFile(a.name) && (
-                      <button
-                        type="button"
-                        className="att-edit"
-                        title="邮件附件是不可变记录，只读打开"
-                        onClick={() => officeOpenExternal(a.object_id).catch(() => {})}
+                {open.attachments
+                  .filter(
+                    (a) =>
+                      !(a.inline && a.content_id && open.html_body?.includes(`cid:${a.content_id}`))
+                  )
+                  .map((a) => (
+                    <span key={a.object_id} className="mail-attach-item">
+                      {a.mime.startsWith("image/") && showImages && (
+                        <ObjImg
+                          className="mail-attach-img"
+                          id={a.object_id}
+                          alt={a.name}
+                          ctx="mail"
+                          natW={a.w}
+                          natH={a.h}
+                        />
+                      )}
+                      <a
+                        href={api2.downloadURL(a.object_id)}
+                        rel="noreferrer"
+                        download={a.name}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          downloadExternal(a.object_id).catch(() => {});
+                        }}
                       >
-                        在线查看
-                      </button>
-                    )}
-                  </span>
-                ))}
+                        📎 {a.name}
+                      </a>
+                      {officeOn && isOfficeFile(a.name) && (
+                        <button
+                          type="button"
+                          className="att-edit"
+                          title="邮件附件是不可变记录，只读打开"
+                          onClick={() => officeOpenExternal(a.object_id).catch(() => {})}
+                        >
+                          在线查看
+                        </button>
+                      )}
+                    </span>
+                  ))}
               </div>
             )}
           </div>
@@ -759,6 +767,174 @@ function Compose({
           {sending ? "发送中…" : "发送"}
         </button>
       </div>
+    </div>
+  );
+}
+
+// URL_RE for linkify — http(s) and mailto only. / 链接化：仅 http(s) 与 mailto。
+const URL_RE = /(https?:\/\/[^\s<>"')]+|mailto:[^\s<>"')]+)/g;
+
+function linkifyText(t: string) {
+  const out: (string | React.JSX.Element)[] = [];
+  let last = 0;
+  let i = 0;
+  for (const m of t.matchAll(URL_RE)) {
+    const idx = m.index ?? 0;
+    out.push(t.slice(last, idx));
+    const u = m[0];
+    out.push(
+      <a
+        key={i++}
+        href={u}
+        rel="noreferrer"
+        onClick={(e) => {
+          e.preventDefault();
+          openExternal(u).catch(() => {});
+        }}
+      >
+        {u}
+      </a>
+    );
+    last = idx + u.length;
+  }
+  out.push(t.slice(last));
+  return out;
+}
+
+// MailBody: plain text renders pre-wrap with linkified URLs; HTML mail
+// renders inside a sandboxed iframe (no allow-scripts) after DOMPurify.
+// Remote images are blocked by default (tracking pixels) behind a bar.
+// 正文渲染：纯文本 pre-wrap + 链接化；HTML 邮件 DOMPurify 后进沙盒
+// iframe。远程图片默认拦截（防追踪像素），点"显示"才加载。
+function MailBody({ msg }: { msg: MailMessage }) {
+  const ref = useRef<HTMLIFrameElement>(null);
+  const [showRemote, setShowRemote] = useState(false);
+  const roRef = useRef<ResizeObserver | null>(null);
+  const blobRef = useRef<Map<string, string>>(new Map());
+
+  // CSP does the real remote-blocking: nothing fetches http(s) until
+  // showRemote widens img-src — covers CSS url(), srcset, background=,
+  // <video poster>, everything the DOM rewrite could miss.
+  // 远程拦截靠 CSP：showRemote 之前任何 http(s) 拉取都被拒——CSS url()、
+  // srcset、background、video poster 一并堵死，不靠 DOM 改写兜底。
+  const { html, remote } = useMemo(() => {
+    if (!msg.html_body) return { html: "", remote: 0 };
+    const clean = DOMPurify.sanitize(msg.html_body, {
+      WHOLE_DOCUMENT: false,
+      FORBID_TAGS: ["script", "iframe", "object", "embed", "form", "input", "base"],
+    });
+    const doc = new DOMParser().parseFromString(`<div>${clean}</div>`, "text/html");
+    let remote = 0;
+    doc.querySelectorAll("img").forEach((img) => {
+      const src = img.getAttribute("src") || "";
+      if (src.startsWith("cid:")) {
+        img.setAttribute("data-cid", src.slice(4));
+        img.removeAttribute("src");
+      } else if (/^https?:/i.test(src)) {
+        remote++;
+        if (!showRemote) {
+          img.setAttribute("data-remote-src", src);
+          img.removeAttribute("src");
+        }
+      }
+      if (!showRemote) {
+        img.removeAttribute("srcset");
+      }
+    });
+    // meta CSP goes in the rebuilt document head AFTER sanitize.
+    const imgSrc = showRemote ? " http: https:" : "";
+    return {
+      html: `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; font-src data:; img-src blob: data:${imgSrc}"><style>body{margin:8px;background:#fff;color:#111;font:14px/1.5 sans-serif}img{max-width:100%}</style></head><body>${doc.body.innerHTML}</body></html>`,
+      remote,
+    };
+  }, [msg.html_body, showRemote]);
+
+  // wire() runs ONLY on iframe load — each load is a fresh document, so
+  // handlers bind exactly once. Delegated click listener; one ResizeObserver
+  // per document; cid blobs cached per message.
+  // 只在 iframe onLoad 时接线：每次载入是新文档，事件只绑一次。委托式
+  // 点击监听；每文档一个 ResizeObserver；cid blob 按消息缓存。
+  const wire = useCallback(() => {
+    const d = ref.current?.contentDocument;
+    // srcdoc iframes can fire load twice on the same document — wire once.
+    // srcdoc iframe 同一文档可能触发两次 load——只接一次线。
+    if (!d || (d as Document & { __wired?: boolean }).__wired) return;
+    (d as Document & { __wired?: boolean }).__wired = true;
+    d.querySelectorAll("img[data-cid]").forEach((img) => {
+      const cid = img.getAttribute("data-cid");
+      const att = msg.attachments?.find((a) => a.content_id === cid);
+      if (!att) return;
+      const cached = blobRef.current.get(att.object_id);
+      if (cached) {
+        img.setAttribute("src", cached);
+        return;
+      }
+      authBlob(api2.downloadURL(att.object_id))
+        .then((b) => {
+          const url = URL.createObjectURL(b);
+          blobRef.current.set(att.object_id, url);
+          img.setAttribute("src", url);
+        })
+        .catch(() => {});
+    });
+    // Delegated click: one listener for every anchor. / 委托监听所有链接。
+    d.addEventListener("click", (e) => {
+      const a = (e.target as Element).closest("a[href]");
+      if (!a) return;
+      e.preventDefault();
+      const href = a.getAttribute("href") || "";
+      if (/^https?:/i.test(href) || href.startsWith("mailto:")) {
+        openExternal(href).catch(() => {});
+      }
+    });
+    const fitH = () => {
+      if (ref.current?.contentDocument?.body) {
+        ref.current.style.height = `${ref.current.contentDocument.body.scrollHeight + 8}px`;
+      }
+    };
+    fitH();
+    roRef.current?.disconnect();
+    if (typeof ResizeObserver !== "undefined" && d.body) {
+      roRef.current = new ResizeObserver(fitH);
+      roRef.current.observe(d.body);
+    }
+  }, [msg.attachments]);
+
+  // Cleanup on unmount — blob URLs are object-keyed so they stay valid
+  // across messages. / 卸载时回收：blob URL 按对象 id 存，跨消息仍有效。
+  useEffect(
+    () => () => {
+      roRef.current?.disconnect();
+      roRef.current = null;
+      blobRef.current.forEach((u) => {
+        URL.revokeObjectURL(u);
+      });
+      blobRef.current.clear();
+    },
+    []
+  );
+
+  if (!msg.html_body) {
+    return <div className="mail-text">{linkifyText(msg.text_body)}</div>;
+  }
+  return (
+    <div className="mail-html-wrap">
+      {remote > 0 && !showRemote && (
+        <div className="mail-remote-bar">
+          已阻止 {remote} 张远程图片 ·{" "}
+          <button type="button" className="ghost sm" onClick={() => setShowRemote(true)}>
+            显示
+          </button>
+        </div>
+      )}
+      <iframe
+        ref={ref}
+        className="mail-html"
+        sandbox="allow-same-origin"
+        srcDoc={html}
+        title="mail body"
+        onLoad={wire}
+      />
     </div>
   );
 }

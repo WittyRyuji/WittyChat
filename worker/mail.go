@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"os"
 	"time"
 	"wittychat/core/mail"
 	"wittychat/core/settings"
@@ -59,7 +61,10 @@ func (w *worker) mailSend(ctx context.Context, msgID uuid.UUID, rcpt string) err
 	return nil
 }
 
-// mailParse reads the raw .eml object, parses, delivers to local mailboxes.
+// mailParse reads the raw .eml object, parses it fully (MIME tree,
+// charsets, attachments), stores attachments as objects and delivers one
+// mailbox copy per local recipient.
+// 入站解析：完整走 MIME 树（编码、附件），附件入对象库，逐本地收件人入库。
 func (w *worker) mailParse(ctx context.Context, objID uuid.UUID) error {
 	m := w.mailStore()
 	obj, err := w.store.Peek(ctx, objID)
@@ -71,17 +76,89 @@ func (w *worker) mailParse(ctx context.Context, objID uuid.UUID) error {
 		return err
 	}
 	defer func() { _ = rc.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(rc, 4<<20))
+
+	// Spool attachment bytes to temp files during the walk — reusing them
+	// per recipient avoids holding large blobs in memory.
+	// 附件先落临时文件：按收件人复用，避免大附件占内存。
+	tmpDir, err := os.MkdirTemp("", "mailparse-*")
 	if err != nil {
 		return err
 	}
-	pm, err := mail.ParseRaw(raw)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+	var atts []struct {
+		meta mail.AttachmentMeta
+		path string
+		size int64
+	}
+	pm, err := mail.ParseMessage(rc,
+		func(meta mail.AttachmentMeta, r io.Reader) error {
+			f, err := os.CreateTemp(tmpDir, "att-*")
+			if err != nil {
+				log.Printf("mail: spool attachment %q: %v", meta.Filename, err)
+				return err
+			}
+			n, err := io.Copy(f, r)
+			_ = f.Close()
+			if err != nil {
+				log.Printf("mail: spool attachment %q: %v", meta.Filename, err)
+				return err
+			}
+			atts = append(atts, struct {
+				meta mail.AttachmentMeta
+				path string
+				size int64
+			}{meta, f.Name(), n})
+			return nil
+		})
 	if err != nil {
 		return err
 	}
-	n, err := m.Inbound(ctx, pm, objID)
-	if n == 0 && err == nil {
+
+	// Resolve local recipients first — attachments are put under each.
+	// 先解析本地收件人：附件按属主逐个入库（Put 按 sha 去重）。
+	recipients := []uuid.UUID{}
+	seen := map[uuid.UUID]bool{}
+	for _, addr := range append(append([]string{}, pm.To...), pm.Cc...) {
+		if !m.IsLocal(addr) {
+			continue
+		}
+		if uid, err := m.UserForAddress(ctx, addr); err == nil && !seen[uid] {
+			seen[uid] = true
+			recipients = append(recipients, uid)
+		}
+	}
+	if len(recipients) == 0 {
 		return errors.New("no local recipients matched / 无本地收件人")
 	}
-	return err
+
+	delivered := 0
+	for _, uid := range recipients {
+		var dAtts []mail.DeliveredAttachment
+		for _, a := range atts {
+			f, err := os.Open(a.path)
+			if err != nil {
+				continue
+			}
+			o, _, err := w.store.Put(ctx, uid, uuid.Nil, "mail", a.meta.Filename,
+				a.meta.Mime, f, a.size+1)
+			_ = f.Close()
+			if err != nil {
+				log.Printf("mail: put attachment %q for %s: %v", a.meta.Filename, uid, err)
+				continue
+			}
+			dAtts = append(dAtts, mail.DeliveredAttachment{
+				ObjectID: o.ID, ContentID: a.meta.ContentID, Inline: a.meta.Inline,
+			})
+		}
+		if _, err := m.DeliverParsed(ctx, uid, "inbox", nil, pm, mail.DeliverOpts{
+			RawObjectID: &objID, Attachments: dAtts,
+			SentAt: pm.Date, SizeBytes: obj.Size,
+		}); err == nil {
+			delivered++
+		}
+	}
+	if delivered == 0 {
+		return errors.New("deliver failed for all local recipients / 全部投递失败")
+	}
+	return nil
 }

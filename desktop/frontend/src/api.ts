@@ -507,6 +507,8 @@ export interface MailAttach {
   size_bytes: number;
   w?: number | null; // decoded image px when the object has dims (server sends null) / 图片像素宽（服务端已知时，否则为 null）
   h?: number | null;
+  content_id?: string | null; // cid: reference inside the HTML body / HTML 内 cid 引用
+  inline?: boolean;
 }
 export interface MailMessage {
   id: string;
@@ -517,6 +519,7 @@ export interface MailMessage {
   cc_addrs: string[];
   subject: string;
   text_body: string;
+  html_body?: string;
   preview: string;
   is_read: boolean;
   is_starred: boolean;

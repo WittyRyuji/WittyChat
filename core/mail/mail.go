@@ -59,6 +59,7 @@ type Message struct {
 	CcAddrs    []string  `json:"cc_addrs"`
 	Subject    string    `json:"subject"`
 	TextBody   string    `json:"text_body"`
+	HTMLBody   string    `json:"html_body"`
 	Preview    string    `json:"preview"`
 	IsRead     bool      `json:"is_read"`
 	IsStarred  bool      `json:"is_starred"`
@@ -70,12 +71,14 @@ type Message struct {
 }
 
 type Attach struct {
-	ObjectID uuid.UUID `json:"object_id"`
-	Name     string    `json:"name"`
-	Mime     string    `json:"mime"`
-	Size     int64     `json:"size_bytes"`
-	W        *int      `json:"w,omitempty"` // decoded image px, if known / 图片像素宽（已知时）
-	H        *int      `json:"h,omitempty"`
+	ObjectID  uuid.UUID `json:"object_id"`
+	Name      string    `json:"name"`
+	Mime      string    `json:"mime"`
+	Size      int64     `json:"size_bytes"`
+	W         *int      `json:"w,omitempty"` // decoded image px, if known / 图片像素宽（已知时）
+	H         *int      `json:"h,omitempty"`
+	ContentID *string   `json:"content_id,omitempty"` // cid: ref inside HTML / HTML 内 cid 引用
+	Inline    bool      `json:"inline,omitempty"`
 }
 
 var defaultFolders = []struct{ kind, name string }{
@@ -213,13 +216,13 @@ func (s *Store) IsLocal(addr string) bool {
 }
 
 const msgCols = `id, folder_id, direction, COALESCE(thread_id,''), from_addr,
-	to_addrs, cc_addrs, subject, text_body, preview, is_read, is_starred,
+	to_addrs, cc_addrs, subject, text_body, html_body, preview, is_read, is_starred,
 	COALESCE(in_reply_to,''), COALESCE(rfc_msgid,''), COALESCE(sent_at, received_at), received_at`
 
 func scanMsg(row pgx.Row) (*Message, error) {
 	var m Message
 	err := row.Scan(&m.ID, &m.FolderID, &m.Direction, &m.ThreadID, &m.FromAddr,
-		&m.ToAddrs, &m.CcAddrs, &m.Subject, &m.TextBody, &m.Preview,
+		&m.ToAddrs, &m.CcAddrs, &m.Subject, &m.TextBody, &m.HTMLBody, &m.Preview,
 		&m.IsRead, &m.IsStarred, &m.InReplyTo, &m.RFCMsgID, &m.SentAt, &m.ReceivedAt)
 	return &m, err
 }
@@ -255,14 +258,14 @@ func (s *Store) Get(ctx context.Context, user, id uuid.UUID) (*Message, error) {
 	}
 	// attachments
 	rows, err := s.pool.Query(ctx,
-		`SELECT a.object_id,a.name,COALESCE(a.mime,''),a.size_bytes,o.width,o.height
+		`SELECT a.object_id,a.name,COALESCE(a.mime,''),a.size_bytes,o.width,o.height,a.content_id,a.inline
 		 FROM mail_attachments a LEFT JOIN objects o ON o.id=a.object_id
 		 WHERE a.message_id=$1`, id)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var a Attach
-			if rows.Scan(&a.ObjectID, &a.Name, &a.Mime, &a.Size, &a.W, &a.H) == nil {
+			if rows.Scan(&a.ObjectID, &a.Name, &a.Mime, &a.Size, &a.W, &a.H, &a.ContentID, &a.Inline) == nil {
 				m.Attach = append(m.Attach, a)
 			}
 		}
@@ -468,4 +471,117 @@ func (s *Store) Compose(ctx context.Context, fromUser uuid.UUID,
 		external = append(external, rcpt)
 	}
 	return msgID, external, nil
+}
+
+// DeliveredAttachment pairs an already-stored object with its mail role —
+// inline images keep their content-id so the client can wire cid: refs.
+// 已入库对象与其邮件角色：内联图片保留 content-id 供客户端接 cid: 引用。
+type DeliveredAttachment struct {
+	ObjectID  uuid.UUID
+	ContentID string
+	Inline    bool
+}
+
+// DeliverOpts carries the inbound-specific fields DeliverParsed needs —
+// zero times fall back to now; an empty Direction derives from folder.
+// 入站专属字段：零值时间回退为当前；空方向按文件夹推断。
+type DeliverOpts struct {
+	RawObjectID *uuid.UUID
+	Attachments []DeliveredAttachment
+	IsRead      bool
+	IsStarred   bool
+	SentAt      time.Time
+	ReceivedAt  time.Time
+	Direction   string // "" → derived from folder
+	SizeBytes   int64
+}
+
+// DeliverParsed stores one mailbox copy of a fully parsed message.
+// folderID non-nil targets that exact folder (custom folders for imports);
+// otherwise folderKind resolves through the kind folders.
+// 存一份完整解析后的邮件：folderID 指定精确文件夹（导入用自定义夹），
+// 否则按 kind 文件夹解析。
+func (s *Store) DeliverParsed(ctx context.Context, toUser uuid.UUID, folderKind string,
+	folderID *uuid.UUID, p *Parsed, o DeliverOpts,
+) (uuid.UUID, error) {
+	var fid uuid.UUID
+	var err error
+	if folderID != nil {
+		fid = *folderID
+	} else {
+		fid, err = s.folderID(ctx, toUser, folderKind)
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if p.To == nil {
+		p.To = []string{}
+	}
+	if p.Cc == nil {
+		p.Cc = []string{}
+	}
+	direction := o.Direction
+	if direction == "" {
+		direction = dir(folderKind)
+	}
+	thread := p.InReplyTo
+	if thread == "" {
+		thread = normalizeSubject(p.Subject)
+	}
+	text := p.Text
+	attNames := []string{}
+	for _, a := range o.Attachments {
+		var n string
+		if err := s.pool.QueryRow(ctx, `SELECT name FROM objects WHERE id=$1`, a.ObjectID).Scan(&n); err == nil {
+			attNames = append(attNames, n)
+		}
+	}
+	search := strings.Join([]string{
+		p.Subject, text, p.From, strings.Join(p.To, " "), strings.Join(attNames, " "),
+	}, " ")
+	sentAt := o.SentAt
+	if sentAt.IsZero() {
+		sentAt = time.Now()
+	}
+	receivedAt := o.ReceivedAt
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
+	}
+	id := uuid.Must(uuid.NewV7())
+	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO mail_messages
+			 (id,owner_user_id,folder_id,direction,rfc_msgid,thread_id,in_reply_to,
+			  from_addr,to_addrs,cc_addrs,subject,text_body,html_body,preview,search_text,
+			  is_read,is_starred,sent_at,received_at,raw_object_id,size_bytes)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+			id, toUser, fid, direction, nilable(p.MessageID), thread, nilable(p.InReplyTo),
+			p.From, p.To, p.Cc, p.Subject, text, p.HTML, preview(text), search,
+			o.IsRead, o.IsStarred, sentAt, receivedAt, o.RawObjectID, o.SizeBytes); err != nil {
+			return err
+		}
+		for _, a := range o.Attachments {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO mail_attachments (message_id,object_id,name,size_bytes,mime,content_id,inline)
+				 SELECT $1,id,name,size_bytes,mime,$3,$4 FROM objects WHERE id=$2`,
+				id, a.ObjectID, nilable(a.ContentID), a.Inline); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return id, err
+}
+
+// EnsureCustomFolder returns (creating if needed) a per-user folder of
+// kind 'custom' — used by mailbox import for provider-side folders.
+// 按名取（或建）用户的 custom 文件夹——邮箱导入映射来源文件夹用。
+func (s *Store) EnsureCustomFolder(ctx context.Context, user uuid.UUID, name string) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO mail_folders (id, user_id, kind, name)
+		 VALUES ($1,$2,'custom',$3)
+		 ON CONFLICT (user_id, kind, name) DO UPDATE SET name=EXCLUDED.name
+		 RETURNING id`, uuid.Must(uuid.NewV7()), user, name).Scan(&id)
+	return id, err
 }
