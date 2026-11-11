@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -144,10 +145,15 @@ func (s *Store) BeginMultipart(ctx context.Context, owner, convID uuid.UUID,
 		PartSize: S3PartSize, ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		// Images stay unchecked — the server never sees a contiguous
+		// stream here, so dims wait for the complete-time sniff or the
+		// backfill sweep. / 图片标记未检查——服务端在 init 时看不到
+		// 连续字节流，尺寸由 complete 时嗅探或后台清扫补齐。
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO objects (id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, location, status)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'s3','pending')`,
-			objID, owner, convID, purpose, name, size, declaredSHA[:], mime); err != nil {
+			`INSERT INTO objects (id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, location, status, dims_checked)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'s3','pending',$9)`,
+			objID, owner, convID, purpose, name, size, declaredSHA[:], mime,
+			!strings.HasPrefix(mime, "image/")); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx,
@@ -243,10 +249,25 @@ func (s *Store) CompleteMultipart(ctx context.Context, objID, userID uuid.UUID,
 		return nil, err
 	}
 	obj.Status = "ready"
+	// The assembled object is finally contiguous — sniff dims now,
+	// best-effort; on failure the backfill sweep picks the row up (it's
+	// still dims_checked=false for image/*). / 组装完成后字节终于
+	// 连续——此时尽力嗅探尺寸；失败留给后台清扫（image/* 的行仍是
+	// dims_checked=false）。
+	if strings.HasPrefix(obj.Mime, "image/") {
+		if rc, serr := s.openBytes(ctx, &obj); serr == nil {
+			w, h := SniffDims(rc)
+			_ = rc.Close()
+			obj.Width, obj.Height = w, h
+			s.markDims(ctx, obj.ID, w, h)
+		}
+	}
 	return &obj, nil
 }
 
-// OpenS3 streams an s3-resident object.
+// OpenS3 streams an s3-resident object — no access-time touch here;
+// callers that count as user traffic use Open. / 读 S3 对象字节——
+// 此处不更新访问时间；算用户访问的调用方走 Open。
 func (s *Store) openS3(ctx context.Context, o *Object) (io.ReadCloser, error) {
 	var key string
 	if err := s.pool.QueryRow(ctx,
@@ -260,6 +281,5 @@ func (s *Store) openS3(ctx context.Context, o *Object) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, _ = s.pool.Exec(ctx, `UPDATE objects SET last_accessed_at=now() WHERE id=$1`, o.ID)
 	return out.Body, nil
 }

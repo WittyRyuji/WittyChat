@@ -182,6 +182,14 @@ func cmdServe() {
 	}
 	objStore.EnableS3(objects.NewS3(objects.S3ConfigFromEnv(),
 		envOr("WITTYCHAT_DATA_DIR", "./data")))
+	// Background dims sweep: re-sniffs every unchecked image row (legacy
+	// uploads, multipart completes, and rows sized by the retired
+	// orientation-blind request-path sniff). Cancelled on shutdown.
+	// 后台尺寸清扫：重嗅所有未检查图片行（旧上传、分段上传、以及被
+	// 已下线的请求路径嗅探填错方向的行）。随关停取消。
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+	go objStore.RunDimsBackfill(bgCtx, 10*time.Minute)
 	settingsStore := settings.New(pool)
 	imStore.RecallWindow = time.Duration(
 		settingsStore.Int(context.Background(), settings.KeyIMRecallTimeout, settings.DefRecallTimeout)) * time.Second

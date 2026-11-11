@@ -418,3 +418,184 @@ func TestScanSharedFileKept(t *testing.T) {
 		t.Fatalf("bob content %q want %q", got, same)
 	}
 }
+
+// dimsOf reads the width/height/dims_checked triple for one row —
+// every assertion in these tests is row-scoped (the test DB is shared
+// with other packages' tests, so global counts are off-limits).
+// dimsOf 读取单行 (width,height,dims_checked)——断言只针对具体行，
+// 测试库与他包共用，不断言全局计数。
+func dimsOf(t *testing.T, s *Store, ctx context.Context, id uuid.UUID) (*int, *int, bool) {
+	t.Helper()
+	var w, h *int
+	var checked bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT width, height, dims_checked FROM objects WHERE id=$1`, id).
+		Scan(&w, &h, &checked); err != nil {
+		t.Fatalf("dimsOf %s: %v", id, err)
+	}
+	return w, h, checked
+}
+
+func corruptPNG() []byte {
+	b := []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}
+	return append(b, bytes.Repeat([]byte{0x99}, 128)...)
+}
+
+// Put must sniff dims at upload (EXIF-aware for JPEG) and mark the row
+// checked; non-image bytes get NULL dims but still count as checked.
+func TestPutImageDims(t *testing.T) {
+	s, ctx, mk := testEnv(t)
+	owner := mk()
+
+	obj, dup, err := s.Put(ctx, owner, uuid.Nil, "attach", "a.png", "image/png",
+		bytes.NewReader(pngBytes(t, 517, 389)), 1<<20)
+	if err != nil || dup {
+		t.Fatalf("put png: %v dup=%v", err, dup)
+	}
+	if obj.Width == nil || *obj.Width != 517 || obj.Height == nil || *obj.Height != 389 {
+		t.Fatalf("png dims %v,%v want 517,389", obj.Width, obj.Height)
+	}
+	if _, _, checked := dimsOf(t, s, ctx, obj.ID); !checked {
+		t.Fatal("png row dims_checked=false")
+	}
+
+	// Stored 40×30, orientation 6 → reported as the displayed 30×40.
+	jpg, dup, err := s.Put(ctx, owner, uuid.Nil, "attach", "b.jpg", "image/jpeg",
+		bytes.NewReader(jpegWithEXIF(t, 40, 30, 6, false)), 1<<20)
+	if err != nil || dup {
+		t.Fatalf("put jpeg: %v dup=%v", err, dup)
+	}
+	if jpg.Width == nil || *jpg.Width != 30 || jpg.Height == nil || *jpg.Height != 40 {
+		t.Fatalf("jpeg o6 dims %v,%v want 30,40", jpg.Width, jpg.Height)
+	}
+
+	txt, dup, err := s.Put(ctx, owner, uuid.Nil, "attach", "c.txt", "text/plain",
+		bytes.NewReader([]byte("hello")), 1<<20)
+	if err != nil || dup {
+		t.Fatalf("put text: %v dup=%v", err, dup)
+	}
+	w, h, checked := dimsOf(t, s, ctx, txt.ID)
+	if w != nil || h != nil || !checked {
+		t.Fatalf("text row: w=%v h=%v checked=%v want nil,nil,true", w, h, checked)
+	}
+}
+
+// The sweep re-sniffs unchecked image rows once: decodable → dims +
+// checked, undecodable → checked with NULL dims, bytes never truncated,
+// and a second pass leaves the rows alone.
+func TestBackfillDims(t *testing.T) {
+	s, ctx, mk := testEnv(t)
+	owner := mk()
+	pngRaw := pngBytes(t, 11, 7)
+	badRaw := corruptPNG()
+
+	good, _, err := s.Put(ctx, owner, uuid.Nil, "attach", "good.png", "image/png",
+		bytes.NewReader(pngRaw), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad, _, err := s.Put(ctx, owner, uuid.Nil, "attach", "bad.png", "image/png",
+		bytes.NewReader(badRaw), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate rows that predate this code: dims unknown, unchecked.
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE objects SET width=NULL, height=NULL, dims_checked=false
+		 WHERE id IN ($1,$2)`, good.ID, bad.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.BackfillDims(ctx); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	if w, h, checked := dimsOf(t, s, ctx, good.ID); !checked || w == nil || *w != 11 || h == nil || *h != 7 {
+		t.Fatalf("good row: w=%v h=%v checked=%v want 11,7,true", w, h, checked)
+	}
+	if w, h, checked := dimsOf(t, s, ctx, bad.ID); !checked || w != nil || h != nil {
+		t.Fatalf("bad row: w=%v h=%v checked=%v want nil,nil,true", w, h, checked)
+	}
+
+	// The sniff must not consume the stream: stored bytes come back whole.
+	for _, tc := range []struct {
+		o   *Object
+		raw []byte
+	}{{good, pngRaw}, {bad, badRaw}} {
+		rc, err := s.Open(ctx, tc.o)
+		if err != nil {
+			t.Fatalf("open %s: %v", tc.o.ID, err)
+		}
+		got, _ := io.ReadAll(rc)
+		_ = rc.Close()
+		if !bytes.Equal(got, tc.raw) {
+			t.Fatalf("%s bytes: got %d want %d", tc.o.ID, len(got), len(tc.raw))
+		}
+	}
+
+	// Second pass: checked rows aren't selected, nothing changes.
+	if _, err := s.BackfillDims(ctx); err != nil {
+		t.Fatalf("backfill 2: %v", err)
+	}
+	if w, h, checked := dimsOf(t, s, ctx, good.ID); !checked || w == nil || *w != 11 || *h != 7 {
+		t.Fatalf("good row after pass 2 changed: w=%v h=%v checked=%v", w, h, checked)
+	}
+	if w, h, checked := dimsOf(t, s, ctx, bad.ID); !checked || w != nil || h != nil {
+		t.Fatalf("bad row after pass 2 changed: w=%v h=%v checked=%v", w, h, checked)
+	}
+}
+
+// Dedup onto a legacy (unchecked) row backfills the dims — same sha,
+// same bytes, same dims.
+func TestPutDedupBackfillsDims(t *testing.T) {
+	s, ctx, mk := testEnv(t)
+	owner := mk()
+	raw := pngBytes(t, 13, 9)
+
+	obj, dup, err := s.Put(ctx, owner, uuid.Nil, "attach", "d.png", "image/png",
+		bytes.NewReader(raw), 1<<20)
+	if err != nil || dup {
+		t.Fatalf("put: %v dup=%v", err, dup)
+	}
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE objects SET width=NULL, height=NULL, dims_checked=false WHERE id=$1`, obj.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	again, dup, err := s.Put(ctx, owner, uuid.Nil, "attach", "d2.png", "image/png",
+		bytes.NewReader(raw), 1<<20)
+	if err != nil || !dup {
+		t.Fatalf("re-put: %v dup=%v want dedup", err, dup)
+	}
+	if again.ID != obj.ID {
+		t.Fatalf("dedup returned different object %s want %s", again.ID, obj.ID)
+	}
+	if again.Width == nil || *again.Width != 13 || again.Height == nil || *again.Height != 9 {
+		t.Fatalf("returned dims %v,%v want 13,9", again.Width, again.Height)
+	}
+	if w, h, checked := dimsOf(t, s, ctx, obj.ID); !checked || w == nil || *w != 13 || *h != 9 {
+		t.Fatalf("row: w=%v h=%v checked=%v want 13,9,true", w, h, checked)
+	}
+}
+
+// ReplaceBytes re-sniffs the new bytes' dims and keeps the row checked.
+func TestReplaceBytesDims(t *testing.T) {
+	s, ctx, mk := testEnv(t)
+	owner := mk()
+
+	obj, _, err := s.Put(ctx, owner, uuid.Nil, "attach", "e.png", "image/png",
+		bytes.NewReader(pngBytes(t, 10, 10)), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := s.ReplaceBytes(ctx, obj.ID, bytes.NewReader(pngBytes(t, 22, 14)),
+		"image/png", 1<<20, &owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Width == nil || *o.Width != 22 || o.Height == nil || *o.Height != 14 {
+		t.Fatalf("replaced dims %v,%v want 22,14", o.Width, o.Height)
+	}
+	if w, h, checked := dimsOf(t, s, ctx, obj.ID); !checked || w == nil || *w != 22 || *h != 14 {
+		t.Fatalf("row: w=%v h=%v checked=%v want 22,14,true", w, h, checked)
+	}
+}

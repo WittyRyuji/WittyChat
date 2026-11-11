@@ -44,8 +44,8 @@ interface Attachment {
   name: string;
   size: number;
   mime: string;
-  w?: number; // decoded px dims from objects.width/height, when known / 服务端解析的图片像素宽
-  h?: number;
+  w?: number | null; // decoded px dims from objects.width/height (null when unknown) / 服务端解析的图片像素宽（未知为 null）
+  h?: number | null;
 }
 
 // Reaction aggregate attached to message payloads (server-side applyEffectiveView

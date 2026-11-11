@@ -388,8 +388,8 @@ export interface MailAttach {
   name: string;
   mime: string;
   size_bytes: number;
-  w?: number; // decoded image px when the object has dims / 图片像素宽（已知时）
-  h?: number;
+  w?: number | null; // decoded image px when the object has dims (server sends null) / 图片像素宽（服务端已知时，否则为 null）
+  h?: number | null;
 }
 export interface MailMessage {
   id: string;
@@ -485,13 +485,14 @@ export function newClientMsgId(): string {
 // authBlob fetches bytes with the session header (no ?token= URL) —
 // feed <img> with the returned Blob via URL.createObjectURL.
 // 带会话头取字节（URL 不含 token）；返回 Blob 供 createObjectURL 给 <img>。
-export async function authBlob(path: string): Promise<Blob> {
+export async function authBlob(path: string, init?: { cache?: RequestCache }): Promise<Blob> {
   // Callers pass api2.*URL() values which are already absolute inside the
   // Wails shell — re-prefixing produced an unparsable doubled origin and
   // every chat/sticker/mail image failed. / 调用方传入的 api2.*URL 已含
   // API_BASE——再拼一次会得到非法双源地址，壳内图片全部加载失败。
   const res = await fetch(/^https?:\/\//i.test(path) ? path : API_BASE + path, {
     headers: { Authorization: `Bearer ${getToken()}` },
+    cache: init?.cache,
   });
   if (!res.ok) throw new Error(`fetch ${res.status}`);
   return res.blob();

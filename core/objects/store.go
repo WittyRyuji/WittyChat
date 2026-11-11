@@ -12,11 +12,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"image"
-	_ "image/gif"  // DecodeConfig registration / 注册解码器
-	_ "image/jpeg" // DecodeConfig registration
-	_ "image/png"  // DecodeConfig registration
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -24,7 +21,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	_ "golang.org/x/image/webp" // DecodeConfig registration
 )
 
 var (
@@ -48,8 +44,8 @@ type Object struct {
 	SHA256  [32]byte
 	Mime    string
 	// Width/Height are decoded pixel dims for image objects — NULL until
-	// sniffed at upload or lazily on download. / 图片像素宽高——上传时
-	// 嗅探，旧对象首次下载时惰性回填。
+	// sniffed at upload or by the dims backfill sweep (EXIF-aware).
+	// 图片像素宽高——上传时嗅探或由后台尺寸回填补齐（感知 EXIF 方向）。
 	Width     *int
 	Height    *int
 	Location  string
@@ -154,6 +150,14 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 			&existing.Location, &existing.Status, &existing.CreatedAt)
 	if err == nil {
 		copy(existing.SHA256[:], sha)
+		// A legacy row (dims never sniffed by this code) still gets
+		// backfilled — same sha means same bytes, so the freshly
+		// computed dims are correct for it. / 旧行（未经本代码嗅探）
+		// 仍补宽高——同 sha 即同字节，刚算出的尺寸对它同样正确。
+		s.markDims(ctx, existing.ID, wPtr, hPtr)
+		if existing.Width == nil {
+			existing.Width, existing.Height = wPtr, hPtr
+		}
 		return &existing, true, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -213,8 +217,8 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 			}
 		}
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO objects (id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, width, height, location, status)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'local','ready')`,
+			`INSERT INTO objects (id, owner_user, conv_id, purpose, name, size_bytes, sha256, mime, width, height, location, status, dims_checked)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'local','ready',true)`,
 			obj.ID, owner, convArg, purpose, name, n, sum[:], mime, wPtr, hPtr); err != nil {
 			return err
 		}
@@ -225,6 +229,12 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 	})
 	if err != nil {
 		if errors.Is(err, errDedup) {
+			// Same legacy-row backfill as the outside dedup check.
+			// 与锁外去重检查相同的旧行回填。
+			s.markDims(ctx, existing.ID, wPtr, hPtr)
+			if existing.Width == nil {
+				existing.Width, existing.Height = wPtr, hPtr
+			}
 			return &existing, true, nil
 		}
 		// Rolled back after the rename? Drop our bytes ONLY if nothing
@@ -242,10 +252,11 @@ func (s *Store) Put(ctx context.Context, owner, convID uuid.UUID, purpose, name,
 var errDedup = errors.New("dedup: committed by racing upload")
 
 // imageDims sniffs pixel dimensions from a just-written file — best
-// effort, format-agnostic (the bytes decide, not the claimed mime).
-// (nil,nil) for non-images or anything the decoders can't parse.
+// effort, format-agnostic (the bytes decide, not the claimed mime), with
+// EXIF orientation applied for JPEGs. (nil,nil) for non-images or
+// anything the decoders can't parse.
 // imageDims 嗅探刚落盘文件的像素尺寸——尽力而为，由字节决定而非声称的
-// mime；非图片或解析失败返回 (nil,nil)。
+// mime，JPEG 按 EXIF 方向修正；非图片或解析失败返回 (nil,nil)。
 func imageDims(path string) (*int, *int) {
 	//nolint:gosec // path is a tempfile we just created inside dataDir — no user input / 自身刚建的临时文件
 	f, err := os.Open(path)
@@ -253,11 +264,7 @@ func imageDims(path string) (*int, *int) {
 		return nil, nil
 	}
 	defer func() { _ = f.Close() }()
-	cfg, _, err := image.DecodeConfig(f)
-	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
-		return nil, nil
-	}
-	return &cfg.Width, &cfg.Height
+	return SniffDims(f)
 }
 
 // ReplaceBytes streams new content into the store and re-points an
@@ -343,7 +350,7 @@ func (s *Store) ReplaceBytes(ctx context.Context, id uuid.UUID, r io.Reader, mim
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE objects SET sha256=$2, size_bytes=$3, mime=$4, location='local', segment_count=1,
-			   width=$5, height=$6
+			   width=$5, height=$6, dims_checked=true
 			 WHERE id=$1 AND status<>'deleted'`,
 			id, sum[:], n, mime, wPtr, hPtr); err != nil {
 			return err
@@ -406,8 +413,12 @@ func (s *Store) Get(ctx context.Context, id, userID uuid.UUID) (*Object, error) 
 	return nil, ErrForbidden
 }
 
-// Open streams object bytes for download (local or s3 by location).
-func (s *Store) Open(ctx context.Context, o *Object) (io.ReadCloser, error) {
+// openBytes streams object bytes (local or s3 by location) WITHOUT the
+// access-time touch — readers that must not look like user traffic
+// (dims sweep, AV, cold migration) go through here.
+// openBytes 读字节但不更新 last_accessed_at——后台清扫等不应计为
+// 用户访问的读取走这里。
+func (s *Store) openBytes(ctx context.Context, o *Object) (io.ReadCloser, error) {
 	if o.Status != "ready" {
 		return nil, ErrNotReady
 	}
@@ -424,9 +435,21 @@ func (s *Store) Open(ctx context.Context, o *Object) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Best-effort access-time touch for the cold-migration signal.
-	_, _ = s.pool.Exec(ctx, `UPDATE objects SET last_accessed_at=now() WHERE id=$1`, o.ID)
 	return f, nil
+}
+
+// Open streams object bytes for download — openBytes plus the
+// best-effort last_accessed_at touch that feeds cold migration.
+// Open 供下载读字节 = openBytes + 访问时间戳（冷迁移信号）。
+func (s *Store) Open(ctx context.Context, o *Object) (io.ReadCloser, error) {
+	rc, err := s.openBytes(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	// Best-effort access-time touch for the cold-migration signal.
+	// 尽力更新访问时间，供冷迁移信号使用。
+	_, _ = s.pool.Exec(ctx, `UPDATE objects SET last_accessed_at=now() WHERE id=$1`, o.ID)
+	return rc, nil
 }
 
 // Peek loads metadata with no ACL check — for signed-URL flows where
@@ -497,14 +520,110 @@ func (s *Store) AttachmentsOf(ctx context.Context, convID uuid.UUID, opSeq int64
 	return out, rows.Err()
 }
 
-// SetDims backfills decoded image dims — used on download for objects that
-// predate the width/height columns or arrived via multipart (where the
-// server never sees a contiguous stream). WHERE width IS NULL keeps it
-// a one-time write. / 回填图片宽高——旧对象与分段上传在首次下载时补；
-// width IS NULL 保证只写一次。
-func (s *Store) SetDims(ctx context.Context, id uuid.UUID, w, h int) {
+// markDims records the freshly sniffed dims and takes the row out of the
+// backfill queue. It deliberately overwrites width/height — callers
+// re-sniff rows whose stored dims came from the orientation-blind
+// request-path sniff, and nil dims mark "checked, undecodable" so
+// unparseable images aren't retried forever. Best-effort: failures only
+// mean the sweep retries later. / 记录刚嗅探的尺寸并把该行移出回填
+// 队列。有意覆盖 width/height——调用方会重嗅那些由不看 EXIF 方向的
+// 旧请求路径嗅探填出的行；nil 尺寸表示"已查、解不出"，解不出的图片
+// 不再无限重试。尽力而为：失败仅意味着下轮清扫再试。
+func (s *Store) markDims(ctx context.Context, id uuid.UUID, w, h *int) {
 	_, _ = s.pool.Exec(ctx,
-		`UPDATE objects SET width=$2, height=$3 WHERE id=$1 AND width IS NULL`, id, w, h)
+		`UPDATE objects SET width=$2, height=$3, dims_checked=true
+		 WHERE id=$1 AND NOT dims_checked`, id, w, h)
+}
+
+// BackfillDims re-sniffs every ready image row still flagged unchecked,
+// keyset-paginated by id (no OFFSET drift while rows get marked). A row
+// is marked even when its bytes won't decode — dims_checked=false means
+// "never sniffed by this code", not "retry forever". Peek/open errors
+// log-and-skip: the row stays unchecked but the cursor still advances
+// past it, so one pass always terminates and the next scheduled run
+// retries the stragglers. Returns the number of rows marked; honors ctx
+// cancellation. / 逐批重嗅所有未检查的就绪图片行，按 id 键集分页。
+// 解不出的行也标记已查——dims_checked 是"未嗅探"标记而非无限重试
+// 队列。Peek/打开失败记日志跳过：行保持未查但游标前移，单趟必终止、
+// 下轮再补。返回标记行数；响应 ctx 取消。
+func (s *Store) BackfillDims(ctx context.Context) (int, error) {
+	marked := 0
+	cursor := uuid.Nil
+	for {
+		rows, err := s.pool.Query(ctx,
+			`SELECT id FROM objects
+			 WHERE NOT dims_checked AND status='ready' AND mime LIKE 'image/%' AND id > $1
+			 ORDER BY id LIMIT 100`, cursor)
+		if err != nil {
+			return marked, err
+		}
+		var ids []uuid.UUID
+		for rows.Next() {
+			var id uuid.UUID
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return marked, err
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return marked, err
+		}
+		if len(ids) == 0 {
+			return marked, nil
+		}
+		for _, id := range ids {
+			if err := ctx.Err(); err != nil {
+				return marked, err
+			}
+			cursor = id
+			o, err := s.Peek(ctx, id)
+			if err != nil {
+				log.Printf("dims backfill: peek %s: %v", id, err)
+				continue
+			}
+			rc, err := s.openBytes(ctx, o)
+			if err != nil {
+				log.Printf("dims backfill: open %s: %v", id, err)
+				continue
+			}
+			w, h := SniffDims(rc)
+			_ = rc.Close()
+			s.markDims(ctx, id, w, h)
+			marked++
+		}
+	}
+}
+
+// RunDimsBackfill runs BackfillDims once immediately, then on `every`
+// until ctx is done — hosted by the server process so unchecked image
+// rows get fixed regardless of how they were uploaded (legacy rows,
+// multipart completes, request-path-sniffed rows with wrong
+// orientation). / 立即跑一次再按周期运行直到 ctx 结束——由 server 进程
+// 承载，任何来源的未检查图片行（旧行、分段上传、旧请求路径嗅探出错
+// 的行）都会被修正。
+func (s *Store) RunDimsBackfill(ctx context.Context, every time.Duration) {
+	pass := func() {
+		n, err := s.BackfillDims(ctx)
+		if err != nil {
+			log.Printf("dims backfill: %v", err)
+		}
+		if n > 0 {
+			log.Printf("dims backfill: %d objects", n)
+		}
+	}
+	pass()
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pass()
+		}
+	}
 }
 
 // ThumbPath is where thumbnails live — date-partitioned like objects.

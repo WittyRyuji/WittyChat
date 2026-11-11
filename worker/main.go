@@ -12,6 +12,7 @@ import (
 	_ "image/gif" // register decoders / 注册解码器
 	"image/jpeg"
 	_ "image/png"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -191,7 +192,12 @@ func (w *worker) thumb(ctx context.Context, t *objects.Task) error {
 	}
 	defer func() { _ = rc.Close() }()
 
-	src, _, err := image.Decode(rc)
+	// Tee the head bytes for EXIF orientation — Go's decoder ignores it,
+	// so a stored-landscape phone photo would render sideways.
+	// 分流头部字节用于 EXIF 方向——Go 解码器忽略方向，竖拍横存的手机
+	// 照片会缩略成横躺。
+	hc := objects.NewHeadCapture(1 << 20)
+	src, format, err := image.Decode(io.TeeReader(rc, hc))
 	if err != nil {
 		return err // non-image → task fails (payload error recorded)
 	}
@@ -205,8 +211,12 @@ func (w *worker) thumb(ctx context.Context, t *objects.Task) error {
 			nh, nw = thumbMax, w0*thumbMax/h0
 		}
 	}
-	dst := image.NewRGBA(image.Rect(0, 0, nw, nh))
-	draw.CatmullRom.Scale(dst, dst.Bounds(), src, b, draw.Over, nil)
+	scaled := image.NewRGBA(image.Rect(0, 0, nw, nh))
+	draw.CatmullRom.Scale(scaled, scaled.Bounds(), src, b, draw.Over, nil)
+	var dst image.Image = scaled
+	if format == "jpeg" {
+		dst = objects.ApplyOrientation(scaled, objects.JPEGOrientation(hc.Bytes()))
+	}
 
 	if err := os.MkdirAll(filepath.Dir(w.store.ThumbPath(objID)), 0o750); err != nil {
 		return err

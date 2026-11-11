@@ -3,7 +3,7 @@ package auth
 // Integration tests against a real PostgreSQL.
 // Skipped unless WITTYCHAT_TEST_DB_URL is set, e.g.
 //
-//	WITTYCHAT_TEST_DB_URL=postgres://wittychat:wittychat@localhost:5432/wittychat?sslmode=disable
+//	WITTYCHAT_TEST_DB_URL=postgres://wittychat:wittychat@localhost:5432/wittychat_test?sslmode=disable
 //
 // 针对真实 PostgreSQL 的集成测试。未设置 WITTYCHAT_TEST_DB_URL 时跳过。
 

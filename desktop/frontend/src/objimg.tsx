@@ -7,6 +7,7 @@
 // ?token= 会把会话 token 写进访问日志/浏览器历史。
 import { useEffect, useMemo, useState } from "react";
 import { api2, authBlob } from "./api";
+import { FIT, fitBox, readDim, writeDim } from "./objdims";
 
 // useObjectBlob resolves an object to a blob: URL (thumb first, full
 // bytes as fallback for not-yet-generated thumbnails). Revoked on
@@ -22,7 +23,9 @@ export function useObjectBlob(
   const [url, setUrl] = useState<string | null>(null);
   const [failedFor, setFailedFor] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: tick is the retry trigger — bumping it re-runs the fetch / tick 是重试触发器，变化即重取
+  // tick is the retry trigger AND a fetch input (cache bypass) — it's a
+  // real dep now, no suppression needed. / tick 既是重试触发器也是
+  // 请求输入（绕过缓存）——是真依赖，无需豁免。
   useEffect(() => {
     setUrl(null);
     let dead = false;
@@ -32,9 +35,27 @@ export function useObjectBlob(
     (async () => {
       for (const p of paths) {
         try {
-          const b = await authBlob(p);
+          // A user retry must bypass the private HTTP cache — a
+          // cached broken response would be served straight back.
+          // 用户重试必须绕过私有缓存——否则拿到的是缓存的坏响应。
+          const b = await authBlob(p, tick > 0 ? { cache: "reload" } : undefined);
           if (dead) return;
           blob = URL.createObjectURL(b);
+          // Decode-probe before swapping the URL in: a corrupt-but-200
+          // body goes straight to the error stub instead of flashing the
+          // browser's broken-image icon for a frame (first load AND
+          // retry). / 换 URL 前先探活解码——坏字节直接进错误占位，
+          // 绝不闪一帧浏览器裂图（首载与重试同规则）。
+          try {
+            const probe = new Image();
+            probe.src = blob;
+            await probe.decode();
+          } catch {
+            URL.revokeObjectURL(blob);
+            blob = "";
+            continue; // corrupt bytes: next path, else fail / 坏字节换下一路径
+          }
+          if (dead) return;
           setUrl(blob);
           setFailedFor(null);
           return;
@@ -59,87 +80,6 @@ export function useObjectBlob(
   };
 }
 
-// Bounded display-size cache — one JSON map under a single localStorage
-// key, capped at DIM_MAX entries (oldest evicted). Server-provided dims
-// cover new uploads; this still helps objects predating the
-// objects.width/height columns. Reads hit the in-memory map, not
-// localStorage, after the first call. / 有界显示尺寸缓存：单 key JSON
-// map，超上限逐出最旧条目。新上传靠服务端宽高，本缓存兜底旧对象；
-// 首次载入后只读内存 map。
-const DIM_STORE = "objdim.v1";
-const DIM_MAX = 300;
-let dimMap: Map<string, string> | null = null;
-
-function dims(): Map<string, string> {
-  if (dimMap) return dimMap;
-  dimMap = new Map();
-  try {
-    const raw = JSON.parse(localStorage.getItem(DIM_STORE) ?? "{}");
-    for (const [k, v] of Object.entries(raw)) dimMap.set(k, String(v));
-  } catch {
-    /* corrupt or unavailable — start fresh / 损坏或不可用时从零开始 */
-  }
-  // Sweep the pre-v1 per-image objdim:* keys — dead weight now.
-  // 顺手清掉旧版逐图键。
-  try {
-    const dead: string[] = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k?.startsWith("objdim:")) dead.push(k);
-    }
-    for (const k of dead) localStorage.removeItem(k);
-  } catch {
-    /* best-effort / 尽力而为 */
-  }
-  return dimMap;
-}
-
-const DIM_KEY = (id: string, kind: string, ctx: string) => `${kind}:${ctx}:${id}`;
-
-function readDim(id: string, kind: string, ctx: string) {
-  const v = dims().get(DIM_KEY(id, kind, ctx));
-  const [w, h] = v?.split("x").map(Number) ?? [];
-  return w > 0 && h > 0 ? { width: w, height: h } : undefined;
-}
-
-function writeDim(id: string, kind: string, ctx: string, w: number, h: number) {
-  const m = dims();
-  const k = DIM_KEY(id, kind, ctx);
-  const v = `${w}x${h}`;
-  if (m.get(k) === v) return; // unchanged — skip the write / 值未变不落盘
-  m.delete(k);
-  m.set(k, v); // re-insert → newest position / 重插到最新位
-  while (m.size > DIM_MAX) {
-    const oldest = m.keys().next().value;
-    if (oldest === undefined) break;
-    m.delete(oldest);
-  }
-  try {
-    localStorage.setItem(DIM_STORE, JSON.stringify(Object.fromEntries(m)));
-  } catch {
-    /* quota — cache is best-effort / 配额满则放弃 */
-  }
-}
-
-// Display caps per context — MUST mirror the CSS (.att-img img 260×180,
-// .atts.stk-msg 260×200, .mail-attach-img 320×240). Both thumbnail
-// pipelines preserve aspect, so the ORIGINAL dims fit to the exact box
-// the rendered thumb will occupy — the layout is final before any
-// bytes arrive. / 各场景显示上限必须与 CSS 同步。缩略图保比例，故用
-// 原图宽高即可算出最终显示盒——首载也不再跳。
-const FIT: Record<string, readonly [number, number]> = {
-  att: [260, 180],
-  attstk: [260, 200],
-  mail: [320, 240],
-};
-
-function fitBox(natW: number | undefined, natH: number | undefined, ctx: string) {
-  const cap = FIT[ctx];
-  if (!cap || !natW || !natH) return undefined;
-  const s = Math.min(1, cap[0] / natW, cap[1] / natH);
-  return { width: Math.round(natW * s), height: Math.round(natH * s) };
-}
-
 export function ObjImg({
   id,
   kind = "thumb",
@@ -156,15 +96,18 @@ export function ObjImg({
   alt?: string;
   title?: string;
   ctx?: string;
-  natW?: number;
-  natH?: number;
+  natW?: number | null;
+  natH?: number | null;
 }) {
   const { url, failed, retry, decodeFailed } = useObjectBlob(id, kind);
   // Server dims → fitted box → remembered dims → CSS fallback stub. The
   // same box lands on the <img> too, sealing the decode-frame gap.
-  // 服务端宽高→适配盒→记忆尺寸→CSS 兜底；img 上同样钉住，解码帧也不跳。
+  // Only FIT contexts pin a box at all — e.g. the stk picker cell sizes
+  // its img entirely by CSS. / 服务端宽高→适配盒→记忆尺寸→CSS 兜底；
+  // img 上同样钉住，解码帧也不跳。仅 FIT 场景钉显示盒——stk 表情格
+  // 的 img 尺寸完全交给 CSS。
   const box = useMemo(
-    () => fitBox(natW, natH, ctx) ?? readDim(id, kind, ctx),
+    () => (FIT[ctx] ? (fitBox(natW, natH, ctx) ?? readDim(id, kind, ctx)) : undefined),
     [id, kind, ctx, natW, natH]
   );
   if (failed)
@@ -183,7 +126,18 @@ export function ObjImg({
       </span>
     );
   if (!url)
-    return <span className={`obj-ph${className ? ` ${className}` : ""}`} style={box} aria-hidden />;
+    return (
+      // The known box overrides the 48×36 CSS minimum so a tiny image
+      // doesn't jump from a too-big stub down to its real size. The
+      // error stub keeps the minimum (its label must stay legible).
+      // 已知显示盒覆盖 CSS 的 48×36 最小值，小图不会先占大坑再缩回
+      // 真实尺寸。错误占位保留最小值（"加载失败"文字要可读）。
+      <span
+        className={`obj-ph${className ? ` ${className}` : ""}`}
+        style={box ? { ...box, minWidth: 0, minHeight: 0 } : undefined}
+        aria-hidden
+      />
+    );
   return (
     <img
       src={url}
@@ -195,7 +149,7 @@ export function ObjImg({
       onError={decodeFailed}
       onLoad={(e) => {
         const im = e.currentTarget;
-        if (im.offsetWidth > 0 && im.offsetHeight > 0) {
+        if (FIT[ctx] && im.offsetWidth > 0 && im.offsetHeight > 0) {
           writeDim(id, kind, ctx, im.offsetWidth, im.offsetHeight);
         }
       }}
