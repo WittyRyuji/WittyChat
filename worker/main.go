@@ -48,7 +48,7 @@ const thumbMax = 256 // px, longest side / 最长边
 
 func main() {
 	pool, err := db.Open(context.Background(),
-		envOr("WITTYCHAT_DB_URL", "postgres://wittychat:wittychat@localhost:5432/wittychat?sslmode=disable"))
+		envOr("WITTYCHAT_DB_URL", "postgres://wittychat@localhost:5432/wittychat?sslmode=disable"))
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}

@@ -2,10 +2,13 @@
 """P0 perf spot-check: 10k-msg conversation fetch, 1k-op delta, 1000-conv directory.
 Seeds via SQL (COPY-ish bulk insert) then times API calls.
 """
-import json, sys, time, urllib.request, uuid, subprocess
+import json, os, sys, time, urllib.request, uuid, subprocess
 
 BASE = "http://localhost:8080"
 DOCKER = r"C:/Program Files/Docker/Docker/resources/bin/docker.exe"
+PG_USER = os.environ.get("DEV_POSTGRES_USER", "wittychat")
+PG_DB = os.environ.get("DEV_POSTGRES_DB", "wittychat")
+PG_PASSWORD = os.environ.get("DEV_POSTGRES_PASSWORD", "")
 
 def req(path, token):
     r = urllib.request.Request(BASE + path)
@@ -18,17 +21,24 @@ def login(email, pw):
     r.add_header("Content-Type", "application/json")
     return json.loads(urllib.request.urlopen(r).read())
 
-def sql(q):
-    subprocess.run([DOCKER, "exec", "deploy-postgres-1", "psql", "-U", "wittychat", "wittychat", "-c", q], check=True, capture_output=True)
+def psql(*args):
+    return subprocess.run([DOCKER, "exec", "-e", f"PGPASSWORD={PG_PASSWORD}", "deploy-postgres-1",
+        "psql", "-U", PG_USER, "-At", PG_DB, *args], check=True, capture_output=True, text=True)
 
-tok = login("alice@wittyloong.com", "AlicePass123!")["session_token"]
-me = login("alice@wittyloong.com", "AlicePass123!")["user"]["id"]
+def sql(q):
+    psql("-c", q)
+
+alice_email = os.environ.get("WITTYCHAT_DEV_ALICE_EMAIL", "alice@wittyloong.com")
+alice_password = os.environ.get("WITTYCHAT_DEV_ALICE_PASSWORD", "alicepass")
+login_body = login(alice_email, alice_password)
+tok = login_body["session_token"]
+me = login_body["user"]["id"]
 
 # --- seed: conv + 10k message ops ---
 print("seeding 10k messages…")
-cid = subprocess.run([DOCKER, "exec", "deploy-postgres-1", "psql", "-U", "wittychat", "-At", "wittychat", "-c",
-    f"INSERT INTO conversations (id,kind,title,owner_id) VALUES (gen_random_uuid(),'group','perf-10k','{me}') RETURNING id"],
-    capture_output=True, text=True).stdout.strip().split()[0]
+cid = psql("-c",
+    f"INSERT INTO conversations (id,kind,title,owner_id) VALUES (gen_random_uuid(),'group','perf-10k','{me}') RETURNING id"
+).stdout.strip().split()[0]
 sql(f"INSERT INTO conv_members (conv_id,user_id,role) VALUES ('{cid}','{me}','owner') ON CONFLICT DO NOTHING")
 t0 = time.time()
 # bulk insert 10k ops via generate_series

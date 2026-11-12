@@ -95,20 +95,25 @@ JPEG = bytes.fromhex(
     "0000000000000008ffc4001410010000000000000000000000000000000000ffda000c030100"
     "02110311003f00b2c001ffd9")
 
-admin = login("admin@wittyloong.com", "DevPass123!")
-alice = login("alice@wittyloong.com", "AlicePass123!")
+admin = login(os.environ.get("WITTYCHAT_DEV_ADMIN_EMAIL", "admin@wittyloong.com"),
+            os.environ.get("WITTYCHAT_DEV_ADMIN_PASSWORD", "adminpass"))
+alice = login(os.environ.get("WITTYCHAT_DEV_ALICE_EMAIL", "alice@wittyloong.com"),
+            os.environ.get("WITTYCHAT_DEV_ALICE_PASSWORD", "alicepass"))
 check("login admin+alice", admin and alice)
 if not (admin and alice):
     sys.exit(1)
+P0X_PASSWORD = os.environ.get("WITTYCHAT_DEV_P0X_PASSWORD", "p0x-pass")
 
 # --- fresh user via admin provisioning ---
+# Dev-only weak passwords are below the NIST default floor; relax it locally.
+req("PUT", "/api/v1/admin/settings", {"settings": {"security.min_password": 8}}, admin)
 email = f"p0x-{uuid.uuid4().hex[:8]}@wittyloong.com"
 st, b = req("POST", "/api/v1/admin/users", {"email": email, "display_name": "P0X"}, admin)
 act = json.loads(b)["activation_url"]
 from urllib.parse import urlparse, parse_qs
 tok = parse_qs(urlparse(act).query).get("token", [act.rsplit("/", 1)[-1]])[0]
-req("POST", "/api/v1/auth/activate", {"token": tok, "password": "P0x-Pass-12345!"})
-p0x = login(email, "P0x-Pass-12345!")
+req("POST", "/api/v1/auth/activate", {"token": tok, "password": P0X_PASSWORD})
+p0x = login(email, P0X_PASSWORD)
 check("provision+activate+login", p0x is not None)
 
 # --- login lockout: forged X-Forwarded-For must NOT bypass counting
@@ -132,7 +137,7 @@ st, _ = req("POST", "/api/v1/auth/login",
             headers={"X-Forwarded-For": "10.9.9.99"})
 check("still locked on 7th attempt", st == 429, str(st))
 # email normalization: login is case-insensitive on the address.
-norm = login(email.upper(), "P0x-Pass-12345!")
+norm = login(email.upper(), P0X_PASSWORD)
 check("login email case-insensitive", norm is not None)
 
 st, b = req("GET", "/api/v1/auth/me", None, p0x)
@@ -748,7 +753,11 @@ else:
     # callback JWT: key must name ?obj=, expired tokens rejected, and a
     # save for a view-only record is refused (no current editor).
     import base64, hashlib, hmac as _hmac
-    OO_SECRET = os.environ.get("WITTYCHAT_ONLYOFFICE_JWT_SECRET", "wittychat-office-dev").encode()
+    OO_SECRET = os.environ.get("WITTYCHAT_ONLYOFFICE_JWT_SECRET")
+    if OO_SECRET is None:
+        check("office JWT secret supplied", False, "set WITTYCHAT_ONLYOFFICE_JWT_SECRET")
+        sys.exit(1)
+    OO_SECRET = OO_SECRET.encode()
     def oo_jwt(claims):
         enc = lambda o: base64.urlsafe_b64encode(json.dumps(o).encode()).rstrip(b"=")
         h, p = enc({"alg": "HS256", "typ": "JWT"}), enc(claims)

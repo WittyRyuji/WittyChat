@@ -8,6 +8,8 @@ Thumbs.db
 # Env / secrets
 .env
 *.local
+deploy/dev.env
+deploy/garage/garage.local.toml
 
 # Go
 *.exe
@@ -26,6 +28,10 @@ data/
 *.db
 *.sqlite3
 *.sqlite3-*
+
+# Python
+__pycache__/
+*.pyc
 
 # Logs
 *.log

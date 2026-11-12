@@ -20,8 +20,8 @@ const mkDoc = async (tok, title) => {
   return (await r.json()).id;
 };
 
-const adm = await login('admin@wittyloong.com', 'DevPass123!');
-const ali = await login('alice@wittyloong.com', 'AlicePass123!');
+const adm = await login(process.env.WITTYCHAT_DEV_ADMIN_EMAIL || 'admin@wittyloong.com', process.env.WITTYCHAT_DEV_ADMIN_PASSWORD || 'adminpass');
+const ali = await login(process.env.WITTYCHAT_DEV_ALICE_EMAIL || 'alice@wittyloong.com', process.env.WITTYCHAT_DEV_ALICE_PASSWORD || 'alicepass');
 
 // Conv-bound doc so alice can edit too — pick a shared conv.
 const convs = await (await fetch(`${B}/api/v1/conversations`, { headers: { Authorization: `Bearer ${ali}` } })).json();

@@ -4,15 +4,15 @@ services:
   postgres:
     image: postgres:17-alpine
     environment:
-      POSTGRES_USER: wittychat
-      POSTGRES_PASSWORD: wittychat
-      POSTGRES_DB: wittychat
+      POSTGRES_USER: ${DEV_POSTGRES_USER:-wittychat}
+      POSTGRES_PASSWORD: ${DEV_POSTGRES_PASSWORD:?run python scripts/gen_dev_env.py first}
+      POSTGRES_DB: ${DEV_POSTGRES_DB:-wittychat}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U wittychat"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -44,7 +44,7 @@ services:
     image: onlyoffice/documentserver:9.4.0.1
     environment:
       JWT_ENABLED: "true"
-      JWT_SECRET: ${ONLYOFFICE_JWT_SECRET:-wittychat-office-dev}
+      JWT_SECRET: ${ONLYOFFICE_JWT_SECRET:?run python scripts/gen_dev_env.py first}
       JWT_HEADER: Authorization
     ports:
       - "8180:80"
@@ -59,28 +59,25 @@ services:
   # Not MinIO: MinIO Community is archived — its Docker Hub images were
   # pulled in Sept 2026, Quay now needs auth, and the last image is
   # unpatched — so dev runs Garage (single node, v2.5.0 pinned). Dev-only
-  # credentials/secrets below and in deploy/garage/. Bootstrap once with
+  # credentials/secrets are generated locally by:
+  #   python scripts/gen_dev_env.py
+  # The generated deploy/dev.env and garage.local.toml are gitignored.
+  # After `compose up garage`, bootstrap once with:
   #   sh deploy/garage/bootstrap.sh
-  # then point the server at it:
-  #   WITTYCHAT_S3_ENDPOINT=http://localhost:3900
-  #   WITTYCHAT_S3_BUCKET=wittychat
-  #   WITTYCHAT_S3_ACCESS_KEY=GKDEV0DEV0DEV0DEV0DEV0
-  #   WITTYCHAT_S3_SECRET_KEY=devsecret_devsecret_devsecret_012345
-  #   (WITTYCHAT_S3_REGION defaults to us-east-1 = garage's s3_region)
+  # Server/worker pick up WITTYCHAT_S3_* from deploy/dev.env.
   #
   # garage：开发用 S3 兼容对象存储。原计划 MinIO，但其社区版已归档——
   # Docker Hub 镜像 2026-09 被删、Quay 需登录、最后一版无补丁——故改用
   # Garage 单节点（v2.5.0 固定版本）。首次起容器后跑 bootstrap.sh 建桶
-  # 与密钥，再用上面的环境变量连服务端。
+  # 与密钥，再从 deploy/dev.env 加载环境变量连服务端。
   garage:
     image: dxflrs/garage:v2.5.0
     command: ["/garage", "-c", "/etc/garage.toml", "server"]
     volumes:
       - garagedata:/var/lib/garage
-      - ./garage/garage.toml:/etc/garage.toml:ro
+      - ./garage/garage.local.toml:/etc/garage.toml:ro
     ports:
-      - "3900:3900" # s3 api
-      - "3903:3903" # admin api
+      - "3900:3900" # s3 api; admin API intentionally stays unmapped
     restart: unless-stopped
 
   # One-shot CORS setup: presigned PUT/GET/HEAD from the desktop app
@@ -92,10 +89,10 @@ services:
     image: amazon/aws-cli:2.39.2
     depends_on:
       - garage
+    env_file:
+      - dev.env
     environment:
-      AWS_ACCESS_KEY_ID: GKDEV0DEV0DEV0DEV0DEV0
-      AWS_SECRET_ACCESS_KEY: devsecret_devsecret_devsecret_012345
-      AWS_DEFAULT_REGION: us-east-1
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do aws --endpoint-url http://garage:3900 s3api put-bucket-cors --bucket wittychat --cors-configuration file:///cors.json 2>/dev/null && exit 0; sleep 2; done; echo 'cors init: garage not reachable or bucket missing (run bootstrap.sh first)' >&2; exit 1"

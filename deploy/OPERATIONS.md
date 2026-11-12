@@ -82,7 +82,7 @@ Wails3 产出 `bin/wittychat.exe`（已验证 11.4MB）。
 | `WITTYCHAT_ONLYOFFICE_CALLBACK_BASE` | 文档容器回访本服务的基址。本地 Docker Desktop：`http://host.docker.internal:8080`（默认）；compose 同网：`http://server:8080` |
 | `WITTYCHAT_ONLYOFFICE_INTERNAL_URL` | 本服务回拉成稿的基址。默认同 `ONLYOFFICE_URL`；compose 内：`http://onlyoffice` |
 
-- 本地开发：`docker compose -f deploy/docker-compose.dev.yml up -d onlyoffice`，服务端加 `WITTYCHAT_ONLYOFFICE_URL=http://localhost:8180 WITTYCHAT_ONLYOFFICE_JWT_SECRET=wittychat-office-dev`（或以 `WITTYCHAT_ONLYOFFICE_AUTODETECT=1` 代替 URL 显式指定）
+- 本地开发：先 `python scripts/gen_dev_env.py` 生成 gitignored `deploy/dev.env`，再 `docker compose --env-file deploy/dev.env -f deploy/docker-compose.dev.yml up -d onlyoffice`；服务端 `source deploy/dev.env` 后会拿到相同的 `WITTYCHAT_ONLYOFFICE_JWT_SECRET`（或以 `WITTYCHAT_ONLYOFFICE_AUTODETECT=1` 代替 URL 显式指定）
 - 文档 key 随字节 sha 滚动——保存后下次打开必拉新稿；同 key 多人打开 = 协同编辑
 - 编辑保存保留上一版到 `object_versions`（审计保留期可还原/审计）；超限版本由 worker 定期清理
 

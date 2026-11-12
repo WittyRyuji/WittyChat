@@ -71,19 +71,21 @@ PostgreSQL 是权威数据源；桌面端有 SQLite 缓存层。聊天以会话�
 ```bash
 git clone git@github.com:WittyRyuji/WittyChat.git
 cd WittyChat
-docker compose -f deploy/docker-compose.dev.yml up -d postgres
+python scripts/gen_dev_env.py
+set -a; . deploy/dev.env; set +a
+docker compose --env-file deploy/dev.env -f deploy/docker-compose.dev.yml up -d postgres
 corepack pnpm --dir admin install --frozen-lockfile
 corepack pnpm --dir admin build
 go build -o bin/wittychat-server.exe ./server
 go build -o bin/wittychat-worker.exe ./worker
 ./bin/wittychat-server.exe migrate -dir up
-./bin/wittychat-server.exe bootstrap -email admin@example.com -name Admin
+./bin/wittychat-server.exe bootstrap -email admin@wittyloong.com -name Admin -password adminpass
 ./bin/wittychat-server.exe serve
 ```
 
-另开终端运行 `./bin/wittychat-worker.exe`，打开 `http://localhost:8080` 完成首次设置，
-妥善保存 `data/secret.key`，再使用 CLI 输出的一次性链接激活管理员。
-不要把开发 Compose 的公开密码用于正式部署。
+另开终端运行 `./bin/wittychat-worker.exe`。应用测试账号使用 `adminpass` / `alicepass`
+这类固定弱口令，仅用于本机开发；数据库、Garage 和 OnlyOffice 的服务密钥由
+`deploy/dev.env` 在本机随机生成且不会提交。不要把开发配置用于正式部署。
 
 桌面端构建、环境变量、测试数据库和备份说明见：
 

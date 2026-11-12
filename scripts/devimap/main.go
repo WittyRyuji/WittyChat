@@ -5,8 +5,8 @@
 //	devimap                       # listens on 127.0.0.1:1143
 //
 // Users (login / password):
-//   - zhang@wittyloong.com / zhang-app-pass  (INBOX ~300, 已发送 10, 项目/2024 5, Trash 3)
-//   - old@feishu-old.test  / old-pass        (INBOX 20)
+//   - zhang@wittyloong.com / WITTYCHAT_DEV_IMAP_PASSWORD (default: imappass)
+//   - old@feishu-old.test  / WITTYCHAT_DEV_OLD_IMAP_PASSWORD (default: oldpass)
 //
 // 开发用 IMAP：在 127.0.0.1:1143 起内存邮件服务器，供邮件搬家联调。
 package main
@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -92,9 +93,16 @@ func sentMsg(i int, date time.Time) string {
 		i, date.Format("Mon, 02 Jan 2006 15:04:05 -0700"), i, i)
 }
 
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
 func main() {
 	addr := "127.0.0.1:1143"
-	zhang := imapmemserver.NewUser("zhang@wittyloong.com", "zhang-app-pass")
+	zhang := imapmemserver.NewUser("zhang@wittyloong.com", envOr("WITTYCHAT_DEV_IMAP_PASSWORD", "imappass"))
 	mk(zhang, "INBOX", nil)
 	mk(zhang, "已发送", []imap.MailboxAttr{"\\Sent"})
 	mk(zhang, "项目/2024", nil)
@@ -131,7 +139,7 @@ func main() {
 		appendMsg(zhang, "Trash", plain(200+i, base), nil, base)
 	}
 
-	old := imapmemserver.NewUser("old@feishu-old.test", "old-pass")
+	old := imapmemserver.NewUser("old@feishu-old.test", envOr("WITTYCHAT_DEV_OLD_IMAP_PASSWORD", "oldpass"))
 	mk(old, "INBOX", nil)
 	for i := 0; i < 20; i++ {
 		appendMsg(old, "INBOX", plain(300+i, base), nil, base)

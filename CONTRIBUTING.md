@@ -23,17 +23,19 @@ code, private customer data or generated code whose provenance cannot be reviewe
 详见 [构建指南](docs/GETTING_STARTED.md)。先安装锁定的前端依赖并构建 admin SPA。
 
 ```bash
+python scripts/gen_dev_env.py
+set -a; . deploy/dev.env; set +a
 go build ./...
 go vet ./...
 golangci-lint run ./...
-WITTYCHAT_TEST_DB_URL='postgres://wittychat:wittychat@localhost:5432/wittychat_test?sslmode=disable' go test -p 1 ./...
+go test -p 1 ./...
 corepack pnpm --dir desktop/frontend test
 corepack pnpm --dir desktop/frontend build
 corepack pnpm --dir admin build
 ```
 
-**只能用独立测试数据库。** 集成测试未设置 `WITTYCHAT_TEST_DB_URL` 会跳过；
-不要把“跳过”当作通过。各包共享测试库，全量测试使用 `-p 1`。
+**只能用独立测试数据库。** `deploy/dev.env` 提供 `WITTYCHAT_TEST_DB_URL`；
+集成测试未设置该变量会跳过，不要把“跳过”当作通过。各包共享测试库，全量测试使用 `-p 1`。
 S3 测试需要单独的测试桶和 `WITTYCHAT_TEST_S3_*`，不得指向生产存储。
 对权限、同步、水印、幂等和数据生命周期的修改，应补有行为意义的回归覆盖。
 

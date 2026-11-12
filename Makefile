@@ -1,7 +1,7 @@
 GO ?= go
 GOLANGCI ?= golangci-lint
 MIGRATE ?= migrate
-DB_URL ?= postgres://wittychat:wittychat@localhost:5432/wittychat?sslmode=disable
+DB_URL ?= postgres://wittychat@localhost:5432/wittychat?sslmode=disable
 
 .PHONY: build lint fmt test tidy migrate-up migrate-down dev-up dev-down
 
@@ -27,7 +27,7 @@ migrate-down: ## Roll back one migration / 回退一步
 	$(MIGRATE) -path core/migrations -database "$(DB_URL)" down 1
 
 dev-up: ## Start dev dependencies (Postgres) / 启动开发依赖
-	docker compose -f deploy/docker-compose.dev.yml up -d
+	docker compose --env-file deploy/dev.env -f deploy/docker-compose.dev.yml up -d
 
 serve: ## Run server with dev defaults (auto-detects OnlyOffice on :8180)
 	./server.exe serve
@@ -36,7 +36,7 @@ worker-run:
 	./worker.exe
 
 dev-down:
-	docker compose -f deploy/docker-compose.dev.yml down
+	docker compose --env-file deploy/dev.env -f deploy/docker-compose.dev.yml down
 
 bindings: ## Regenerate Wails TS bindings / 重新生成前端绑定
 	cd desktop && wails3 generate bindings

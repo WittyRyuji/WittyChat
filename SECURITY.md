@@ -21,7 +21,7 @@ response time or automatic bounty.
 ## Deployment checklist / 部署检查
 
 - Use HTTPS, correct `WITTYCHAT_PUBLIC_URL`, strong unique secrets and restricted DB/S3 access.
-- Never expose development Compose defaults or WebView2 debugging ports publicly.
+- Never expose development Compose services or WebView2 debugging ports publicly.
 - Back up PostgreSQL, object bytes **and `data/secret.key`** together. Losing the key
   can make encrypted credentials unreadable. Server and worker need the same key.
 - Keep session tokens out of screenshots/logs; review who can administer/audit the workspace.
@@ -29,4 +29,4 @@ response time or automatic bounty.
 - Do not rely on alpha as the sole copy of important or regulated data.
 - Treat Feishu/IMAP credentials as tenant-wide sensitive access and use test tenants first.
 
-仓库中的开发密码和模拟服务凭据不是生产秘密，严禁直接用于生产。
+仓库只保留 `adminpass` / `alicepass` 这类无意义开发弱口令；服务密钥由 `scripts/gen_dev_env.py` 在本机生成并写入 gitignored 的 `deploy/dev.env`。严禁把开发口令或服务端口用于生产。

@@ -83,7 +83,7 @@ func envOr(key, fallback string) string {
 }
 
 func dbURL() string {
-	return envOr("WITTYCHAT_DB_URL", "postgres://wittychat:wittychat@localhost:5432/wittychat?sslmode=disable")
+	return envOr("WITTYCHAT_DB_URL", "postgres://wittychat@localhost:5432/wittychat?sslmode=disable")
 }
 
 func publicURL() string {

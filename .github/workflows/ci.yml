@@ -24,7 +24,7 @@ jobs:
         image: postgres:17-alpine
         env:
           POSTGRES_USER: wittychat
-          POSTGRES_PASSWORD: ci-test-only
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: wittychat_test
         ports: ["5432:5432"]
         options: >-
@@ -32,7 +32,7 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       CGO_ENABLED: "0"
-      WITTYCHAT_TEST_DB_URL: postgres://wittychat:ci-test-only@localhost:5432/wittychat_test?sslmode=disable
+      WITTYCHAT_TEST_DB_URL: postgres://wittychat@localhost:5432/wittychat_test?sslmode=disable
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

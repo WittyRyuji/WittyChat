@@ -2,7 +2,7 @@
 """Dev-environment seeder for WittyChat.
 
 Assumes a freshly reset database with the bootstrap admin
-(admin@wittyloong.com / DevPass123!). Creates Alice/Carol itself —
+(admin@wittyloong.com / adminpass). Creates Alice/Carol itself —
 an existing user that logs in with the expected password is reused, a
 still-pending one is activated via an admin-issued activation link.
 Content (messages, stickers, mail) is NOT deduplicated: run it once per
@@ -34,14 +34,15 @@ OUT_DIR = os.path.join(tempfile.gettempdir(), "wc_seed")
 FIX_DIR = os.path.join(OUT_DIR, "fixtures")
 MANIFEST = os.path.join(OUT_DIR, "manifest.json")
 
-ADMIN = ("admin@wittyloong.com", "DevPass123!")
+ADMIN = (os.environ.get("WITTYCHAT_DEV_ADMIN_EMAIL", "admin@wittyloong.com"),
+         os.environ.get("WITTYCHAT_DEV_ADMIN_PASSWORD", "adminpass"))
 # The user's known dev passwords are shorter than the NIST 15-char
 # default, so the script first relaxes security.min_password to the
 # validation floor of 8 — a DEV-ONLY policy relaxation via the real
 # admin settings API (do not ship this against production).
 USERS = [
-    ("alice@wittyloong.com", "Alice", "AlicePass123!"),
-    ("carol@wittyloong.com", "Carol", "CarolPass123"),
+    (os.environ.get("WITTYCHAT_DEV_ALICE_EMAIL", "alice@wittyloong.com"), "Alice", os.environ.get("WITTYCHAT_DEV_ALICE_PASSWORD", "alicepass")),
+    (os.environ.get("WITTYCHAT_DEV_CAROL_EMAIL", "carol@wittyloong.com"), "Carol", os.environ.get("WITTYCHAT_DEV_CAROL_PASSWORD", "carolpass")),
 ]
 
 

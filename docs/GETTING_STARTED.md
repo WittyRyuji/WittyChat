@@ -53,6 +53,19 @@ cd desktop
 go build -tags production -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui" -o bin/wittychat.exe .
 ```
 
+For local dev dependencies, generate a gitignored environment once and load it
+in the shell that runs server, worker or test scripts:
+
+```bash
+python scripts/gen_dev_env.py
+set -a; . deploy/dev.env; set +a
+docker compose --env-file deploy/dev.env -f deploy/docker-compose.dev.yml up -d postgres
+```
+
+The generated file contains random database, Garage and OnlyOffice secrets.
+Application fixture accounts intentionally use weak placeholders such as
+`adminpass`; never expose them outside localhost or reuse them in production.
+
 The admin SPA, desktop `dist` and Wails `frontend/bindings` directories are generated, not committed.
 Generate Wails bindings before building the desktop frontend. The CLI must be on PATH.
 Build them before compiling packages that embed them. Linux server/worker can be

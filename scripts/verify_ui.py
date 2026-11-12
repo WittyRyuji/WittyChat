@@ -1,7 +1,10 @@
 # UI smoke for the hardening batch — drives WebView2 over CDP.
 # -*- coding: utf-8 -*-
-import json, sys, time, urllib.request
+import json, os, sys, time, urllib.request
 import websocket
+
+ALICE_EMAIL = os.environ.get("WITTYCHAT_DEV_ALICE_EMAIL", "alice@wittyloong.com")
+ALICE_PASSWORD = os.environ.get("WITTYCHAT_DEV_ALICE_PASSWORD", "alicepass")
 
 sys.stdout.reconfigure(encoding="utf-8")
 PORT = 9333
@@ -34,10 +37,10 @@ def key(text):
 # 1. ensure logged in + a conversation open
 print("logged in:", ev("!!document.querySelector('.rail')"))
 if not ev("!!document.querySelector('.rail')"):
-    print(ev("""(async()=>{const set=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+    print(ev(f"""(async()=>{{const set=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
       const [e,p]=document.querySelectorAll('input');const b=[...document.querySelectorAll('button')].find(x=>/登|login/i.test(x.textContent));
-      set.call(e,'alice@wittyloong.com');e.dispatchEvent(new Event('input',{bubbles:true}));
-      set.call(p,'AlicePass123!');p.dispatchEvent(new Event('input',{bubbles:true}));b.click();return 'login-sent'})()""", 1.5))
+      set.call(e,{json.dumps(ALICE_EMAIL)});e.dispatchEvent(new Event('input',{{bubbles:true}}));
+      set.call(p,{json.dumps(ALICE_PASSWORD)});p.dispatchEvent(new Event('input',{{bubbles:true}}));b.click();return 'login-sent'}})()""", 1.5))
     time.sleep(2)
 
 ev("""(()=>{const c=[...document.querySelectorAll('.conv')].find(x=>/工程部|Ryuji/.test(x.textContent))||document.querySelector('.conv');c?.click();return c?.textContent.trim().slice(0,30)})()""")
