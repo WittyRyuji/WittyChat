@@ -30,7 +30,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Desktop build failed" }
 } finally { Pop-Location }
 
-$documents = @("README.md", "README.en.md", "LICENSE", "VERSION", "CHANGELOG.md",
+$documents = @("README.md", "README.zh-CN.md", "LICENSE", "VERSION", "CHANGELOG.md",
     "CONTRIBUTING.md", "CLA.md", "GOVERNANCE.md", "SECURITY.md",
     "CODE_OF_CONDUCT.md", "THIRD_PARTY_NOTICES.md")
 foreach ($file in $documents) { Copy-Item "$root/$file" $stage }
