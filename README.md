@@ -1,5 +1,10 @@
 # WittyChat
 
+[![CI 状态](https://img.shields.io/github/actions/workflow/status/WittyRyuji/WittyChat/ci.yml?branch=main&style=flat-square&logo=github&label=CI)](https://github.com/WittyRyuji/WittyChat/actions/workflows/ci.yml)
+[![最新版本（含预发布）](https://img.shields.io/github/v/release/WittyRyuji/WittyChat?include_prereleases&sort=semver&style=flat-square&label=release)](https://github.com/WittyRyuji/WittyChat/releases)
+[![开源许可证](https://img.shields.io/github/license/WittyRyuji/WittyChat?style=flat-square&color=blue)](LICENSE)
+[![Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078D4?style=flat-square)](docs/GETTING_STARTED.md)
+
 **沟通、邮件、协作文档，以及面向 Agent 的企业工作空间。**
 
 An open-source, self-hostable enterprise workspace built for the agent era.

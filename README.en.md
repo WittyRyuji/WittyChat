@@ -1,5 +1,10 @@
 # WittyChat
 
+[![CI status](https://img.shields.io/github/actions/workflow/status/WittyRyuji/WittyChat/ci.yml?branch=main&style=flat-square&logo=github&label=CI)](https://github.com/WittyRyuji/WittyChat/actions/workflows/ci.yml)
+[![Latest release including prereleases](https://img.shields.io/github/v/release/WittyRyuji/WittyChat?include_prereleases&sort=semver&style=flat-square&label=release)](https://github.com/WittyRyuji/WittyChat/releases)
+[![License](https://img.shields.io/github/license/WittyRyuji/WittyChat?style=flat-square&color=blue)](LICENSE)
+[![Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078D4?style=flat-square)](docs/GETTING_STARTED.md)
+
 **A self-hostable enterprise workspace for the agent era.**
 
 [简体中文](README.md) · [Releases](https://github.com/WittyRyuji/WittyChat/releases) ·
