@@ -13,7 +13,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@tiptap/core": "^2.27.3",
+    "@tiptap/core": "^3.30.5",
     "@tiptap/extension-collaboration": "^2.27.3",
     "@tiptap/extension-collaboration-cursor": "^2.26.2",
     "@tiptap/extension-color": "^2.27.3",
