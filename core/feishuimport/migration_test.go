@@ -557,3 +557,86 @@ func TestRunMigratePipeline(t *testing.T) {
 		t.Fatalf("not finished: %+v", mg)
 	}
 }
+
+func TestRunMigrateScopes(t *testing.T) {
+	// Mail scope queues mail but neither imports wiki nor sends doc invites.
+	s, ctx, m, _, admin := migEnv(t)
+	mkUser(ctx, t, s, m.email("old"))
+	if err := s.StartMigrationScope(ctx, admin, true, false, "mail"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunMigrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mg, err := s.GetMigration(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mg.Scope != "mail" || mg.WikiJob != nil {
+		t.Fatalf("mail scope %+v", mg)
+	}
+	var tasks int
+	_ = s.pool.QueryRow(ctx, `SELECT count(*) FROM bg_tasks WHERE kind='feishu_mail' AND status='queued'`).Scan(&tasks)
+	if tasks != 3 {
+		t.Fatalf("mail tasks=%d want 3", tasks)
+	}
+	for _, b := range m.botText {
+		if strings.Contains(b, "一键导入我的飞书文档") {
+			t.Fatal("mail scope sent a docs notice")
+		}
+	}
+
+	// Adding docs while mail is running widens the same migration to "all".
+	if err := s.StartMigrationScope(ctx, admin, true, false, "docs"); err != nil {
+		t.Fatal(err)
+	}
+	mg, err = s.GetMigration(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mg.Scope != "all" {
+		t.Fatalf("widened scope=%s want all", mg.Scope)
+	}
+	if err := s.RunMigrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	notes := 0
+	for _, b := range m.botText {
+		if strings.Contains(b, "一键导入我的飞书文档") {
+			notes++
+		}
+	}
+	if notes != 3 {
+		t.Fatalf("widened docs notices=%d", notes)
+	}
+
+	// Docs scope imports docs/notifies people without queuing any mailbox pass.
+	s, ctx, m, _, admin = migEnv(t)
+	mkUser(ctx, t, s, m.email("old"))
+	if err := s.StartMigrationScope(ctx, admin, true, true, "docs"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunMigrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mg, err = s.GetMigration(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mg.Scope != "docs" || mg.Status != "finished" {
+		t.Fatalf("docs scope %+v", mg)
+	}
+	_ = s.pool.QueryRow(ctx, `SELECT count(*) FROM bg_tasks WHERE kind='feishu_mail'`).Scan(&tasks)
+	if tasks != 0 {
+		t.Fatalf("docs scope queued %d mail tasks", tasks)
+	}
+	notes = 0
+	for _, b := range m.botText {
+		if strings.Contains(b, "一键导入我的飞书文档") {
+			notes++
+		}
+	}
+	if notes != 3 {
+		t.Fatalf("docs notices=%d", notes)
+	}
+}

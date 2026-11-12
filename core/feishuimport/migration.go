@@ -1,14 +1,12 @@
 package feishuimport
 
-// Whole-tenant migration orchestrator. One admin click runs, in order:
-// directory sync → account provisioning (+ activation links via the bot) →
-// a full mail pass for every person → import of every wiki space the app can
-// see → a bot note asking each employee to one-click import their personal
-// docs. While "continuous" is on, mail keeps catching up incrementally so
-// the MX switch can happen at any time; Finish runs a last full pass.
-// 整体迁移编排：同步通讯录 → 建号并发激活链接 → 每人全量搬邮件 → 导入应用可见的全部
-// 知识库 → 通知员工一键导入个人文档。持续同步期间邮件增量追平，随时可切 MX；
-// 完成时再跑一轮全量。
+// Feishu migration orchestrator. Directory sync and optional account
+// provisioning are shared; the scope selects mail, docs or the original
+// whole-tenant pipeline. While "continuous" is on, mail keeps catching up
+// incrementally so the MX switch can happen at any time; Finish runs a last
+// full pass.
+// 飞书迁移编排：通讯录同步与可选建号是公共步骤，scope 区分邮件、文档或原整体
+// 流程。持续同步期间邮件增量追平，随时可切 MX；完成时再跑一轮全量。
 
 import (
 	"context"
@@ -27,6 +25,7 @@ const MailSyncEvery = 30 * time.Minute
 // Migration is the singleton state plus roll-up counts for the wizard.
 type Migration struct {
 	Status      string     `json:"status"`
+	Scope       string     `json:"scope"`
 	Provision   bool       `json:"provision"`
 	Continuous  bool       `json:"continuous"`
 	StartedAt   *time.Time `json:"started_at"`
@@ -54,9 +53,9 @@ func (s *Store) GetMigration(ctx context.Context) (*Migration, error) {
 	s.ensureMigration(ctx)
 	m := &Migration{}
 	err := s.pool.QueryRow(ctx, `
-		SELECT status,provision,continuous,started_at,dir_synced_at,finished_at,wiki_job,COALESCE(last_error,'')
+		SELECT status,scope,provision,continuous,started_at,dir_synced_at,finished_at,wiki_job,COALESCE(last_error,'')
 		FROM feishu_migration WHERE id`).
-		Scan(&m.Status, &m.Provision, &m.Continuous, &m.StartedAt, &m.DirSyncedAt, &m.FinishedAt, &m.WikiJob, &m.LastError)
+		Scan(&m.Status, &m.Scope, &m.Provision, &m.Continuous, &m.StartedAt, &m.DirSyncedAt, &m.FinishedAt, &m.WikiJob, &m.LastError)
 	if err != nil {
 		return nil, err
 	}
@@ -78,14 +77,53 @@ func (s *Store) GetMigration(ctx context.Context) (*Migration, error) {
 // StartMigration kicks off (or re-runs) the whole pipeline in the worker.
 // 启动（或重跑）整体迁移，由 worker 执行。
 func (s *Store) StartMigration(ctx context.Context, by uuid.UUID, provision, continuous bool) error {
+	return s.StartMigrationScope(ctx, by, provision, continuous, "all")
+}
+
+// StartMigrationScope starts a mail-only, docs-only or whole-tenant pass.
+// scope=docs cannot run continuous mail sync. scope=mail 不触碰文档任务。
+func (s *Store) StartMigrationScope(ctx context.Context, by uuid.UUID, provision, continuous bool, scope string) error {
+	if scope == "" {
+		scope = "all"
+	}
+	switch scope {
+	case "all", "mail":
+	case "docs":
+		continuous = false
+	default:
+		return errors.New("invalid migration scope")
+	}
 	if _, err := s.appCreds(ctx); err != nil {
 		return err
 	}
 	s.ensureMigration(ctx)
+
+	// Starting docs while mail is running widens the active run to "all"
+	// instead of switching off continuous mail sync (and vice versa).
+	var oldStatus, oldScope string
+	var oldProvision, oldContinuous bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT status,scope,provision,continuous FROM feishu_migration WHERE id`).
+		Scan(&oldStatus, &oldScope, &oldProvision, &oldContinuous); err != nil {
+		return err
+	}
+	active := oldStatus == "running" || oldStatus == "syncing" || oldStatus == "finishing"
+	force := active && oldScope != scope
+	if force {
+		scope = "all"
+		if continuous || oldContinuous {
+			continuous = true
+		}
+	}
+	provision = provision || (force && oldProvision)
 	if _, err := s.pool.Exec(ctx, `
-		UPDATE feishu_migration SET status='running', provision=$1, continuous=$2, started_by=$3,
+		UPDATE feishu_migration SET status='running', scope=$1, provision=$2, continuous=$3, started_by=$4,
 		  started_at=COALESCE(started_at, now()), finished_at=NULL, last_error=NULL WHERE id`,
-		provision, continuous, by); err != nil {
+		scope, provision, continuous, by); err != nil {
+		return err
+	}
+	if force {
+		_, err := s.pool.Exec(ctx, `INSERT INTO bg_tasks (kind,payload) VALUES ('feishu_migrate','{}')`)
 		return err
 	}
 	return s.enqueueOnce(ctx, "feishu_migrate", map[string]any{})
@@ -143,18 +181,20 @@ func (s *Store) queueMail(ctx context.Context, full bool, where string) error {
 // idempotent, so a re-run only picks up what is new or failed.
 // worker 执行的迁移主流程；每步幂等，重跑只处理新增或失败的部分。
 func (s *Store) RunMigrate(ctx context.Context) error {
-	var status string
+	var status, scope string
 	var provision, continuous bool
 	var by *uuid.UUID
 	var wiki *uuid.UUID
 	if err := s.pool.QueryRow(ctx,
-		`SELECT status,provision,continuous,started_by,wiki_job FROM feishu_migration WHERE id`).
-		Scan(&status, &provision, &continuous, &by, &wiki); err != nil {
+		`SELECT status,scope,provision,continuous,started_by,wiki_job FROM feishu_migration WHERE id`).
+		Scan(&status, &scope, &provision, &continuous, &by, &wiki); err != nil {
 		return err
 	}
 	if status != "running" && status != "syncing" {
 		return nil
 	}
+	mailScope := scope == "all" || scope == "mail"
+	docsScope := scope == "all" || scope == "docs"
 	fail := func(err error) error {
 		_, _ = s.pool.Exec(ctx, `UPDATE feishu_migration SET status='error', last_error=$1 WHERE id`, err.Error())
 		return nil
@@ -169,14 +209,23 @@ func (s *Store) RunMigrate(ctx context.Context) error {
 			log.Printf("feishu migrate: provisioned %d accounts", n)
 		}
 	}
-	if err := s.queueMail(ctx, true, `mail_status IN ('none','error')`); err != nil {
-		return fail(err)
+	if mailScope {
+		if err := s.queueMail(ctx, true, `mail_status IN ('none','error')`); err != nil {
+			return fail(err)
+		}
 	}
-	if err := s.importAllWiki(ctx, by, wiki); err != nil {
-		// Wiki access is optional (the app may not be a member of any space).
-		log.Printf("feishu migrate: wiki: %v", err)
+	if docsScope {
+		if err := s.importAllWiki(ctx, by, wiki); err != nil {
+			// Wiki access is optional (the app may not be a member of any space).
+			log.Printf("feishu migrate: wiki: %v", err)
+		}
+		s.notifyDocs(ctx)
 	}
-	s.notifyDocs(ctx)
+	if !mailScope {
+		_, err := s.pool.Exec(ctx,
+			`UPDATE feishu_migration SET status='finished', finished_at=COALESCE(finished_at, now()) WHERE id`)
+		return err
+	}
 	next := "running"
 	if continuous {
 		next = "syncing"
@@ -260,13 +309,17 @@ func (s *Store) notifyDocs(ctx context.Context) {
 // and completion once the finishing pass has drained.
 // 定时：同步期增量追平邮件；每日刷新通讯录（新人建号、搬邮件）；收尾跑完即结束。
 func (s *Store) Tick(ctx context.Context) error {
-	var status string
+	var status, scope string
 	var dir *time.Time
-	if err := s.pool.QueryRow(ctx, `SELECT status, dir_synced_at FROM feishu_migration WHERE id`).Scan(&status, &dir); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT status, dir_synced_at, scope FROM feishu_migration WHERE id`).Scan(&status, &dir, &scope); err != nil {
 		return nil // no migration configured
 	}
+	mailScope := scope == "all" || scope == "mail"
 	switch status {
 	case "syncing":
+		if !mailScope {
+			return nil
+		}
 		if dir == nil || time.Since(*dir) > 24*time.Hour {
 			return s.enqueueOnce(ctx, "feishu_migrate", map[string]any{})
 		}

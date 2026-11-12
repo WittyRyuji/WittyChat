@@ -1,15 +1,21 @@
-// 飞书迁移 — one wizard: app credentials, one-click whole-tenant migration
-// (accounts, mail, wiki, personal-docs invitations), per-person progress.
-// 飞书迁移向导：应用凭据、一键整体迁移（账号、邮件、知识库、个人文档邀请）、逐人进度。
+// 飞书迁移 sections: mail belongs under 邮件搬家, docs under 文档迁移.
+// 飞书迁移按功能拆分：邮件放在邮件搬家，文档放在文档迁移。
 import { useCallback, useEffect, useState } from "react";
 import { type FIJob, type FIMigration, type FIPerson, fiApi } from "./api";
 
-const PREP = [
+const PREP_MAIL = [
 	"飞书开放平台创建企业自建应用，添加「机器人」能力，可用范围设为全部成员",
 	"通讯录：权限范围设为全部成员；开通 contact:contact.base:readonly、contact:user.base:readonly、contact:user.email:readonly",
 	"邮箱：开通 mail:user_mailbox.message:readonly、mail:user_mailbox.message.body:read、mail:user_mailbox.message.subject:read、mail:user_mailbox.message.address:read、mail:user_mailbox.folder:read，邮件数据权限范围设为全部成员",
+	"机器人消息：开通 im:message:send_as_bot（用来给员工发激活链接）",
+	"安全设置 → 重定向 URL：添加下面的回调地址；然后创建版本并发布",
+];
+
+const PREP_DOCS = [
+	"飞书开放平台创建企业自建应用，添加「机器人」能力，可用范围设为全部成员",
+	"通讯录：权限范围设为全部成员；开通 contact:contact.base:readonly、contact:user.base:readonly、contact:user.email:readonly",
 	"云文档：开通 docs:document:export、drive:drive:readonly、wiki:wiki:readonly；需要搬的知识库把应用加为成员",
-	"机器人消息：开通 im:message:send_as_bot（用来给员工发激活链接和导入提醒）",
+	"机器人消息：开通 im:message:send_as_bot（用来通知员工授权个人文档）",
 	"安全设置 → 重定向 URL：添加下面的回调地址；然后创建版本并发布",
 ];
 
@@ -20,6 +26,12 @@ const STATUS: Record<FIMigration["status"], string> = {
 	finishing: "收尾中（最后一轮全量）",
 	finished: "已完成",
 	error: "出错",
+};
+
+const SCOPE: Record<FIMigration["scope"], string> = {
+	all: "邮件 + 文档",
+	mail: "邮件",
+	docs: "文档",
 };
 
 const MAIL: Record<string, string> = {
@@ -47,7 +59,8 @@ const when = (s?: string) =>
 			})
 		: "";
 
-export function FeishuImport() {
+export function FeishuImport({ view }: { view: "mail" | "docs" }) {
+	const mail = view === "mail";
 	const [app, setApp] = useState<{
 		configured: boolean;
 		app_id: string;
@@ -110,6 +123,10 @@ export function FeishuImport() {
 	const pending = people.filter(
 		(p) => p.provisioned && p.user_status === "pending",
 	).length;
+	const prep = mail ? PREP_MAIL : PREP_DOCS;
+	const activeOtherScope =
+		live && mig && mig.scope !== "all" && mig.scope !== view;
+	const startText = mail ? "开始邮件迁移" : "开始文档迁移";
 
 	return (
 		<section>
@@ -182,9 +199,9 @@ export function FeishuImport() {
 					</div>
 				)}
 				<details>
-					<summary>应用需要的权限（一次性配置）</summary>
+					<summary>应用需要的权限（{mail ? "邮件迁移" : "文档迁移"}）</summary>
 					<ol className="guide">
-						{PREP.map((g) => (
+						{prep.map((g) => (
 							<li key={g}>{g}</li>
 						))}
 					</ol>
@@ -192,22 +209,29 @@ export function FeishuImport() {
 			</div>
 
 			<div className="panel">
-				<h3>2. 整体迁移</h3>
+				<h3>2. {mail ? "邮件迁移" : "文档迁移"}</h3>
 				{mig && (
 					<>
 						<p>
 							状态：<b>{STATUS[mig.status]}</b>
+							<span className="muted"> · 范围：{SCOPE[mig.scope]}</span>
 							{mig.last_error && (
 								<span className="err"> — {mig.last_error}</span>
 							)}
 						</p>
 						<p className="muted">
 							在职 {mig.people} 人 · 已关联账号 {mig.linked} · 新建{" "}
-							{mig.provisioned}
-							（已激活 {mig.activated}）· 邮件完成 {mig.mail_done_people} 人 /
-							进行中 {mig.mail_running_people} / 出错 {mig.mail_error_people} ·
-							已搬 {mig.messages} 封 · 个人文档已授权 {mig.docs_authorized} 人
+							{mig.provisioned}（已激活 {mig.activated}）
+							{mail &&
+								` · 邮件完成 ${mig.mail_done_people} 人 / 进行中 ${mig.mail_running_people} / 出错 ${mig.mail_error_people} · 已搬 ${mig.messages} 封`}
+							{!mail && ` · 个人文档已授权 ${mig.docs_authorized} 人`}
 						</p>
+						{activeOtherScope && (
+							<p className="warn">
+								当前正在运行{SCOPE[mig.scope]}迁移；启动这里会合并为「邮件 +
+								文档」，不会中断原任务。
+							</p>
+						)}
 					</>
 				)}
 				<label className="row">
@@ -218,14 +242,16 @@ export function FeishuImport() {
 					/>
 					为没有 WittyChat 账号的员工自动建号，并由飞书机器人私信激活链接
 				</label>
-				<label className="row">
-					<input
-						type="checkbox"
-						checked={continuous}
-						onChange={(e) => setContinuous(e.target.checked)}
-					/>
-					持续同步新邮件（每 30 分钟），直到点「完成迁移」
-				</label>
+				{mail && (
+					<label className="row">
+						<input
+							type="checkbox"
+							checked={continuous}
+							onChange={(e) => setContinuous(e.target.checked)}
+						/>
+						持续同步新邮件（每 30 分钟），直到点「完成迁移」
+					</label>
+				)}
 				<div className="row">
 					<button
 						type="button"
@@ -247,29 +273,33 @@ export function FeishuImport() {
 						disabled={busy || !app?.configured || mig?.status === "finishing"}
 						onClick={() =>
 							confirm(
-								"开始整体迁移？将同步通讯录、按设置建号、为每个人搬邮件、导入应用可见的知识库，并通知员工一键导入个人文档。",
+								mail
+									? "开始飞书邮件迁移？将同步通讯录、按设置建号，并为每个人搬邮件。"
+									: "开始飞书文档迁移？将同步通讯录、按设置建号、导入应用可见的知识库，并通知员工授权个人文档。",
 							) &&
 							run(
-								() => fiApi.migStart(provision, continuous),
+								() => fiApi.migStart(provision, mail && continuous, view),
 								"已开始，进度见下方",
 							)
 						}
 					>
-						{mig && mig.status !== "idle" ? "重新运行" : "开始迁移"}
+						{mig && mig.status !== "idle" ? "重新运行" : startText}
 					</button>
-					<button
-						type="button"
-						disabled={
-							busy || (mig?.status !== "running" && mig?.status !== "syncing")
-						}
-						onClick={() =>
-							confirm(
-								"确认域名 MX 已切到 WittyChat？将对每个人再跑一轮全量补齐，完成后停止同步。",
-							) && run(() => fiApi.migFinish())
-						}
-					>
-						完成迁移
-					</button>
+					{mail && (
+						<button
+							type="button"
+							disabled={
+								busy || (mig?.status !== "running" && mig?.status !== "syncing")
+							}
+							onClick={() =>
+								confirm(
+									"确认域名 MX 已切到 WittyChat？将对每个人再跑一轮全量补齐，完成后停止同步。",
+								) && run(() => fiApi.migFinish())
+							}
+						>
+							完成迁移
+						</button>
+					)}
 					{pending > 0 && (
 						<button
 							type="button"
@@ -287,8 +317,9 @@ export function FeishuImport() {
 					)}
 				</div>
 				<p className="muted">
-					迁移开始后随时可以把域名 MX 指向
-					WittyChat，持续同步会补上切换期间的邮件；确认无误后点「完成迁移」。
+					{mail
+						? "迁移开始后随时可以把域名 MX 指向 WittyChat，持续同步会补上切换期间的邮件；确认无误后点「完成迁移」。"
+						: "知识库由应用凭据批量导入；个人文档需要员工在 WittyChat 桌面端「文档」里点「一键导入我的飞书文档」并授权一次。"}
 				</p>
 				{note && <p className="ok">{note}</p>}
 				{err && <p className="err">{err}</p>}
@@ -303,9 +334,8 @@ export function FeishuImport() {
 							<th>邮箱</th>
 							<th>WittyChat 账号</th>
 							<th>激活链接</th>
-							<th>邮件</th>
-							<th>个人文档</th>
-							<th />
+							{mail ? <th>邮件</th> : <th>个人文档</th>}
+							{mail && <th />}
 						</tr>
 					</thead>
 					<tbody>
@@ -326,63 +356,77 @@ export function FeishuImport() {
 										when(p.link_sent_at)
 									)}
 								</td>
-								<td>
-									{MAIL[p.mail_status] ?? p.mail_status}
-									{p.mail_done > 0 && ` · ${p.mail_done} 封`}
-									{p.mail_failed > 0 && (
-										<span className="err"> · 失败 {p.mail_failed}</span>
-									)}
-									{p.mail_error && <div className="err">{p.mail_error}</div>}
-								</td>
-								<td>{p.docs_authorized ? "已授权" : "—"}</td>
-								<td>
-									{p.user_id && p.mail_status !== "running" && (
-										<button
-											type="button"
-											className="ghost"
-											disabled={busy}
-											onClick={() => run(() => fiApi.personMail(p.open_id))}
-										>
-											重搬邮件
-										</button>
-									)}
-								</td>
+								{mail ? (
+									<td>
+										{MAIL[p.mail_status] ?? p.mail_status}
+										{p.mail_done > 0 && ` · ${p.mail_done} 封`}
+										{p.mail_failed > 0 && (
+											<span className="err"> · 失败 {p.mail_failed}</span>
+										)}
+										{p.mail_error && <div className="err">{p.mail_error}</div>}
+									</td>
+								) : (
+									<td>{p.docs_authorized ? "已授权" : "—"}</td>
+								)}
+								{mail && (
+									<td>
+										{p.user_id && p.mail_status !== "running" && (
+											<button
+												type="button"
+												className="ghost"
+												disabled={busy}
+												onClick={() => run(() => fiApi.personMail(p.open_id))}
+											>
+												重搬邮件
+											</button>
+										)}
+									</td>
+								)}
 							</tr>
 						))}
 					</tbody>
 				</table>
 				{people.length === 0 && (
 					<p className="muted">
-						还没有人员数据，先点「预览人员」或「开始迁移」。
+						还没有人员数据，先点「预览人员」或「{startText}」。
 					</p>
 				)}
 			</div>
 
-			<div className="panel">
-				<h3>文档导入任务</h3>
-				<table className="tbl">
-					<thead>
-						<tr>
-							<th>任务</th>
-							<th>模式</th>
-							<th>状态</th>
-							<th>完成/跳过/失败/待</th>
-						</tr>
-					</thead>
-					<tbody>
-						{jobs.map((j) => (
-							<tr key={j.id}>
-								<td>{j.name}</td>
-								<td>{j.mode === "admin" ? "批量" : "员工自助"}</td>
-								<td>{j.status}</td>
-								<td>
-									{j.done}/{j.skipped}/{j.failed}/{j.pending}
-								</td>
+			{!mail && (
+				<div className="panel">
+					<h3>文档导入任务</h3>
+					<table className="tbl">
+						<thead>
+							<tr>
+								<th>任务</th>
+								<th>模式</th>
+								<th>状态</th>
+								<th>完成/跳过/失败/待</th>
 							</tr>
-						))}
-					</tbody>
-				</table>
-			</div>
+						</thead>
+						<tbody>
+							{jobs.map((j) => (
+								<tr key={j.id}>
+									<td>{j.name}</td>
+									<td>{j.mode === "admin" ? "批量" : "员工自助"}</td>
+									<td>{j.status}</td>
+									<td>
+										{j.done}/{j.skipped}/{j.failed}/{j.pending}
+									</td>
+								</tr>
+							))}
+							{jobs.length === 0 && (
+								<tr>
+									<td colSpan={4} className="muted">
+										暂无文档导入任务
+									</td>
+								</tr>
+							)}
+						</tbody>
+					</table>
+				</div>
+			)}
 		</section>
 	);
 }

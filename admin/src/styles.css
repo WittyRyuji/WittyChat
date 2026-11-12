@@ -58,6 +58,22 @@ input {
 	margin: 0 auto;
 	padding: 0 20px 40px;
 }
+.seg {
+	display: inline-flex;
+	border: 1px solid var(--line);
+	border-radius: 9px;
+	overflow: hidden;
+}
+.seg button {
+	background: transparent;
+	border: 0;
+	color: var(--dim);
+	padding: 7px 12px;
+}
+.seg button.on {
+	background: var(--accent);
+	color: #fff;
+}
 .topbar {
 	display: flex;
 	align-items: center;

@@ -23,7 +23,7 @@ export function App() {
 	const [me, setMe] = useState<User | null>(null);
 	const [ready, setReady] = useState(false);
 	const [tab, setTab] = useState<
-		"users" | "storage" | "security" | "mailimport" | "feishu" | "audit"
+		"users" | "storage" | "security" | "mailimport" | "docimport" | "audit"
 	>("users");
 
 	useEffect(() => {
@@ -51,7 +51,7 @@ export function App() {
 							"storage",
 							"security",
 							"mailimport",
-							"feishu",
+							"docimport",
 							"audit",
 						] as const
 					).map((t) => (
@@ -69,8 +69,8 @@ export function App() {
 										? "安全策略"
 										: t === "mailimport"
 											? "邮件搬家"
-											: t === "feishu"
-												? "飞书迁移"
+											: t === "docimport"
+												? "文档迁移"
 												: "审计日志"}
 						</button>
 					))}
@@ -92,7 +92,7 @@ export function App() {
 			{tab === "storage" && <Storage />}
 			{tab === "security" && <Security />}
 			{tab === "mailimport" && <MailImport />}
-			{tab === "feishu" && <FeishuImport />}
+			{tab === "docimport" && <FeishuImport view="docs" />}
 			{tab === "audit" && <Audit />}
 		</div>
 	);

@@ -6,6 +6,7 @@ import {
 	type MITestResult,
 	miApi,
 } from "./api";
+import { FeishuImport } from "./FeishuImport";
 
 const fmtBytes = (n: number) =>
 	n > 1e9
@@ -25,6 +26,34 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 export function MailImport() {
+	const [mode, setMode] = useState<"imap" | "feishu">("imap");
+	return (
+		<div>
+			<div className="row" style={{ justifyContent: "space-between" }}>
+				<h3>邮件搬家</h3>
+				<div className="seg" role="tablist" aria-label="邮件来源">
+					<button
+						type="button"
+						className={mode === "imap" ? "on" : ""}
+						onClick={() => setMode("imap")}
+					>
+						IMAP 通用搬家
+					</button>
+					<button
+						type="button"
+						className={mode === "feishu" ? "on" : ""}
+						onClick={() => setMode("feishu")}
+					>
+						飞书一键迁移
+					</button>
+				</div>
+			</div>
+			{mode === "imap" ? <ImapMailImport /> : <FeishuImport view="mail" />}
+		</div>
+	);
+}
+
+function ImapMailImport() {
 	const [jobs, setJobs] = useState<MIJob[]>([]);
 	const [sel, setSel] = useState<string | null>(null);
 	const [showCreate, setShowCreate] = useState(false);
@@ -48,7 +77,7 @@ export function MailImport() {
 	return (
 		<div>
 			<div className="row" style={{ justifyContent: "space-between" }}>
-				<h3>邮件搬家（IMAP）</h3>
+				<h3>IMAP 搬家</h3>
 				<button
 					type="button"
 					className="primary"

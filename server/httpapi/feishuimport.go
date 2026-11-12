@@ -356,8 +356,9 @@ func (d *Deps) fiMigGet(ctx context.Context, in *struct{ Headers }) (*struct{ Bo
 func (d *Deps) fiMigStart(ctx context.Context, in *struct {
 	Headers
 	Body struct {
-		Provision  bool `json:"provision"`
-		Continuous bool `json:"continuous"`
+		Provision  bool   `json:"provision"`
+		Continuous bool   `json:"continuous"`
+		Scope      string `json:"scope"`
 	}
 },
 ) (*struct{}, error) {
@@ -365,11 +366,11 @@ func (d *Deps) fiMigStart(ctx context.Context, in *struct {
 	if err != nil {
 		return nil, err
 	}
-	if err := d.Feishu.StartMigration(ctx, u.ID, in.Body.Provision, in.Body.Continuous); err != nil {
+	if err := d.Feishu.StartMigrationScope(ctx, u.ID, in.Body.Provision, in.Body.Continuous, in.Body.Scope); err != nil {
 		return nil, huma.Error409Conflict(err.Error())
 	}
 	d.Audit.Log(ctx, &u.ID, audit.ActorAdmin, "feishu.migration.start", "",
-		map[string]any{"provision": in.Body.Provision, "continuous": in.Body.Continuous}, clientIPCtx(ctx))
+		map[string]any{"provision": in.Body.Provision, "continuous": in.Body.Continuous, "scope": in.Body.Scope}, clientIPCtx(ctx))
 	return &struct{}{}, nil
 }
 

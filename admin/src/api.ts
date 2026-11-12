@@ -245,10 +245,11 @@ export const fiApi = {
 	clearApp: () => req("DELETE", "/api/v1/admin/feishu/app"),
 	jobs: () => req<FIJob[]>("GET", "/api/v1/feishu/jobs?all=1"),
 	migration: () => req<FIMigration>("GET", "/api/v1/admin/feishu/migration"),
-	migStart: (provision: boolean, continuous: boolean) =>
+	migStart: (provision: boolean, continuous: boolean, scope: "mail" | "docs") =>
 		req("POST", "/api/v1/admin/feishu/migration/start", {
 			provision,
 			continuous,
+			scope,
 		}),
 	migFinish: () => req("POST", "/api/v1/admin/feishu/migration/finish"),
 	dirSync: () =>
@@ -273,6 +274,7 @@ export const fiApi = {
 
 export interface FIMigration {
 	status: "idle" | "running" | "syncing" | "finishing" | "finished" | "error";
+	scope: "all" | "mail" | "docs";
 	provision: boolean;
 	continuous: boolean;
 	started_at?: string;
